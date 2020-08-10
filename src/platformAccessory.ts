@@ -1,6 +1,6 @@
-import { Service, PlatformAccessory, CharacteristicValue, CharacteristicSetCallback, CharacteristicGetCallback } from 'homebridge';
+import { Service, PlatformAccessory, CharacteristicValue, CharacteristicSetCallback, CharacteristicGetCallback } from "homebridge";
 
-import { ExampleHomebridgePlatform } from './platform';
+import { ExampleHomebridgePlatform } from "./platform";
 
 /**
  * Platform Accessory
@@ -16,19 +16,19 @@ export class ExamplePlatformAccessory {
    */
   private exampleStates = {
     On: false,
-    Brightness: 100,
+    Brightness: 100
   }
 
   constructor(
     private readonly platform: ExampleHomebridgePlatform,
-    private readonly accessory: PlatformAccessory,
+    private readonly accessory: PlatformAccessory
   ) {
 
     // set accessory information
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
-      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
+      .setCharacteristic(this.platform.Characteristic.Manufacturer, "Default-Manufacturer")
+      .setCharacteristic(this.platform.Characteristic.Model, "Default-Model")
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, "Default-Serial");
 
     // get the LightBulb service if it exists, otherwise create a new LightBulb service
     // you can create multiple services for each accessory
@@ -47,12 +47,12 @@ export class ExamplePlatformAccessory {
 
     // register handlers for the On/Off Characteristic
     this.service.getCharacteristic(this.platform.Characteristic.On)
-      .on('set', this.setOn.bind(this))                // SET - bind to the `setOn` method below
-      .on('get', this.getOn.bind(this));               // GET - bind to the `getOn` method below
+      .on("set", this.setOn.bind(this))                // SET - bind to the `setOn` method below
+      .on("get", this.getOn.bind(this));               // GET - bind to the `getOn` method below
 
     // register handlers for the Brightness Characteristic
     this.service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .on('set', this.setBrightness.bind(this));       // SET - bind to the 'setBrightness` method below
+      .on("set", this.setBrightness.bind(this));       // SET - bind to the 'setBrightness` method below
 
     // EXAMPLE ONLY
     // Example showing how to update the state of a Characteristic asynchronously instead
@@ -67,7 +67,7 @@ export class ExamplePlatformAccessory {
       // push the new value to HomeKit
       this.service.updateCharacteristic(this.platform.Characteristic.Brightness, currentBrightness);
 
-      this.platform.log.debug('Pushed updated current Brightness state to HomeKit:', currentBrightness);
+      this.platform.log.debug("Pushed updated current Brightness state to HomeKit:", currentBrightness);
     }, 10000);
   }
 
@@ -80,7 +80,7 @@ export class ExamplePlatformAccessory {
     // implement your own code to turn your device on/off
     this.exampleStates.On = value as boolean;
 
-    this.platform.log.debug('Set Characteristic On ->', value);
+    this.platform.log.debug("Set Characteristic On ->", value);
 
     // you must call the callback function
     callback(null);
@@ -104,7 +104,7 @@ export class ExamplePlatformAccessory {
     // implement your own code to check if the device is on
     const isOn = this.exampleStates.On;
 
-    this.platform.log.debug('Get Characteristic On ->', isOn);
+    this.platform.log.debug("Get Characteristic On ->", isOn);
 
     // you must call the callback function
     // the first argument should be null if there were no errors
@@ -121,7 +121,7 @@ export class ExamplePlatformAccessory {
     // implement your own code to set the brightness
     this.exampleStates.Brightness = value as number;
 
-    this.platform.log.debug('Set Characteristic Brightness -> ', value);
+    this.platform.log.debug("Set Characteristic Brightness -> ", value);
 
     // you must call the callback function
     callback(null);

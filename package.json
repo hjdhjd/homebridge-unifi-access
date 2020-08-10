@@ -1,6 +1,5 @@
 {
-  "private": true,
-  "displayName": "Plugin Name",
+  "displayName": "UniFi Access plugin for HomeKit (Homebridge).",
   "name": "homebridge-unifi-access",
   "version": "0.0.1",
   "description": "UniFi Access plugin for HomeKit (Homebridge).",
