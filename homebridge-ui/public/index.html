@@ -1,0 +1,37 @@
+<div class="card card-body">
+  <form id="configForm">
+    <div class="form-group">
+      <label for="doorIdInput">Door ID</label>
+      <input type="text" class="form-control" id="doorIdInput" readonly>
+    </div>
+    <div class="form-group">
+      <label for="doorNameInput">Door Name</label>
+      <input type="text" class="form-control" id="doorNameInput" readonly>
+    </div>
+    <div class="form-group">
+      <label for="apiTokenInput">API-Token</label>
+      <input type="text" class="form-control" id="apiTokenInput" required>
+    </div>
+    <div class="form-group">
+      <label for="consoleHostInput">Host of the unifi access console</label>
+      <input type="text" class="form-control" id="consoleHostInput" required>
+    </div>
+    <div class="form-group">
+      <label for="consolePortInput">Port of the unifi access console</label>
+      <input type="text" class="form-control" id="consolePortInput" required>
+    </div>
+    <div class="form-group">
+      <label for="doorSelect">Doors</label>
+      <select class="custom-select" id="doorSelect"></select>
+    </div>
+    <div class="text-center">
+      <button id="getTokenButton" type="button" class="btn btn-primary">Refresh Doors</button>
+    </div>
+  </form>
+</div>
+
+<!-- Modules -->
+<script type="text/javascript" src="js/modules/jquery.min.js"></script>
+
+<!-- Main -->
+<script type="text/javascript" src="js/main.js?t=8"></script>

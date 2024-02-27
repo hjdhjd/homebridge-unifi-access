@@ -1,0 +1,13 @@
+{
+  "watch": [
+    "src",
+    "homebridge-ui"
+  ],
+  "ext": "ts",
+  "ignore": [],
+  "exec": "tsc && NODE_TLS_REJECT_UNAUTHORIZED=0 homebridge -I -D",
+  "signal": "SIGTERM",
+  "env": {
+    "NODE_OPTIONS": "--trace-warnings"
+  }
+}
