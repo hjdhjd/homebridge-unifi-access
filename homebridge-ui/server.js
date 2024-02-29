@@ -2,13 +2,8 @@ const { HomebridgePluginUiServer, RequestError } = require('@homebridge/plugin-u
 const https = require('https');
 class PluginUiServer extends HomebridgePluginUiServer {
   constructor() {
-    // super() MUST be called first
     super();
-
-    // handle request for the /token route
     this.onRequest('/fetchDoors', this.fetchDoors.bind(this));
-
-    // this MUST be called when you are ready to accept requests
     this.ready();
   }
 
@@ -27,8 +22,8 @@ class PluginUiServer extends HomebridgePluginUiServer {
         redirect: 'follow',
         agent: httpsAgent,
       };
-      console.log("REQUEST DOORS", process.env.NODE_TLS_REJECT_UNAUTHORIZED);
       const response = await fetch(`https://${payload.consoleHost}:${payload.consolePort}/api/v1/developer/doors`, requestOptions)
+
       const data = await response.json();
 
       if(data.code !== "SUCCESS" || !data.data){

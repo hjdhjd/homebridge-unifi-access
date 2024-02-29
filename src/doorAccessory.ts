@@ -1,7 +1,7 @@
-import {Service, PlatformAccessory, CharacteristicValue, PlatformConfig} from 'homebridge';
+import {PlatformAccessory, PlatformConfig, Service} from "homebridge";
 
-import { ExampleHomebridgePlatform } from './platform';
-import https from "https";
+import { ExampleHomebridgePlatform } from "./platform";
+
 
 /**
  * Platform Accessory
@@ -20,16 +20,16 @@ export class DoorAccessory {
   };
 
   constructor(
-      private readonly platform: ExampleHomebridgePlatform,
-      private readonly accessory: PlatformAccessory,
-      public readonly config: PlatformConfig
+    private readonly platform: ExampleHomebridgePlatform,
+    private readonly accessory: PlatformAccessory,
+    public readonly config: PlatformConfig
   ) {
 
     // set accessory information
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
-        .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-        .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-        .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
+      .setCharacteristic(this.platform.Characteristic.Manufacturer, "Ubiquiti")
+      .setCharacteristic(this.platform.Characteristic.Model, "Access")
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, accessory.context.device.id);
 
     // get the LightBulb service if it exists, otherwise create a new LightBulb service
     // you can create multiple services for each accessory
@@ -37,15 +37,15 @@ export class DoorAccessory {
 
     // set the service name, this is what is displayed as the default name on the Home app
     // in this example we are using the name we stored in the `accessory.context` in the `discoverDevices` method.
-    this.service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.exampleDisplayName);
+    this.service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.name);
 
     // create handlers for required characteristics
     this.service.getCharacteristic(this.platform.Characteristic.LockCurrentState)
-        .onGet(this.handleLockCurrentStateGet.bind(this));
+      .onGet(this.handleLockCurrentStateGet.bind(this));
 
     this.service.getCharacteristic(this.platform.Characteristic.LockTargetState)
-        .onGet(this.handleLockTargetStateGet.bind(this))
-        .onSet(this.handleLockTargetStateSet.bind(this));
+      .onGet(this.handleLockTargetStateGet.bind(this))
+      .onSet(this.handleLockTargetStateSet.bind(this));
 
 
   }
@@ -55,10 +55,10 @@ export class DoorAccessory {
    * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
    */
   handleLockCurrentStateGet() {
-    this.platform.log.debug('Triggered GET LockCurrentState');
+    this.platform.log.debug("Triggered GET LockCurrentState");
 
     // set this to a valid value for LockCurrentState
-    const currentValue = this.currentStates.locked
+    const currentValue = this.currentStates.locked;
 
     return currentValue;
   }
@@ -68,11 +68,9 @@ export class DoorAccessory {
    * Handle requests to get the current value of the "Lock Target State" characteristic
    */
   handleLockTargetStateGet() {
-    this.platform.log.debug('Triggered GET LockTargetState');
-
+    this.platform.log.debug("Triggered GET LockTargetState");
     // set this to a valid value for LockTargetState
-    const currentValue = this.currentStates.locked
-
+    const currentValue = this.currentStates.locked;
     return currentValue;
   }
 
@@ -82,42 +80,36 @@ export class DoorAccessory {
   async handleLockTargetStateSet(value) {
     this.currentStates.locked = value;
     if(value === this.platform.Characteristic.LockCurrentState.UNSECURED){
-      console.log("UNLOCK");
       setTimeout(()=>{
-        this.platform.log.debug('Triggered RESET LockTargetState:'+ value);
+        this.platform.log.debug("Triggered RESET LockTargetState:"+ value);
         this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
       },4000);
       if(await this. unlockDoor()){
         this.platform.log.debug(`Opened door ${this.config.doorName} successfully`);
       }else{
-        this.platform.log.debug('Failed opening door');
+        this.platform.log.debug("Failed opening door");
       }
     }
   }
 
 
   async unlockDoor(){
-    this.platform.log.debug('Triggered unlockDoor');
-    const agent = new https.Agent({
-      rejectUnauthorized: false,
-    });
+    this.platform.log.debug("Triggered unlockDoor");
     const requestHeaders = new Headers();
     requestHeaders.append("Authorization", `Bearer ${this.config.apiToken}`);
 
     const requestOptions: RequestInit = {
-      method: 'PUT',
+      method: "PUT",
       headers: requestHeaders,
-      redirect: 'follow'
+      redirect: "follow"
     };
 
     try{
-      const response = await fetch(`https://${this.config.consoleHost}:12445/api/v1/developer/doors/${this.config.doorId}/unlock`, {...requestOptions})
+      const response = await fetch(`https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors/${this.config.doorId}/unlock`, {...requestOptions});
       const data = <{code:string}>await response.json();
       return data.code === "SUCCESS";
     }catch (e: any) {
       return false;
     }
   }
-
-
 }

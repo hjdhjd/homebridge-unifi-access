@@ -1,15 +1,15 @@
 {
-  "displayName": "UniFi Access plugin for HomeKit (Homebridge).",
   "name": "homebridge-unifi-access",
+  "displayName": "UniFi Access plugin for HomeKit (Homebridge).",
   "version": "0.0.1",
   "description": "UniFi Access plugin for HomeKit (Homebridge).",
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git://github.com/pwilms/homebridge-unifi-access.git"
+    "url": "git://github.com/hjdhjd/homebridge-unifi-access.git"
   },
   "bugs": {
-    "url": "https://github.com/pwilms/homebridge-unifi-access/issues"
+    "url": "https://github.com/hjdhjd/homebridge-unifi-access/issues"
   },
   "engines": {
     "homebridge": ">=1.6.0",
@@ -18,9 +18,10 @@
   "main": "dist/index.js",
   "scripts": {
     "lint": "eslint src/**.ts",
+    "lint-fix": "eslint --fix src/**.ts",
     "watch": "npm run build && npm link && nodemon",
     "build": "rimraf ./dist && tsc",
-    "prepublishOnly": "npm run lint && npm run build"
+    "prepublishOnly": "npm run lint && npm link && npm run build"
   },
   "keywords": [
     "homebridge-plugin"
@@ -30,6 +31,7 @@
     "ws": "8.16.0"
   },
   "devDependencies": {
+    "@stylistic/eslint-plugin": "^1.6.3",
     "@types/node": "20.8.10",
     "@types/readable-stream": "4.0.4",
     "@types/ws": "8.5.8",

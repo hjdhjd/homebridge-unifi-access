@@ -1,7 +1,20 @@
-import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, Service, Characteristic } from 'homebridge';
+import {
+  API,
+  Characteristic,
+  DynamicPlatformPlugin,
+  Logger,
+  PlatformAccessory,
+  PlatformConfig,
+  Service
+} from "homebridge";
 
-import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
-import { DoorAccessory } from './doorAccessory';
+import {PLATFORM_NAME, PLUGIN_NAME} from "./settings";
+import {DoorAccessory} from "./doorAccessory";
+import {ContactSensorAccessory} from "./contactSensorAccessory";
+import {DoorsResponse} from "./interfaces/doorsResponse";
+import {Door} from "./interfaces/door";
+import {UnifiWebsocket} from "./unifiWebsocket";
+import {ContactSensorAccessoryState} from "./interfaces/contactSensorAccessoryState";
 
 /**
  * HomebridgePlatform
@@ -15,21 +28,31 @@ export class ExampleHomebridgePlatform implements DynamicPlatformPlugin {
   // this is used to track restored cached accessories
   public readonly accessories: PlatformAccessory[] = [];
 
+  public contactSensor?: ContactSensorAccessory;
+
+  public unifiWebsocket?: UnifiWebsocket;
+
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
-    public readonly api: API,
+    public readonly api: API
   ) {
-    this.log.debug('Finished initializing platform:', this.config.name);
+    this.log.debug("Finished initializing platform:", this.config.name);
+
+    if(this.config.consoleHost && this.config.consolePort){
+      this.unifiWebsocket = new UnifiWebsocket(this.config);
+    }else{
+      console.log("Cannot setup WebSocket");
+    }
 
     // When this event is fired it means Homebridge has restored all cached accessories from disk.
     // Dynamic Platform plugins should only register new accessories after this event was fired,
     // in order to ensure they weren't added to homebridge already. This event can also be used
     // to start discovery of new accessories.
-    this.api.on('didFinishLaunching', () => {
-      log.debug('Executed didFinishLaunching callback');
+    this.api.on("didFinishLaunching", async () => {
+      log.debug("Executed didFinishLaunching callback");
       // run the method to discover / register your devices as accessories
-      this.discoverDevices();
+      await this.discoverDevices();
     });
   }
 
@@ -38,7 +61,7 @@ export class ExampleHomebridgePlatform implements DynamicPlatformPlugin {
    * It should be used to setup event handlers for characteristics and update respective values.
    */
   configureAccessory(accessory: PlatformAccessory) {
-    this.log.info('Loading accessory from cache:', accessory.displayName);
+    this.log.info("Loading accessory from cache:", accessory.displayName);
 
     // add the restored accessory to the accessories cache so we can track if it has already been registered
     this.accessories.push(accessory);
@@ -49,72 +72,70 @@ export class ExampleHomebridgePlatform implements DynamicPlatformPlugin {
    * Accessories must only be registered once, previously created accessories
    * must not be registered again to prevent "duplicate UUID" errors.
    */
-  discoverDevices() {
+  async discoverDevices() {
+    const doors = await this.readDoors();
+    this.setupDoor();
+    await this.setupContactSensor(doors.data);
+  }
 
-    console.log("DISCOVER DEVICES");
+  setupDoor(){
+    const uuid = this.api.hap.uuid.generate(this.config.doorId);
+    const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
+    if (existingAccessory) {
+      this.log.info("Restoring existing accessory from cache:", existingAccessory.displayName);
+      new DoorAccessory(this, existingAccessory, this.config);
+    } else {
+      this.log.info("Adding new accessory:", this.config.doorName);
+      const accessory = new this.api.platformAccessory(this.config.doorName, uuid);
+      accessory.context.device = {
+        id: this.config.doorId,
+        name: this.config.doorName
+      };
+      new DoorAccessory(this, accessory, this.config);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    }
+  }
 
-    console.log(process.env)
+  async setupContactSensor(doors: Door[]){
+    const uuid = this.api.hap.uuid.generate(this.config.doorId+"dps");
+    const name = this.config.doorName + " Contact";
+    const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
+    if (existingAccessory) {
+      this.log.info("Restoring existing accessory from cache:", name);
+      this.contactSensor = new ContactSensorAccessory(this, existingAccessory, this.config, this.unifiWebsocket);
+    } else {
+      this.log.info("Adding new accessory:", name);
+      const accessory = new this.api.platformAccessory(name, uuid);
+      accessory.context.device = {
+        id: this.config.doorId,
+        name: name
+      };
+      this.contactSensor = new ContactSensorAccessory(this, accessory, this.config, this.unifiWebsocket);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    }
 
-    console.log(this.config);
-
-
-
-
-    const exampleDevices = [
-      {
-        exampleUniqueId: this.config.doorId,
-        exampleDisplayName: this.config.doorName,
-      }
-    ];
-
-    console.log(exampleDevices);
-
-    // loop over the discovered devices and register each one if it has not already been registered
-    for (const device of exampleDevices) {
-
-      // generate a unique id for the accessory this should be generated from
-      // something globally unique, but constant, for example, the device serial
-      // number or MAC address
-      const uuid = this.api.hap.uuid.generate(device.exampleUniqueId);
-
-      // see if an accessory with the same uuid has already been registered and restored from
-      // the cached devices we stored in the `configureAccessory` method above
-      const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
-
-      if (existingAccessory) {
-        // the accessory already exists
-        this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
-
-        // if you need to update the accessory.context then you should run `api.updatePlatformAccessories`. eg.:
-        // existingAccessory.context.device = device;
-        // this.api.updatePlatformAccessories([existingAccessory]);
-
-        // create the accessory handler for the restored accessory
-        // this is imported from `platformAccessory.ts`
-        new DoorAccessory(this, existingAccessory, this.config);
-
-        // it is possible to remove platform accessories at any time using `api.unregisterPlatformAccessories`, eg.:
-        // remove platform accessories when no longer present
-        // this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [existingAccessory]);
-        // this.log.info('Removing existing accessory from cache:', existingAccessory.displayName);
-      } else {
-        // the accessory does not yet exist, so we need to create it
-        this.log.info('Adding new accessory:', device.exampleDisplayName);
-
-        // create a new accessory
-        const accessory = new this.api.platformAccessory(device.exampleDisplayName, uuid);
-
-        // store a copy of the device object in the `accessory.context`
-        // the `context` property can be used to store any data about the accessory you may need
-        accessory.context.device = device;
-
-        // create the accessory handler for the newly create accessory
-        // this is imported from `platformAccessory.ts`
-        new DoorAccessory(this, accessory, this.config);
-
-        // link the accessory to your platform
-        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    for(const door of doors){
+      if(door.id === this.config.doorId){
+        this.contactSensor.update(door.door_position_status === ContactSensorAccessoryState.CLOSE);
       }
     }
   }
+
+  async readDoors(){
+    const requestHeaders = new Headers();
+    requestHeaders.append("Authorization", `Bearer ${this.config.apiToken}`);
+    const requestOptions: RequestInit = {
+      method: "GET",
+      headers: requestHeaders,
+      redirect: "follow"
+    };
+    try{
+      const response = await fetch(`https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors`, {...requestOptions});
+      return <DoorsResponse>await response.json();
+    }catch (e: any) {
+      throw Error(e.message);
+    }
+  }
 }
+
+

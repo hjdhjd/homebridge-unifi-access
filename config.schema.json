@@ -1,5 +1,6 @@
 {
-  "pluginAlias": "homebridge-unifi-access",
+  "pluginAlias": "UniFi Access",
+  "headerDisplay": "Full HomeKit support UniFi Access devices. See the [homebridge-unifi-access](https://github.com/hjdhjd/homebridge-unifi-protect) developer page for detailed documentation.",
   "pluginType": "platform",
   "singular": true,
   "customUi": true,
@@ -16,17 +17,18 @@
         "required": false
       },
       "apiToken": {
-        "title": "Unifi API-Token",
+        "title": "UniFi API-Token",
         "type": "string",
-        "required": true
+        "required": true,
+        "description": "Fetch your api token in security settings in access console."
       },
       "consoleHost": {
-        "title": "Unifi Console Host",
+        "title": "UniFi Console Host",
         "type": "string",
         "required": true
       },
       "consolePort": {
-        "title": "Unifi Console Port",
+        "title": "UniFi Console Port",
         "type": "string",
         "default": "12445",
         "required": true
