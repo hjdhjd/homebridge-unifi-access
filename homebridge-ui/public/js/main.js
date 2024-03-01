@@ -9,7 +9,6 @@
         document.querySelector('#doorNameInput').value = pluginConfig[0].doorName;
         document.querySelector('#doorOpenerDurationInput').value = pluginConfig[0].doorOpenerDuration;
         document.querySelector('#consoleHostInput').value = pluginConfig[0].consoleHost;
-        document.querySelector('#consolePortInput').value = pluginConfig[0].consolePort;
         await fetchDoors();
     } else {
         pluginConfig.push({});
@@ -20,7 +19,6 @@
         // get the current values from the form
         pluginConfig[0].apiToken = document.querySelector('#apiTokenInput').value;
         pluginConfig[0].consoleHost = document.querySelector('#consoleHostInput').value;
-        pluginConfig[0].consolePort = document.querySelector('#consolePortInput').value;
         pluginConfig[0].doorId = document.querySelector('#doorIdInput').value;
         pluginConfig[0].doorName = document.querySelector('#doorNameInput').value;
         pluginConfig[0].doorOpenerDuration = document.querySelector('#doorOpenerDurationInput').value;
@@ -47,14 +45,6 @@
             return;
         }
 
-        const consolePort = document.querySelector('#consolePortInput').value;
-
-        if (!consolePort) {
-            // create a error / red toast notification if the required input is not provided.
-            homebridge.toast.error('A unifi access port must be provided.', 'Error');
-            return;
-        }
-
         // starting the request, show the loading spinner
         homebridge.showSpinner();
 
@@ -62,8 +52,7 @@
         try {
             const response = await homebridge.request('/fetchDoors', {
                 apiToken: apiToken,
-                consoleHost: consoleHost,
-                consolePort: consolePort,
+                consoleHost: consoleHost
             });
 
             // update the token input with the response

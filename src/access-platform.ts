@@ -11,7 +11,7 @@ import {
   PlatformAccessory,
   Service
 } from "homebridge";
-import {DEFAULT_DOORNAME, PLATFORM_NAME, PLUGIN_NAME} from "./settings";
+import {DEFAULT_ACCESS_PORT, DEFAULT_DOORNAME, PLATFORM_NAME, PLUGIN_NAME} from "./settings";
 
 import {AccessContactSensor} from "./access-contactSensor";
 import {AccessContactSensorState} from "./interfaces/accessContactSensorState";
@@ -46,7 +46,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   ) {
     this.log.debug("Finished initializing platform:", this.config.name);
 
-    if(this.config.consoleHost && this.config.consolePort){
+    if(this.config.consoleHost){
       this.unifiWebsocket = new AccessWebsockets(this.config, this.log);
     }else{
       this.log.error("Cannot setup WebSocket");
@@ -137,7 +137,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       redirect: "follow"
     };
     try{
-      const response = await fetch(`https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors`, {...requestOptions});
+      const response = await fetch(`https://${this.config.consoleHost}:${DEFAULT_ACCESS_PORT}/api/v1/developer/doors`, {...requestOptions});
       return <AccessDoorsResponse>await response.json();
     }catch (err: unknown) {
       if (err instanceof Error) {

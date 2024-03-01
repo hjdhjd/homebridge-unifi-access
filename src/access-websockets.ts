@@ -7,6 +7,7 @@ import {AccessPlatformConfig} from "./interfaces/accessPlatformConfig";
 import {AccessWebsocketEventListener} from "./interfaces/accessWebsocketEventListener";
 import {Logger} from "homebridge";
 import WebSocket from "ws";
+import {DEFAULT_ACCESS_PORT} from "./settings";
 
 export class AccessWebsockets {
 
@@ -17,7 +18,7 @@ export class AccessWebsockets {
     public readonly config: AccessPlatformConfig,
     public readonly log: Logger
   ) {
-    this.socket = new WebSocket(`wss://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/devices/notifications`, {
+    this.socket = new WebSocket(`wss://${this.config.consoleHost}:${DEFAULT_ACCESS_PORT}/api/v1/developer/devices/notifications`, {
       headers: {
         "Authorization": `Bearer ${this.config.apiToken}`
       }

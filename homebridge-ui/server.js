@@ -22,7 +22,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
         redirect: 'follow',
         agent: httpsAgent,
       };
-      const response = await fetch(`https://${payload.consoleHost}:${payload.consolePort}/api/v1/developer/doors`, requestOptions)
+      const response = await fetch(`https://${payload.consoleHost}:12445/api/v1/developer/doors`, requestOptions)
 
       const data = await response.json();
 

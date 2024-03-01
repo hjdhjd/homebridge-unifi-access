@@ -7,7 +7,7 @@ import {PlatformAccessory, Service} from "homebridge";
 import { AccessPlatform } from "./access-platform";
 import {AccessPlatformConfig} from "./interfaces/accessPlatformConfig";
 
-import {DEFAULT_OPENER_DURATION} from "./settings";
+import {DEFAULT_ACCESS_PORT, DEFAULT_OPENER_DURATION} from "./settings";
 
 
 
@@ -111,7 +111,7 @@ export class AccessLockMechanism {
     };
 
     try{
-      const api = `https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors/${this.config.doorId}/unlock`;
+      const api = `https://${this.config.consoleHost}:${DEFAULT_ACCESS_PORT}/api/v1/developer/doors/${this.config.doorId}/unlock`;
       const response = await fetch(api, {...requestOptions});
       const data = <{code:string}>await response.json();
       return data.code === "SUCCESS";

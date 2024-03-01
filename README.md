@@ -49,7 +49,6 @@ If you choose to configure this plugin directly instead of using the [Homebridge
     "platform": "UniFi Acccess",
     "apiToken": "xxxxxxxxxxxxxxxxx",
     "consoleHost": "192.168.2.2",
-    "consolePort": "12445",
     "doorId": "d64f1ccf-3392-4ea0-bce4-f9d1147fa09a",
     "doorName": "Haustür",
     "doorOpenerDuration": "5000"
