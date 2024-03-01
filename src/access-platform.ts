@@ -45,7 +45,6 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     public readonly api: API
   ) {
     this.log.debug("Finished initializing platform:", this.config.name);
-
     if(this.config.consoleHost){
       this.unifiWebsocket = new AccessWebsockets(this.config, this.log);
     }else{
@@ -76,15 +75,20 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    */
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   async discoverDevices(): Promise<void> {
-    const doors = await this.readDoors();
-    this.setupDoor();
-    this.setupContactSensor(doors.data);
+    try{
+      const doors = await this.readDoors();
+      this.setupDoor();
+      this.setupContactSensor(doors.data);
+    }catch (e: unknown) {
+      const msg = (e instanceof Error)?e.message:"";
+      this.log.error(`failed to setup devices - ${msg} `);
+    }
   }
 
-  setupDoor():void{
+  setupDoor():boolean{
     if(!this.config?.doorId){
       this.log.error("No door id is configured");
-      return;
+      return false;
     }
     const uuid = this.api.hap.uuid.generate(this.config.doorId);
     const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
@@ -101,6 +105,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       new AccessLockMechanism(this, accessory, this.config);
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
     }
+    return true;
   }
 
   setupContactSensor(doors: AccessDoor[]): void{
@@ -140,13 +145,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       const response = await fetch(`https://${this.config.consoleHost}:${DEFAULT_ACCESS_PORT}/api/v1/developer/doors`, {...requestOptions});
       return <AccessDoorsResponse>await response.json();
     }catch (err: unknown) {
-      if (err instanceof Error) {
-        throw Error(err.message);
-      }else{
-        throw Error("error fetching doors");
-      }
+      throw Error("error fetching doors");
     }
   }
 }
-
-
