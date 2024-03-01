@@ -24,6 +24,10 @@
       <label for="doorSelect">Doors</label>
       <select class="custom-select" id="doorSelect"></select>
     </div>
+    <div class="form-group">
+      <label for="doorOpenerDurationInput">Duration of the </label>
+      <input type="number" class="form-control" id="doorOpenerDurationInput">
+    </div>
     <div class="text-center">
       <button id="getTokenButton" type="button" class="btn btn-primary">Refresh Doors</button>
     </div>
@@ -33,5 +37,7 @@
 <!-- Modules -->
 <script type="text/javascript" src="js/modules/jquery.min.js"></script>
 
-<!-- Main -->
-<script type="text/javascript" src="js/main.js?t=9"></script>
+<script type="text/javascript">
+  document.write('<scr'+'ipt type="text/javascript" src="js/main.js?cb=' +Math.round(new Date().getTime() / 1000)+'"></scr' + 'ipt>');
+</script>
+

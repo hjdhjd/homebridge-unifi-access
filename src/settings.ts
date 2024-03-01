@@ -7,3 +7,5 @@ export const PLATFORM_NAME = "UniFi Access";
  * This must match the name of your plugin as defined the package.json
  */
 export const PLUGIN_NAME = "homebridge-unifi-access";
+
+export const DEFAULT_OPENER_DURATION = 5000;

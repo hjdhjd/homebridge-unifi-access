@@ -32,6 +32,12 @@
         "type": "string",
         "default": "12445",
         "required": true
+      },
+      "doorOpenerDuration": {
+        "title": "Duration of the door opener",
+        "type": "number",
+        "default": "5000",
+        "required": true
       }
     }
   }

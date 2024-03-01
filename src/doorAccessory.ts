@@ -1,6 +1,7 @@
 import {PlatformAccessory, PlatformConfig, Service} from "homebridge";
 
 import { ExampleHomebridgePlatform } from "./platform";
+import {DEFAULT_OPENER_DURATION} from "./settings";
 
 
 /**
@@ -51,16 +52,11 @@ export class DoorAccessory {
   }
 
   /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
+   * Handle requests to get the current value of the "Lock Current State" characteristic
    */
   handleLockCurrentStateGet() {
     this.platform.log.debug("Triggered GET LockCurrentState");
-
-    // set this to a valid value for LockCurrentState
-    const currentValue = this.currentStates.locked;
-
-    return currentValue;
+    return this.currentStates.locked;
   }
 
 
@@ -69,9 +65,7 @@ export class DoorAccessory {
    */
   handleLockTargetStateGet() {
     this.platform.log.debug("Triggered GET LockTargetState");
-    // set this to a valid value for LockTargetState
-    const currentValue = this.currentStates.locked;
-    return currentValue;
+    return this.currentStates.locked;
   }
 
   /**
@@ -80,15 +74,20 @@ export class DoorAccessory {
   async handleLockTargetStateSet(value) {
     this.currentStates.locked = value;
     if(value === this.platform.Characteristic.LockCurrentState.UNSECURED){
+      const duration = this.config.doorOpenerDuration || DEFAULT_OPENER_DURATION;
       setTimeout(()=>{
         this.platform.log.debug("Triggered RESET LockTargetState:"+ value);
         this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
-      },4000);
+      },duration);
       if(await this. unlockDoor()){
+        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.UNSECURED);
         this.platform.log.debug(`Opened door ${this.config.doorName} successfully`);
       }else{
+        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
         this.platform.log.debug("Failed opening door");
       }
+    }else{
+      this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
     }
   }
 

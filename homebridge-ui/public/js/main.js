@@ -7,6 +7,7 @@
         document.querySelector('#apiTokenInput').value = pluginConfig[0].apiToken;
         document.querySelector('#doorIdInput').value = pluginConfig[0].doorId;
         document.querySelector('#doorNameInput').value = pluginConfig[0].doorName;
+        document.querySelector('#doorOpenerDurationInput').value = pluginConfig[0].doorOpenerDuration;
         document.querySelector('#consoleHostInput').value = pluginConfig[0].consoleHost;
         document.querySelector('#consolePortInput').value = pluginConfig[0].consolePort;
         await fetchDoors();
@@ -22,6 +23,7 @@
         pluginConfig[0].consolePort = document.querySelector('#consolePortInput').value;
         pluginConfig[0].doorId = document.querySelector('#doorIdInput').value;
         pluginConfig[0].doorName = document.querySelector('#doorNameInput').value;
+        pluginConfig[0].doorOpenerDuration = document.querySelector('#doorOpenerDurationInput').value;
 
         // update the config
         homebridge.updatePluginConfig(pluginConfig);
