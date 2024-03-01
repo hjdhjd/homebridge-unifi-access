@@ -1,0 +1,7 @@
+# Issue creation settings.
+#
+blank_issues_enabled: false
+contact_links:
+  - name: Homebridge Discord Community
+    url: https://discord.gg/QXqfHEW
+    about: Ask your questions in the unifi-access channel
