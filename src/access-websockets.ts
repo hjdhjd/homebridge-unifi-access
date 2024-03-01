@@ -1,12 +1,17 @@
-import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
+/* Copyright(C) 2024, PW (https://github.com/pwilms). All rights reserved.
+ *
+ * access-websockets.ts: homebridge-unifi-access websocket class for listing to access events
+ */
+
+import {AccessPlatformConfig} from "./interfaces/accessPlatformConfig";
+import {AccessWebsocketEventListener} from "./interfaces/accessWebsocketEventListener";
 import {Logger} from "homebridge";
-import {UnifiWebsocketEventListener} from "./interfaces/unifiWebsocketEventListener";
 import WebSocket from "ws";
 
-export class UnifiWebsocket {
+export class AccessWebsockets {
 
   private socket: WebSocket;
-  private listeners: UnifiWebsocketEventListener[] = [];
+  private listeners: AccessWebsocketEventListener[] = [];
 
   constructor(
     public readonly config: AccessPlatformConfig,
@@ -44,7 +49,7 @@ export class UnifiWebsocket {
     });
   }
 
-  addEventListener(listener: UnifiWebsocketEventListener):void{
+  addEventListener(listener: AccessWebsocketEventListener):void{
     this.listeners.push(listener);
   }
 }

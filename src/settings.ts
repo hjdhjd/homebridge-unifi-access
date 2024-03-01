@@ -1,5 +1,6 @@
-/**
- * This is the name of the platform that users will use to register the plugin in the Homebridge config.json
+/* Copyright(C) 2024, PW (https://github.com/pwilms). All rights reserved.
+ *
+ * settings.ts: homebridge-unifi-access settings and constants
  */
 export const PLATFORM_NAME = "UniFi Access";
 

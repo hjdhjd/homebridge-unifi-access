@@ -1,13 +1,18 @@
+/* Copyright(C) 2024, PW (https://github.com/pwilms). All rights reserved.
+ *
+ * access-contactSensor.ts: homebridge-unifi-access contact sensor for exposing dps events
+ */
 import {PlatformAccessory, Service} from "homebridge";
 
-import {AccessPlatform} from "./accessPlatform";
-import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
-import {ContactSensorAccessoryEvents} from "./interfaces/contactSensorAccessoryEvents";
-import {ContactSensorAccessoryState} from "./interfaces/contactSensorAccessoryState";
-import {UnifiWebsocket} from "./unifiWebsocket";
-import {UnifiWebsocketEventDps} from "./interfaces/unifiWebsocketEventDps";
+import {AccessContactSensorEvents} from "./interfaces/accessContactSensorEvents";
+import {AccessContactSensorState} from "./interfaces/accessContactSensorState";
+import {AccessPlatform} from "./access-platform";
+import {AccessPlatformConfig} from "./interfaces/accessPlatformConfig";
+import {AccessWebsocketEventDps} from "./interfaces/accessWebsocketEventDps";
+import {AccessWebsockets} from "./access-websockets";
 
-export class ContactSensorAccessory {
+
+export class AccessContactSensor {
   private service: Service;
 
   private currentStates = {
@@ -18,7 +23,7 @@ export class ContactSensorAccessory {
     private readonly platform: AccessPlatform,
     private readonly accessory: PlatformAccessory,
     public readonly config: AccessPlatformConfig,
-    private readonly socket?: UnifiWebsocket
+    private readonly socket?: AccessWebsockets
   ) {
     // set accessory information
     accessory.getService(this.platform.Service.AccessoryInformation)!
@@ -34,7 +39,7 @@ export class ContactSensorAccessory {
 
     if(this.socket){
       this.socket.addEventListener({
-        event: ContactSensorAccessoryEvents.DPS_CHANGE,
+        event: AccessContactSensorEvents.DPS_CHANGE,
         fn: this.dpsChangeEvent.bind(this)
       });
     }
@@ -51,8 +56,8 @@ export class ContactSensorAccessory {
     this.service.getCharacteristic(state).setValue(this.currentStates.contact);
   }
 
-  private dpsChangeEvent(event: UnifiWebsocketEventDps): void{
-    this.update(event.data.status === ContactSensorAccessoryState.CLOSE);
+  private dpsChangeEvent(event: AccessWebsocketEventDps): void{
+    this.update(event.data.status === AccessContactSensorState.CLOSE);
   }
 
 }

@@ -1,6 +1,10 @@
+/* Copyright(C) 2024, PW (https://github.com/pwilms). All rights reserved.
+ *
+ * index.ts: homebridge-unifi-access plugin registration.
+ */
 import { API } from "homebridge";
 
-import { AccessPlatform } from "./accessPlatform";
+import { AccessPlatform } from "./access-platform";
 import { PLATFORM_NAME } from "./settings";
 
 /**

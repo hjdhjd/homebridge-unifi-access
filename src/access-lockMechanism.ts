@@ -1,7 +1,12 @@
+/* Copyright(C) 2024, PW (https://github.com/pwilms). All rights reserved.
+ *
+ * access-lockMechanism.ts: homebridge-unifi-access lock mechanism for exposing door
+ */
 import {PlatformAccessory, Service} from "homebridge";
 
-import { AccessPlatform } from "./accessPlatform";
-import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
+import { AccessPlatform } from "./access-platform";
+import {AccessPlatformConfig} from "./interfaces/accessPlatformConfig";
+
 import {DEFAULT_OPENER_DURATION} from "./settings";
 
 
@@ -11,7 +16,7 @@ import {DEFAULT_OPENER_DURATION} from "./settings";
  * An instance of this class is created for each accessory your platform registers
  * Each accessory may expose multiple services of different service types.
  */
-export class DoorAccessory {
+export class AccessLockMechanism {
   private service: Service;
 
   /**
