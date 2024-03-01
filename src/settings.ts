@@ -9,3 +9,4 @@ export const PLATFORM_NAME = "UniFi Access";
 export const PLUGIN_NAME = "homebridge-unifi-access";
 
 export const DEFAULT_OPENER_DURATION = 5000;
+export const DEFAULT_DOORNAME = "Door";

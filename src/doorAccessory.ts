@@ -1,7 +1,9 @@
-import {PlatformAccessory, PlatformConfig, Service} from "homebridge";
+import {PlatformAccessory, Service} from "homebridge";
 
-import { ExampleHomebridgePlatform } from "./platform";
+import { AccessPlatform } from "./accessPlatform";
+import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
 import {DEFAULT_OPENER_DURATION} from "./settings";
+
 
 
 /**
@@ -21,9 +23,9 @@ export class DoorAccessory {
   };
 
   constructor(
-    private readonly platform: ExampleHomebridgePlatform,
+    private readonly platform: AccessPlatform,
     private readonly accessory: PlatformAccessory,
-    public readonly config: PlatformConfig
+    public readonly config: AccessPlatformConfig
   ) {
 
     // set accessory information
@@ -54,7 +56,7 @@ export class DoorAccessory {
   /**
    * Handle requests to get the current value of the "Lock Current State" characteristic
    */
-  handleLockCurrentStateGet() {
+  handleLockCurrentStateGet(): number {
     this.platform.log.debug("Triggered GET LockCurrentState");
     return this.currentStates.locked;
   }
@@ -63,7 +65,7 @@ export class DoorAccessory {
   /**
    * Handle requests to get the current value of the "Lock Target State" characteristic
    */
-  handleLockTargetStateGet() {
+  handleLockTargetStateGet(): number {
     this.platform.log.debug("Triggered GET LockTargetState");
     return this.currentStates.locked;
   }
@@ -71,43 +73,47 @@ export class DoorAccessory {
   /**
    * Handle requests to set the "Lock Target State" characteristic
    */
-  async handleLockTargetStateSet(value) {
+  async handleLockTargetStateSet(value): Promise<void> {
     this.currentStates.locked = value;
+    const state = this.platform.Characteristic.LockCurrentState;
     if(value === this.platform.Characteristic.LockCurrentState.UNSECURED){
       const duration = this.config.doorOpenerDuration || DEFAULT_OPENER_DURATION;
       setTimeout(()=>{
-        this.platform.log.debug("Triggered RESET LockTargetState:"+ value);
-        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
+        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,state.SECURED);
       },duration);
       if(await this. unlockDoor()){
-        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.UNSECURED);
+        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,state.UNSECURED);
         this.platform.log.debug(`Opened door ${this.config.doorName} successfully`);
       }else{
-        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
+        this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,state.SECURED);
         this.platform.log.debug("Failed opening door");
       }
     }else{
-      this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,this.platform.Characteristic.LockCurrentState.SECURED);
+      this.service.updateCharacteristic(this.platform.Characteristic.LockTargetState,state.SECURED);
     }
   }
 
 
-  async unlockDoor(){
+  async unlockDoor(): Promise<boolean>{
     this.platform.log.debug("Triggered unlockDoor");
     const requestHeaders = new Headers();
     requestHeaders.append("Authorization", `Bearer ${this.config.apiToken}`);
 
     const requestOptions: RequestInit = {
-      method: "PUT",
       headers: requestHeaders,
+      method: "PUT",
       redirect: "follow"
     };
 
     try{
-      const response = await fetch(`https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors/${this.config.doorId}/unlock`, {...requestOptions});
+      const api = `https://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/doors/${this.config.doorId}/unlock`;
+      const response = await fetch(api, {...requestOptions});
       const data = <{code:string}>await response.json();
       return data.code === "SUCCESS";
-    }catch (e: any) {
+    }catch (err: unknown) {
+      if (err instanceof Error) {
+        this.platform.log.error(err.message);
+      }
       return false;
     }
   }

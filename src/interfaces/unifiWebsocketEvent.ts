@@ -1,4 +1,4 @@
 export interface UnifiWebsocketEvent {
-    event: string
-    data: any
+  event: string
+  data: any
 }

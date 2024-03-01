@@ -1,10 +1,11 @@
-import {PlatformAccessory, PlatformConfig, Service} from "homebridge";
+import {PlatformAccessory, Service} from "homebridge";
 
-import {ExampleHomebridgePlatform} from "./platform";
-import {UnifiWebsocket} from "./unifiWebsocket";
-import {ContactSensorAccessoryState} from "./interfaces/contactSensorAccessoryState";
+import {AccessPlatform} from "./accessPlatform";
+import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
 import {ContactSensorAccessoryEvents} from "./interfaces/contactSensorAccessoryEvents";
-import {UnifiWebsocketEvent} from "./interfaces/unifiWebsocketEvent";
+import {ContactSensorAccessoryState} from "./interfaces/contactSensorAccessoryState";
+import {UnifiWebsocket} from "./unifiWebsocket";
+import {UnifiWebsocketEventDps} from "./interfaces/unifiWebsocketEventDps";
 
 export class ContactSensorAccessory {
   private service: Service;
@@ -14,14 +15,13 @@ export class ContactSensorAccessory {
   };
 
   constructor(
-    private readonly platform: ExampleHomebridgePlatform,
+    private readonly platform: AccessPlatform,
     private readonly accessory: PlatformAccessory,
-    public readonly config: PlatformConfig,
+    public readonly config: AccessPlatformConfig,
     private readonly socket?: UnifiWebsocket
   ) {
-
     // set accessory information
-    this.accessory.getService(this.platform.Service.AccessoryInformation)!
+    accessory.getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Manufacturer, "Ubiquiti")
       .setCharacteristic(this.platform.Characteristic.Model, "Access")
       .setCharacteristic(this.platform.Characteristic.SerialNumber, accessory.context.device.id);
@@ -40,17 +40,18 @@ export class ContactSensorAccessory {
     }
   }
 
-  handleContactSensorStateGet() {
+  handleContactSensorStateGet():number {
     this.platform.log.debug("Triggered GET ContactSensorState");
     return this.currentStates.contact;
   }
 
-  update(contact:boolean) {
-    this.currentStates.contact = contact ? this.platform.Characteristic.ContactSensorState.CONTACT_DETECTED:this.platform.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
-    this.service.getCharacteristic(this.platform.Characteristic.ContactSensorState).setValue(this.currentStates.contact);
+  update(contact:boolean):void {
+    const state = this.platform.Characteristic.ContactSensorState;
+    this.currentStates.contact = contact ? state.CONTACT_DETECTED:state.CONTACT_NOT_DETECTED;
+    this.service.getCharacteristic(state).setValue(this.currentStates.contact);
   }
 
-  private dpsChangeEvent(event: UnifiWebsocketEvent){
+  private dpsChangeEvent(event: UnifiWebsocketEventDps): void{
     this.update(event.data.status === ContactSensorAccessoryState.CLOSE);
   }
 

@@ -1,5 +1,6 @@
+import {AccessPlatformConfig} from "./interfaces/AccessPlatformConfig";
+import {Logger} from "homebridge";
 import {UnifiWebsocketEventListener} from "./interfaces/unifiWebsocketEventListener";
-import {PlatformConfig} from "homebridge";
 import WebSocket from "ws";
 
 export class UnifiWebsocket {
@@ -8,7 +9,8 @@ export class UnifiWebsocket {
   private listeners: UnifiWebsocketEventListener[] = [];
 
   constructor(
-    public readonly config: PlatformConfig
+    public readonly config: AccessPlatformConfig,
+    public readonly log: Logger
   ) {
     this.socket = new WebSocket(`wss://${this.config.consoleHost}:${this.config.consolePort}/api/v1/developer/devices/notifications`, {
       headers: {
@@ -16,7 +18,9 @@ export class UnifiWebsocket {
       }
     });
 
-    this.socket.on("error", console.error);
+    this.socket.on("error", (e):void=>{
+      this.log.error(e.message);
+    });
 
     this.socket.on("open", () => {
       this.socket.send("something");
@@ -34,13 +38,13 @@ export class UnifiWebsocket {
             );
           }
         }
-      } catch (e) {
-        console.log(e);
+      } catch (e:unknown) {
+        this.log.error(`${e as string}`);
       }
     });
   }
 
-  addEventListener(listener: UnifiWebsocketEventListener){
+  addEventListener(listener: UnifiWebsocketEventListener):void{
     this.listeners.push(listener);
   }
 }
