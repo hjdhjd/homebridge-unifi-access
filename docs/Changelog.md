@@ -8,4 +8,3 @@ All notable changes to this project will be documented in this file. This projec
   * New feature: support for doorbells on hubs.
   * New feature: automation switches for doorbells.
   * New feature: MQTT support.
-
