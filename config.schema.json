@@ -1,0 +1,202 @@
+{
+  "pluginAlias": "UniFi Access",
+  "pluginType": "platform",
+  "headerDisplay": "Full HomeKit support UniFi Access devices. See the [homebridge-unifi-access](https://github.com/hjdhjd/homebridge-unifi-access) developer page for detailed documentation.",
+  "singular": true,
+  "customUi": true,
+
+  "schema": {
+    "type": "object",
+    "properties": {
+
+      "controllers": {
+        "type": "array",
+        "title": "UniFi Access Controllers",
+
+        "items": {
+          "type": "object",
+          "title": "UniFi Access Controller",
+          "properties": {
+
+            "address": {
+              "type": "string",
+              "title": "Controller Address",
+              "required": true,
+              "format": "hostname",
+              "placeholder": "e.g. 1.2.3.4",
+              "description": "Hostname or IP address of your UniFi Access controller."
+            },
+
+            "mqttTopic": {
+              "type": "string",
+              "title": "MQTT Base Topic",
+              "required": false,
+              "placeholder": "e.g. unifi/access",
+              "description": "The base MQTT topic to publish to. Default: unifi/access."
+            },
+
+            "mqttUrl": {
+              "type": "string",
+              "title": "MQTT Broker URL",
+              "required": false,
+              "format": "uri",
+              "placeholder": "e.g. mqtt://1.2.3.4",
+              "description": "URL for the MQTT broker you'd like to publish event messages to. Default: None."
+            },
+
+            "name": {
+              "type": "string",
+              "title": "Controller Name",
+              "required": false,
+              "placeholder": "e.g. UNVR",
+              "description": "Name for this UniFi Access controller to be used for logging purposes. Default: Defined by the controller."
+            },
+
+            "password": {
+              "type": "string",
+              "title": "Controller Password",
+              "required": true,
+              "placeholder": "e.g. unifi-access-password",
+              "description": "UniFi Access password for this controller. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+            },
+
+            "username": {
+              "type": "string",
+              "title": "Controller Username",
+              "required": true,
+              "placeholder": "e.g. some-unifi-access-user",
+              "description": "UniFi Access username for this controller. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+            }
+          }
+        }
+      },
+
+      "name": {
+
+        "type": "string",
+        "title": "Plugin Name",
+        "required": true,
+        "default": "UniFi Access",
+        "description": "Name to use for Homebridge logging purposes. Default: UniFi Access."
+      },
+
+      "options": {
+
+        "type": "array",
+        "title": "Feature Options",
+
+        "items": {
+          "type": "string",
+          "title": "Feature Option",
+          "required": false,
+          "description": "Enter only one option per entry. See the plugin documentation for the complete list of available options or use the feature options webUI tab above.",
+          "placeholder": "e.g. Disable.Device"
+        }
+      },
+
+      "ringDelay": {
+
+        "type": "integer",
+        "title": "Doorbell Ring Delay (seconds)",
+        "required": false,
+        "minimum": 0,
+        "maximum": 60,
+        "placeholder": "e.g. 5",
+        "description": "Delay between doorbell rings. Setting this to a non-zero value will prevent multiple rings of a doorbell over the specified duration.  Default: 0."
+      }
+    }
+  },
+
+  "layout": [
+    {
+      "type": "section",
+      "title": "UniFi Access Controllers",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+
+          "key": "controllers",
+          "type": "array",
+          "name": " ",
+          "description": "Provide the IP address and login details of your UniFi Access controllers.",
+          "orderable": false,
+          "buttonText": "Add UniFi Access Controller",
+          "items": [
+
+            "controllers[].address",
+            "controllers[].username",
+            "controllers[].password",
+
+            {
+              "key": "controllers[]",
+              "type": "section",
+              "title": "Optional Settings",
+              "expandable": true,
+              "expanded": false,
+              "items": [
+                {
+                  "description": "These settings are optional. The defaults work well for almost everyone.",
+                  "items": [
+                    "controllers[].name"
+                  ]
+                }
+              ]
+            },
+            {
+              "key": "controllers[]",
+              "type": "section",
+              "title": "MQTT Settings",
+              "expandable": true,
+              "expanded": false,
+              "items": [
+                {
+                  "description": "MQTT support will only be enabled if an MQTT broker URL is specified below.",
+                  "items": [
+                    "controllers[].mqttUrl",
+                    "controllers[].mqttTopic"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "Plugin Feature Options (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "key": "options",
+          "type": "array",
+          "name": " ",
+          "description": "Feature options allow you to further customize the behavior of this plugin such as the ability to show or hide devices. You can use the the feature options tab above (recommended) to customize these settings or enter them manually below.",
+          "orderable": false,
+          "buttonText": "Add Feature Option",
+          "items": [
+            "options[]"
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "Additional Settings (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "description": "These settings should be rarely used or needed by most people. Use these with caution.",
+          "items": [
+            "name"
+          ]
+        }
+      ]
+    }
+  ]
+}

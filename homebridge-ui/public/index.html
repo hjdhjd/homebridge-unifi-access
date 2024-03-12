@@ -1,0 +1,151 @@
+<p class="text-center">
+  <img src="https://raw.githubusercontent.com/hjdhjd/homebridge-unifi-access/main/images/homebridge-unifi-access.svg" alt="homebridge-unifi-access logo" class="w-50" />
+</p>
+<div id="pageFirstRun" style="display: none;">
+  <div class="text-center">
+    <p>Please enter the address of your UniFi Access controller (e.g. unvr.local or 10.0.0.1) and the login credentials for a <strong>local user</strong> to get started with <strong>homebridge-unifi-access</strong>.</p>
+    <table class="table table-sm table-borderless">
+      <tr>
+        <td>
+          <input type="test" placeholder="Access controller hostname or IP address" size="40" id="address"></input>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <input type="username" placeholder="Access controller username" size="40" id="username"></input>
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <input type="password" placeholder="Access controller password" size="40" id="password"></input>
+        </td>
+      </tr>
+      <tr>
+        <td class="m-0 p-2 text-center font-weight-bold text-danger" id="loginError">
+          &nbsp;
+        </td>
+      </tr>
+    </table>
+    <br>
+      <button type="button" class="btn btn-primary" id="firstRun">Login to UniFi Access &rarr;</button>
+    <br>
+      To optimize performance and responsiveness, please make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.
+  </div>
+</div>
+<div id="menuWrapper" class="btn-group w-100 mb-0" role="group" aria-label="UI Menu" style="display: none;">
+  <button type="button" class="btn btn-primary" id="menuSettings">Settings</button>
+  <button type="button" class="btn btn-primary" id="menuFeatureOptions">Feature Options</button>
+  <button type="button" class="btn btn-primary mr-0" id="menuHome">Support</button>
+</div>
+<div id="pageFeatureOptions" class="mt-2" style="display: none;">
+  <div id="deviceInfo">
+    <table class="table table-sm table-borderless">
+      <tr class="align-center">
+        <td id="headerInfo" colspan="2" class="m-0 p-2 text-center font-weight-bold"></td>
+      </tr>
+      <tr class="align-top">
+        <td rowspan="3" class="w-25">
+          <table id="sidebar" class="table table-sm table-bordered m-0 p-0">
+            <tr>
+              <td>
+                <table class="table table-sm table-borderless m-0 p-0" id="controllersTable"></table>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <table class="table table-sm table-borderless m-0 p-0" id="devicesTable"></table>
+              </td>
+            </tr>
+          </table>
+        </td>
+        <td id="deviceStatsTable">
+          <table class="table table-sm table-borderless border-bottom m-0 p-0">
+            <tr id="deviceStatsHeader">
+              <th class="m-0 p-0" style="width: 30%;"><B>Model<B></th>
+              <th class="m-0 p-0 w-25"><B>IP Address</B></th>
+              <th class="m-0 p-0" style="width: 25%;"><B>MAC Address</B></th>
+              <th class="m-0 p-0 w-25"><B>Status</B></th>
+            </tr>
+            <tr>
+              <td id="device_model" class="m-0 p-0"></td>
+              <td id="device_address" class="m-0 p-0"></td>
+              <td id="device_mac" class="m-0 p-0"></td>
+              <td id="device_online" class="m-0 p-0"></td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td id="configTable" class="w-100"></td>
+      </tr>
+    </table>
+  </div>
+</div>
+<div id="pageSupport" class="mt-4" style="display: none;">
+  <h5>Introduction</h5>
+    <p class="px-4">I hope you enjoy <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">homebridge-unifi-access</a> as much as I enjoy developing it. All my projects are labors of love. If you'd like to show your appreciation - <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">star this project on Github</A> and do some good in your community, either financially or with your time: a food bank, an animal shelter (two of my passions), or whatever resonates with you that can give something back to the world around you.</p>
+
+    <div class="px-4">
+      Other plugins by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
+
+      <ul dir="auto">
+      <ul dir="auto">
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-myq">homebridge-myQ: Liftmaster and Chamberlain garage door and gate opener support for HomeKit</a></li>
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo: Ratgdo (non-myQ Liftmaster and Chamberlain) garage door and gate opener support for HomeKit</a></li>      </ul>
+        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-protect">homebridge-unifi-protect: Complete HomeKit integration for the entire UniFi Protect ecosystem</a></li>
+      </ul>
+    </div>
+
+  <h5>Getting Started</h5>
+    <ul dir="auto">
+      <li>
+          <a target="_blank" href="#installation">Installation</a>
+          : installing this plugin, including system requirements.
+      </li>
+      <li>
+          <a target="_blank" href="#plugin-configuration">Plugin Configuration</a>
+          : how to quickly get up and running.
+      </li>
+    </ul>
+
+  <h5>Advanced Topics</h5>
+    <ul dir="auto">
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md">Feature Options</a>: granular options to allow you to set the camera quality individually, show or hide specific cameras, controllers, and more.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/MQTT.md">MQTT</a>: how to configure MQTT support.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/unifi-access">UniFi Access native API Documentation</a>: documentation of how the undocumented native Ubiquiti UniFi Access API.
+      </li>
+      <li>
+        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md">Changelog</a>: changes and release history of this plugin.
+      </li>
+    </ul>
+
+  <h5>Support</h5>
+  <ul>
+    <li>
+      <a target="_blank" href="https://discord.gg/QXqfHEW">Discord Support Channel</a>
+    </li>
+    <li>
+      <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/issues/new/choose">Create a Developer Support Request</a>
+    </li>
+    <li>
+      <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md">View the Changelog and Release Notes</a>
+    </li>
+  </ul>
+</div>
+<noscript>
+  <h2>A JavaScript-enabled web browser is required to use this webUI.</h2>
+</noscript>
+<script>
+  <!--
+  (async () => {
+
+    // We use dynamic imports because web browsers often attempt to cache modules and we always want to pull a fresh copy, in case they've been updated.
+    await import("./ui.mjs");
+  })();
+  // -->
+</script>

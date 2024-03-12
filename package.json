@@ -1,40 +1,72 @@
 {
-  "displayName": "UniFi Access plugin for HomeKit (Homebridge).",
   "name": "homebridge-unifi-access",
-  "version": "0.0.1",
-  "description": "UniFi Access plugin for HomeKit (Homebridge).",
+  "version": "1.0.0",
+  "displayName": "Homebridge UniFi Access",
+  "description": "Homebridge UniFi Access plugin providing complete HomeKit integration for the UniFi Access ecosystem with full support for most features including autoconfiguration, motion detection, multiple controllers, and realtime updates.",
+  "author": {
+    "name": "HJD",
+    "url": "https://github.com/hjdhjd"
+  },
+  "homepage": "https://github.com/hjdhjd/homebridge-unifi-access#readme",
   "license": "ISC",
   "repository": {
     "type": "git",
     "url": "git://github.com/hjdhjd/homebridge-unifi-access.git"
   },
   "bugs": {
-    "url": "https://github.com/hjdhjd/homebridge-unifi-access/issues"
+    "url": "http://github.com/hjdhjd/homebridge-unifi-access/issues"
   },
+  "type": "module",
   "engines": {
-    "node": ">=10.17.0",
-    "homebridge": ">0.4.53"
-  },
-  "main": "dist/index.js",
-  "scripts": {
-    "lint": "eslint src/**.ts",
-    "watch": "npm run build && npm link && nodemon",
-    "build": "rimraf ./dist && tsc",
-    "prepublishOnly": "npm run lint && npm run build"
+    "homebridge": ">=1.6.0",
+    "node": ">=18"
   },
   "keywords": [
-    "homebridge-plugin"
+    "homebridge",
+    "homebridge-plugin",
+    "homebridge-unifi-access",
+    "homekit",
+    "camera",
+    "doorbell",
+    "ubiquiti",
+    "unifi",
+    "unifi access",
+    "unifi protect",
+    "motion",
+    "motion sensor",
+    "security",
+    "udm",
+    "udm pro",
+    "udm-pro",
+    "unifi camera",
+    "unifi cloud key",
+    "unifi dream machine pro",
+    "unifios"
   ],
-  "dependencies": {},
+  "scripts": {
+    "build": "rimraf ./dist && tsc",
+    "clean": "rimraf ./dist",
+    "lint": "eslint src/**.ts",
+    "jlint": "eslint homebridge-ui/public/**.mjs",
+    "postpublish": "npm run clean",
+    "prepublishOnly": "npm run lint && npm run build",
+    "test": "eslint src/**.ts",
+    "watch": "npm run build && npm link && nodemon"
+  },
+  "main": "dist/index.js",
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "1.0.1",
+    "mqtt": "5.3.6",
+    "unifi-access": "1.0.0"
+  },
   "devDependencies": {
-    "@types/node": "^14.0.14",
-    "@typescript-eslint/eslint-plugin": "^3.4.0",
-    "@typescript-eslint/parser": "^3.4.0",
-    "eslint": "^7.3.1",
-    "homebridge": "^1.1.1",
-    "nodemon": "^2.0.4",
-    "rimraf": "^3.0.2",
-    "ts-node": "^8.10.2",
-    "typescript": "^3.9.5"
+    "@stylistic/eslint-plugin": "1.6.3",
+    "@types/node": "20.11.26",
+    "@typescript-eslint/eslint-plugin": "7.2.0",
+    "@typescript-eslint/parser": "7.2.0",
+    "eslint": "8.57.0",
+    "homebridge": "1.7.0",
+    "rimraf": "5.0.5",
+    "typescript": "5.4.2"
   }
 }

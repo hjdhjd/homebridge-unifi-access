@@ -1,0 +1,98 @@
+name: Support Request
+description: Report a bug or request help. Please read the HBUA documentation, including the troubleshooting and best practices sections, before creating a support request.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Before opening a support request, please ensure you have read the [documentation](https://github.com/hjdhjd/homebridge-unifi-access#documentation), especially the [best practices](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/BestPractices.md) and [troubleshooting](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Troubleshooting.md) pages. Questions and topics already addressed in the documentation, or in prior issue reports, will be closed without a response.
+
+  - type: input
+    id: hbupversion
+    attributes:
+      label: Homebridge UniFi Access Version
+      description: Which version of Homebridge UniFi Access (HBUA) are you running on?
+      placeholder: e.g. v1.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: homebridgeos
+    attributes:
+      label: Homebridge Platform and OS
+      description: What hardware and operating system are you running Homebridge on?
+      placeholder: e.g. macOS Sonoma
+    validations:
+      required: true
+
+  - type: input
+    id: homebridge
+    attributes:
+      label: Homebridge Version
+      description: Which version of Homebridge are you running on?
+      placeholder: e.g. v1.7.0
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node Version
+      description: Which version of Node are you running on?
+      placeholder: e.g. v18.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: unifios
+    attributes:
+      label: UniFi OS Version
+      description: Which version of UniFi OS is your Access controller running on?
+      placeholder: e.g. v3.1.16
+    validations:
+      required: true
+
+  - type: input
+    id: access
+    attributes:
+      label: UniFi Access Controller Version
+      description: "Which version of the UniFi Access Controller are you running on? **Note: beta/EA versions are completely unsupported by HBUA, and your request will be closed.**"
+      placeholder: e.g. v1.23.12
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Describe the problem
+      description: Please describe the issue you're encountering, and ensure you include steps to reproduce, as well as your HBUA JSON configuration and log entries, if appropriate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Homebridge HBUA JSON configuration
+      description: Please copy and paste your Homebridge HBUA JSON configuration. Ensure that you redact sensitive information like passwords. This will be automatically formatted into code, so no need for backticks.
+      placeholder: Paste your HBUA configuration from Homebridge (gear icon in the Homebridge webUI next to HBUA, then select JSON config). Copy and paste it here.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant Homebridge HBUA log output. This will be automatically formatted into code, so no need for backticks.
+      placeholder: Please paste the relevant log entries here.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgment
+    attributes:
+      label: Acknowledgment that you are only running UniFi OS and UniFi Access releases from the Ubiquiti Official release channel
+      description: By submitting this issue, you are acknowledging that you are only using the Ubiquiti Official release channels for UniFi Access and UniFi OS and that you are **not** running early access or beta firmwares (or operating systems) from either Ubiquiti or Apple. **All issues relating to early access or beta firmwares will be closed without comment.** [Read the HBUA documentation for more](https://github.com/hjdhjd/homebridge-unifi-access#things-to-be-aware-of).
+      options:
+        - label: I acknowledge that I am not running any early access / beta firmwares or operating systems from either Ubiquiti or Apple.
+          required: true
