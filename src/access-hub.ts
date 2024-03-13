@@ -242,7 +242,13 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // MQTT status.
+    // MQTT doorbell status.
+    this.controller.mqtt?.subscribeGet(this.accessory, "doorbell", "Doorbell ring", () => {
+
+      return this.doorbellRingRequestId !== null ? "true" : "false";
+    });
+
+    // MQTT lock status.
     this.controller.mqtt?.subscribeGet(this.accessory, "lock", "Lock", () => {
 
       switch(this.hkLockState) {
@@ -264,7 +270,7 @@ export class AccessHub extends AccessDevice {
       }
     });
 
-    // MQTT status.
+    // MQTT lock status.
     this.controller.mqtt?.subscribeSet(this.accessory, "lock", "Lock", (value: string) => {
 
       switch(value) {
@@ -383,6 +389,9 @@ export class AccessHub extends AccessDevice {
         // Update our doorbell trigger, if needed.
         this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
 
+        // Publish to MQTT, if configured to do so.
+        this.controller.mqtt?.publish(this.accessory, "doorbell", "true");
+
         if(this.hints.logDoorbell) {
 
           this.log.info("Doorbell ring detected.");
@@ -402,6 +411,9 @@ export class AccessHub extends AccessDevice {
 
         // Update our doorbell trigger, if needed.
         this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
+
+        // Publish to MQTT, if configured to do so.
+        this.controller.mqtt?.publish(this.accessory, "doorbell", "false");
 
         if(this.hints.logDoorbell) {
 
