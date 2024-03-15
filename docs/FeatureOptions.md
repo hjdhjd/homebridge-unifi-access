@@ -48,8 +48,6 @@ The `options` setting is an array of strings used to customize Feature Options i
 ### <A NAME="reference"></A>Feature Options Reference
 Feature options provide a rich mechanism for tailoring your `homebridge-unifi-access` experience. The reference below is divided into functional category groups:
 
-**Note: it's strongly recommended that you use the Homebridge webUI](https://github.com/homebridge/homebridge-config-ui-x) to configure this plugin - it's easier to use for most people, and will ensure you always have a valid configuration.**
-
  * [Device](#device): Device feature options.
  * [Controller](#controller): Controller feature options.
  * [Hub](#hub): Hub feature options.
@@ -80,6 +78,7 @@ These option(s) apply to: UniFi Access hub.
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Hub.LockDelayInterval<I>.Value</I>`             | Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking. **(default: 0)**.
+| `Hub.Lock.Trigger`                               | Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs. **(default: disabled)**.
 | `Hub.Doorbell`                                   | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on Access hubs that have a doorbell.*
 | `Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on Access hubs that have a doorbell.*
 
@@ -91,4 +90,5 @@ These option(s) apply to: all Access device types.
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Log.Doorbell`                                   | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on Access hubs that have a doorbell.*
 | `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hub.*
+
 
