@@ -75,6 +75,7 @@ export class AccessHub extends AccessDevice {
 
     // Configure the lock.
     this.configureLock();
+    this.configureLockTrigger();
 
     // Configure MQTT services.
     this.configureMqtt();
@@ -83,56 +84,6 @@ export class AccessHub extends AccessDevice {
     this.controller.events.on(this.uda.unique_id, this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
     this.controller.events.on("access.remote_view", this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
     this.controller.events.on("access.remote_view.change", this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
-
-    return true;
-  }
-
-  // Configure the lock for HomeKit.
-  private configureLock(): boolean {
-
-    // Find the service, if it exists.
-    let lockService = this.accessory.getService(this.hap.Service.LockMechanism);
-
-    // Add the service to the accessory, if needed.
-    if(!lockService) {
-
-      lockService = new this.hap.Service.LockMechanism(this.accessoryName);
-
-      if(!lockService) {
-
-        this.log.error("Unable to add lock.");
-        return false;
-      }
-
-      this.accessory.addService(lockService);
-    }
-
-    // Return the lock state.
-    lockService.getCharacteristic(this.hap.Characteristic.LockCurrentState)?.onGet(() => {
-
-      return this.hkLockState;
-    });
-
-    lockService.getCharacteristic(this.hap.Characteristic.LockTargetState)?.onSet(async (value: CharacteristicValue) => {
-
-      if(!await this.controller.udaApi.unlock(this.uda,
-        (this.lockDelayInterval === undefined) ? undefined : (value === this.hap.Characteristic.LockTargetState.SECURED ? 0 : Infinity))) {
-
-        this.log.error("Unable to %s.", value === this.hap.Characteristic.LockTargetState.SECURED ? "lock" : "unlock");
-
-        // Revert our target state.
-        setTimeout(() => {
-
-          lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value);
-        }, 50);
-      }
-    });
-
-    // Initialize the lock.
-    this._hkLockState = -1;
-    lockService.displayName = this.accessoryName;
-    lockService.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
-    this.hkLockState = this.hubLockState;
 
     return true;
   }
@@ -170,6 +121,53 @@ export class AccessHub extends AccessDevice {
 
     doorbellService.setPrimaryService(true);
     this.log.info("Enabling doorbell.");
+
+    return true;
+  }
+
+  // Configure the lock for HomeKit.
+  private configureLock(): boolean {
+
+    // Find the service, if it exists.
+    let lockService = this.accessory.getService(this.hap.Service.LockMechanism);
+
+    // Add the service to the accessory, if needed.
+    if(!lockService) {
+
+      lockService = new this.hap.Service.LockMechanism(this.accessoryName);
+
+      if(!lockService) {
+
+        this.log.error("Unable to add lock.");
+        return false;
+      }
+
+      this.accessory.addService(lockService);
+    }
+
+    // Return the lock state.
+    lockService.getCharacteristic(this.hap.Characteristic.LockCurrentState)?.onGet(() => {
+
+      return this.hkLockState;
+    });
+
+    lockService.getCharacteristic(this.hap.Characteristic.LockTargetState)?.onSet(async (value: CharacteristicValue) => {
+
+      if(!(await this.hubLockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
+
+        // Revert our target state.
+        setTimeout(() => {
+
+          lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value);
+        }, 50);
+      }
+    });
+
+    // Initialize the lock.
+    this._hkLockState = -1;
+    lockService.displayName = this.accessoryName;
+    lockService.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
+    this.hkLockState = this.hubLockState;
 
     return true;
   }
@@ -228,6 +226,69 @@ export class AccessHub extends AccessDevice {
     triggerService.updateCharacteristic(this.hap.Characteristic.On, false);
 
     this.log.info("Enabling doorbell automation trigger.");
+
+    return true;
+  }
+
+  // Configure a switch to automate lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service.
+  private configureLockTrigger(): boolean {
+
+    // Find the switch service, if it exists.
+    let triggerService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+    // Doorbell switches are disabled by default and primarily exist for automation purposes.
+    if(!this.hasFeature("Hub.Lock.Trigger")) {
+
+      if(triggerService) {
+
+        this.accessory.removeService(triggerService);
+      }
+
+      return false;
+    }
+
+    const triggerName = this.accessoryName + " Lock Trigger";
+
+    // Add the switch to the hub, if needed.
+    if(!triggerService) {
+
+      triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+      if(!triggerService) {
+
+        this.log.error("Unable to add the lock trigger.");
+        return false;
+      }
+
+      triggerService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
+      this.accessory.addService(triggerService);
+    }
+
+    // Trigger the doorbell.
+    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+
+      return this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED;
+    });
+
+    // The state isn't really user-triggerable. We have no way, currently, to trigger a lock or unlock event on the hub.
+    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+
+      // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
+      if(!(await this.hubLockCommand(!value))) {
+
+        // Revert our state.
+        setTimeout(() => {
+
+          triggerService.updateCharacteristic(this.hap.Characteristic.On, !value);
+        }, 50);
+      }
+    });
+
+    // Initialize the switch.
+    triggerService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, triggerName);
+    triggerService.updateCharacteristic(this.hap.Characteristic.On, false);
+
+    this.log.info("Enabling lock automation trigger.");
 
     return true;
   }
@@ -297,6 +358,24 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
+  // Utility function to execute lock and unlock actions on a hub.
+  private async hubLockCommand(isLocking: boolean): Promise<boolean> {
+
+    if((this.lockDelayInterval === undefined) && isLocking) {
+
+      this.log.error("Unable to manually relock when the lock relay is configured to the default settings.");
+      return false;
+    }
+
+    if(!(await this.controller.udaApi.unlock(this.uda, (this.lockDelayInterval === undefined) ? undefined : (isLocking ? 0 : Infinity)))) {
+
+      this.log.error("Unable to %s.", isLocking ? "lock" : "unlock");
+      return false;
+    }
+
+    return true;
+  }
+
   // Return the current HomeKit lock state that we are tracking for this hub.
   private get hkLockState(): CharacteristicValue {
 
@@ -327,6 +406,8 @@ export class AccessHub extends AccessDevice {
     lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.hkLockState === this.hap.Characteristic.LockCurrentState.UNSECURED ?
       this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.SECURED);
     lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
+    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On,
+      this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
   }
 
   // Return the current state of the relay lock on the hub.

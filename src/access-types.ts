@@ -17,6 +17,7 @@ export enum AccessReservedNames {
 
   // Manage our switch types.
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
+  SWITCH_LOCK_TRIGGER = "LockTrigger",
   SWITCH_MOTION_SENSOR = "MotionSensorSwitch",
   SWITCH_MOTION_TRIGGER = "MotionSensorTrigger"
 }
