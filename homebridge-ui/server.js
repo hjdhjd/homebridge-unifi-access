@@ -94,7 +94,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
           return [];
         }
 
-        const devices = udaApi.devices.filter(x => x.is_adopted && x.is_managed);
+        const devices = udaApi.devices.filter(x => x.is_managed);
 
         devices.sort((a, b) => {
 

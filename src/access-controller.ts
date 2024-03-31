@@ -150,8 +150,8 @@ export class AccessController {
 
       for(const device of this.udaApi.devices) {
 
-        // Filter out any devices that aren't adopted by this Access controller.
-        if(!device.is_adopted || !device.is_managed) {
+        // Filter out any devices that aren't managed by this Access controller.
+        if(!device.is_managed) {
 
           continue;
         }
@@ -242,7 +242,7 @@ export class AccessController {
   public addHomeKitDevice(device: AccessDeviceConfig): AccessDevice | null {
 
     // If we have no MAC address, name, or this device isn't being managed by this Access controller, we're done.
-    if(!this.uda?.host.mac || !device || !device.mac || !device.is_adopted || !device.is_managed) {
+    if(!this.uda?.host.mac || !device || !device.mac || !device.is_managed) {
 
       return null;
     }
@@ -326,9 +326,8 @@ export class AccessController {
     // Remove Access devices that are no longer found on this Access controller, but we still have in HomeKit.
     this.cleanupDevices();
 
-    // Sync our names.
-    Object.keys(this.configuredDevices).filter(x => ("hints" in this.configuredDevices[x]) && this.configuredDevices[x].hints.syncName)
-      .map(x => (this.configuredDevices[x].accessoryName = this.configuredDevices[x].uda.name));
+    // Update our device information.
+    Object.keys(this.configuredDevices).map(x => this.configuredDevices[x].configureInfo());
 
     return true;
   }
