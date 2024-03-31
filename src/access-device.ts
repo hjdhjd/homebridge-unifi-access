@@ -87,7 +87,13 @@ export abstract class AccessBase {
     // Update the firmware revision for this device.
     if(device.firmware?.length) {
 
-      accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision, device.firmware);
+      // Capture the version of the device firmware, ensuring we get major, minor, and patch levels if they exist.
+      const versionRegex = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(.+))?$/;
+      const match = versionRegex.exec(device.firmware);
+
+      // Update our firmware revision.
+      accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision,
+        match ? match[1] + "." + (match[2] ?? "0") + "." + (match[3] ?? "0") : device.firmware);
     }
 
     return true;
