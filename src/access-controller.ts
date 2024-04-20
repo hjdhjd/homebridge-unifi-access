@@ -211,6 +211,7 @@ export class AccessController {
     switch(device.device_type) {
 
       case "UAH":
+      case "UAH-DOOR":
 
         // We have a UniFi Access hub.
         this.configuredDevices[accessory.UUID] = new AccessHub(this, device, accessory);
@@ -251,6 +252,7 @@ export class AccessController {
     switch(device.device_type) {
 
       case "UAH":
+      case "UAH-DOOR":
 
         break;
 
@@ -401,6 +403,7 @@ export class AccessController {
       switch(accessDevice.uda.device_type) {
 
         case "UAH":
+        case "UAH-DOOR":
 
           if(this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac === accessDevice.uda.mac) && accessDevice.hasFeature("Device")) {
 

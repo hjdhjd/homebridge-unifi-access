@@ -224,7 +224,7 @@ export class AccessFeatureOptions extends (await import("./lib/featureoptions.mj
 
     // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
     // const modelKeys = [...new Set(this.udaDevices.map(x => x.display_model))];
-    const modelKeys = this.udaDevices.length ? [ "controller", "UA Hub" ] : [];
+    const modelKeys = this.udaDevices.length ? [ "controller", "UA Hub", "UA Hub Door" ] : [];
     this.deviceList = [];
 
     // The first entry returned by getDevices is always the controller.
@@ -238,8 +238,14 @@ export class AccessFeatureOptions extends (await import("./lib/featureoptions.mj
       // Get all the devices associated with this device category.
       const devices = this.udaDevices.filter(x => x.display_model === key);
 
+      // Nothing in this category, let's keep going.
+      if(!devices.length) {
+
+        continue;
+      }
+
       // If it's a controller, we handle that case differently.
-      if((key === "controller") && devices.length) {
+      if(key === "controller") {
 
         // Change the name of the controller that we show users once we've connected with the controller.
         this.controllerList.map(x => (x.name === controller.address) ? x.childNodes[0].nodeValue = devices[0].host.hostname : true);
