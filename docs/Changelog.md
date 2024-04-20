@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.3.0 (2024-04-20)
+  * New feature: add support for the latest generation of UniFi Access hubs.
+
 ## 1.2.2 (2024-03-31)
   * Fix: disconnected devices could appear as no longer belonging to a given Access controller.
   * Housekeeping.
