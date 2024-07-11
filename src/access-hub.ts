@@ -413,7 +413,12 @@ export class AccessHub extends AccessDevice {
   // Return the current state of the relay lock on the hub.
   private get hubLockState(): CharacteristicValue {
 
-    const lockRelay = this.uda.configs.find(x => x.key === "input_state_rly-lock_dry");
+    let lockRelay = "off"
+    if(this.uda.device_type == "UA-ULTRA"){
+      lockRelay = this.uda.configs.find(x => x.key === "output_d1_lock_relay");
+    }else{
+      lockRelay = this.uda.configs.find(x => x.key === "input_state_rly-lock_dry");
+    }
 
     return (lockRelay?.value === "off" ?
       this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED) ?? this.hap.Characteristic.LockCurrentState.UNKNOWN;

@@ -210,6 +210,7 @@ export class AccessController {
 
     switch(device.device_type) {
 
+      case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
 
@@ -251,6 +252,7 @@ export class AccessController {
     // We only support certain devices.
     switch(device.device_type) {
 
+      case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
 
@@ -402,6 +404,7 @@ export class AccessController {
       // Check to see if the device still exists on the Access controller and the user has not chosen to hide it.
       switch(accessDevice.uda.device_type) {
 
+        case "UA-ULTRA":
         case "UAH":
         case "UAH-DOOR":
 
