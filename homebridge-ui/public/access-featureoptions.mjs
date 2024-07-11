@@ -224,7 +224,7 @@ export class AccessFeatureOptions extends (await import("./lib/featureoptions.mj
 
     // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
     // const modelKeys = [...new Set(this.udaDevices.map(x => x.display_model))];
-    const modelKeys = this.udaDevices.length ? [ "controller", "UA Hub", "UA Hub Door" ] : [];
+    const modelKeys = this.udaDevices.length ? [ "controller", "UA Hub", "UA Hub Door" , "UA Ultra" ] : [];
     this.deviceList = [];
 
     // The first entry returned by getDevices is always the controller.
