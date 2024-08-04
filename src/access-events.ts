@@ -76,7 +76,7 @@ export class AccessEvents extends EventEmitter {
 
         // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
         accessDevice.accessory.services.filter(x => x.testCharacteristic(this.hap.Characteristic.StatusActive))
-          ?.map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice?.uda.is_online === true));
+          ?.map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice?.isOnline ?? false));
 
         // Sync names, if configured to do so.
         if(accessDevice.hints.syncName && accessDevice.name !== accessDevice.uda.name) {
@@ -109,6 +109,7 @@ export class AccessEvents extends EventEmitter {
 
       // Remove the device.
       this.controller.removeHomeKitDevice(accessDevice);
+
       return;
     }
   }
@@ -143,7 +144,7 @@ export class AccessEvents extends EventEmitter {
       // If enabled, publish all the event traffic coming from the Access controller to MQTT.
       if(this.mqttPublishTelemetry) {
 
-        this.controller.mqtt?.publish(this.controller.uda.host.mac, "telemetry", JSON.stringify(packet));
+        this.controller.mqtt?.publish(this.controller.uda.host.mac.replace(/:/g, ""), "telemetry", JSON.stringify(packet));
       }
     });
 
@@ -194,7 +195,7 @@ export class AccessEvents extends EventEmitter {
     accessDevice.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
 
     // Publish the motion event to MQTT, if the user has configured it.
-    this.controller.mqtt?.publish(accessDevice.accessory, "motion", "true");
+    this.controller.mqtt?.publish(accessDevice.id, "motion", "true");
 
     // Log the event, if configured to do so.
     if(accessDevice.hints.logMotion) {
@@ -213,7 +214,7 @@ export class AccessEvents extends EventEmitter {
       accessDevice.log.debug("Resetting motion event.");
 
       // Publish to MQTT, if the user has configured it.
-      this.controller.mqtt?.publish(accessDevice.accessory, "motion", "false");
+      this.controller.mqtt?.publish(accessDevice.id, "motion", "false");
 
       // Delete the timer from our motion event tracker.
       delete this.eventTimers[accessDevice.id];

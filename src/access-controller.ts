@@ -5,12 +5,12 @@
 import { ACCESS_CONTROLLER_REFRESH_INTERVAL, ACCESS_CONTROLLER_RETRY_INTERVAL, PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
 import { API, HAP, PlatformAccessory } from "homebridge";
 import { AccessApi, AccessControllerConfig, AccessDeviceConfig } from "unifi-access";
-import { AccessControllerOptions, getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled } from "./access-options.js";
+import { MqttClient, retry, sleep } from "homebridge-plugin-utils";
+import { AccessControllerOptions } from "./access-options.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessEvents } from "./access-events.js";
 import { AccessHub } from "./access-hub.js";
 import { AccessLogging } from "./access-types.js";
-import { AccessMqtt } from "./access-mqtt.js";
 import { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
 
@@ -25,7 +25,7 @@ export class AccessController {
   private hap: HAP;
   public logApiErrors: boolean;
   public readonly log: AccessLogging;
-  public mqtt: AccessMqtt | null;
+  public mqtt: MqttClient | null;
   private name: string;
   public platform: AccessPlatform;
   public uda: AccessControllerConfig;
@@ -67,7 +67,7 @@ export class AccessController {
   private async bootstrapController(): Promise<void> {
 
     // Attempt to bootstrap the controller until we're successful.
-    await this.retry(() => this.udaApi.getBootstrap(), ACCESS_CONTROLLER_RETRY_INTERVAL * 1000);
+    await retry(async () => this.udaApi.getBootstrap(), ACCESS_CONTROLLER_RETRY_INTERVAL * 1000);
   }
 
   // Initialize our connection to the UniFi Access controller.
@@ -77,6 +77,7 @@ export class AccessController {
     if(!this.hasFeature("Device")) {
 
       this.log.info("Disabling this UniFi Access controller.");
+
       return;
     }
 
@@ -100,7 +101,7 @@ export class AccessController {
 
     // Attempt to login to the Access controller, retrying at reasonable intervals. This accounts for cases where the Access controller or the network connection
     // may not be fully available when we startup.
-    await this.retry(() => this.udaApi.login(this.config.address, this.config.username, this.config.password), ACCESS_CONTROLLER_RETRY_INTERVAL * 1000);
+    await retry(async () => this.udaApi.login(this.config.address, this.config.username, this.config.password), ACCESS_CONTROLLER_RETRY_INTERVAL * 1000);
 
     // Now, let's get the bootstrap configuration from the Access controller.
     await this.bootstrapController();
@@ -125,11 +126,12 @@ export class AccessController {
 
       // Let's sleep for thirty seconds to give all the accessories a chance to load before disabling everything. Homebridge doesn't have a good mechanism to notify us
       // when all the cached accessories are loaded at startup.
-      await this.sleep(30);
+      await sleep(30);
 
       // Unregister all the accessories for this controller from Homebridge that may have been restored already. Any additional ones will be automatically caught when
       // they are restored.
       this.removeHomeKitAccessories(this.platform.accessories.filter(x => x.context.controller === this.uda.host.mac));
+
       return;
     }
 
@@ -142,7 +144,7 @@ export class AccessController {
     // Initialize MQTT, if needed.
     if(!this.mqtt && this.config.mqttUrl) {
 
-      this.mqtt = new AccessMqtt(this);
+      this.mqtt = new MqttClient(this.config.mqttUrl, this.config.mqttTopic, this.log);
     }
 
     // Inform the user about the devices we see.
@@ -215,9 +217,8 @@ export class AccessController {
 
         // We have a UniFi Access hub.
         this.configuredDevices[accessory.UUID] = new AccessHub(this, device, accessory);
-        return true;
 
-        break;
+        return true;
 
       default:
 
@@ -248,33 +249,25 @@ export class AccessController {
       return null;
     }
 
-    // We only support certain devices.
-    switch(device.device_type) {
+    // We only support certain device capabilities.
+    if(!device.capabilities.includes("is_hub")) {
 
-      case "UAH":
-      case "UAH-DOOR":
+      // If we've already informed the user about this one, we're done.
+      if(this.unsupportedDevices[device.mac]) {
 
-        break;
-
-      default:
-
-        // If we've already informed the user about this one, we're done.
-        if(this.unsupportedDevices[device.mac]) {
-
-          return null;
-        }
-
-        // Notify the user we see this device, but we aren't adding it to HomeKit.
-        this.unsupportedDevices[device.mac] = true;
-
-        this.log.info("UniFi Access device type '%s' is not currently supported, ignoring: %s.", device.device_type, this.udaApi.getDeviceName(device));
         return null;
+      }
 
-        break;
+      // Notify the user we see this device, but we aren't adding it to HomeKit.
+      this.unsupportedDevices[device.mac] = true;
+
+      this.log.info("UniFi Access device type '%s' is not currently supported, ignoring: %s.", device.device_type, this.udaApi.getDeviceName(device));
+
+      return null;
     }
 
     // Exclude or include certain devices based on configuration parameters.
-    if(!this.hasFeature("Device", true, device)) {
+    if(!this.hasFeature("Device", device.mac.replace(/:/g, ""))) {
 
       return null;
     }
@@ -369,6 +362,7 @@ export class AccessController {
 
             this.deviceRemovalQueue[accessory.UUID] = Date.now();
             this.log.info("%s: Delaying device removal for at least %s second%s.", accessory.displayName, delayInterval, delayInterval > 1 ? "s" : "");
+
             continue;
           }
 
@@ -400,23 +394,13 @@ export class AccessController {
       }
 
       // Check to see if the device still exists on the Access controller and the user has not chosen to hide it.
-      switch(accessDevice.uda.device_type) {
+      if(accessDevice.uda.capabilities.includes("is_hub") && this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac === accessDevice.uda.mac) &&
+        accessDevice.hasFeature("Device")) {
 
-        case "UAH":
-        case "UAH-DOOR":
+        // In case we have previously queued a device for deletion, let's remove it from the queue since it's reappeared.
+        delete this.deviceRemovalQueue[accessDevice.accessory.UUID];
 
-          if(this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac === accessDevice.uda.mac) && accessDevice.hasFeature("Device")) {
-
-            // In case we have previously queued a device for deletion, let's remove it from the queue since it's reappeared.
-            delete this.deviceRemovalQueue[accessDevice.accessory.UUID];
-            continue;
-          }
-
-          break;
-
-        default:
-
-          break;
+        continue;
       }
 
       // Process the device removal.
@@ -524,39 +508,24 @@ export class AccessController {
   // Utility function to return a floating point configuration parameter on a device.
   public getFeatureFloat(option: string): number | undefined {
 
-    return getOptionFloat(getOptionValue(this.platform.featureOptions, this.uda, null, option));
+    return this.platform.featureOptions.getFloat(option, this.id);
   }
 
   // Utility function to return an integer configuration parameter on a device.
   public getFeatureNumber(option: string): number | undefined {
 
-    return getOptionNumber(getOptionValue(this.platform.featureOptions, this.uda, null, option));
+    return this.platform.featureOptions.getInteger(option, this.id);
   }
 
   // Utility for checking feature options on the NVR.
-  public hasFeature(option: string, defaultReturnValue?: boolean, device:  AccessControllerConfig | AccessDeviceConfig | null = null): boolean {
+  public hasFeature(option: string, deviceId = this.id): boolean {
 
-    return isOptionEnabled(this.platform.featureOptions, this.uda, device, option, defaultReturnValue ?? this.platform.featureOptionDefault(option));
+    return this.platform.featureOptions.test(option, deviceId, this.id);
   }
 
-  // Emulate a sleep function.
-  public sleep(sleepTimer: number): Promise<NodeJS.Timeout> {
+  // Return a unique identifier for an Access controller.
+  public get id(): string | undefined {
 
-    return new Promise(resolve => setTimeout(resolve, sleepTimer));
-  }
-
-  // Retry an operation until we're successful.
-  private async retry(operation: () => Promise<boolean>, retryInterval: number): Promise<boolean> {
-
-    // Try the operation that was requested.
-    if(!(await operation())) {
-
-      // If the operation wasn't successful, let's sleep for the requested interval and try again.
-      await this.sleep(retryInterval);
-      return this.retry(operation, retryInterval);
-    }
-
-    // We were successful - we're done.
-    return true;
+    return this.uda.host?.mac?.replace(/:/g, "");
   }
 }

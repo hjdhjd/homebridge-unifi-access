@@ -113,6 +113,7 @@ export class AccessHub extends AccessDevice {
       if(!doorbellService) {
 
         this.log.error("Unable to add doorbell.");
+
         return false;
       }
 
@@ -139,6 +140,7 @@ export class AccessHub extends AccessDevice {
       if(!lockService) {
 
         this.log.error("Unable to add lock.");
+
         return false;
       }
 
@@ -161,6 +163,8 @@ export class AccessHub extends AccessDevice {
           lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value);
         }, 50);
       }
+
+      lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
     });
 
     // Initialize the lock.
@@ -199,6 +203,7 @@ export class AccessHub extends AccessDevice {
       if(!triggerService) {
 
         this.log.error("Unable to add the doorbell trigger.");
+
         return false;
       }
 
@@ -257,6 +262,7 @@ export class AccessHub extends AccessDevice {
       if(!triggerService) {
 
         this.log.error("Unable to add the lock trigger.");
+
         return false;
       }
 
@@ -304,35 +310,32 @@ export class AccessHub extends AccessDevice {
     }
 
     // MQTT doorbell status.
-    this.controller.mqtt?.subscribeGet(this.accessory, "doorbell", "Doorbell ring", () => {
+    this.controller.mqtt?.subscribeGet(this.id, "doorbell", "Doorbell ring", () => {
 
       return this.doorbellRingRequestId !== null ? "true" : "false";
     });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeGet(this.accessory, "lock", "Lock", () => {
+    this.controller.mqtt?.subscribeGet(this.id, "lock", "Lock", () => {
 
       switch(this.hkLockState) {
 
         case this.hap.Characteristic.LockCurrentState.SECURED:
 
           return "true";
-          break;
 
         case this.hap.Characteristic.LockCurrentState.UNSECURED:
 
           return "false";
-          break;
 
         default:
 
           return "unknown";
-          break;
       }
     });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeSet(this.accessory, "lock", "Lock", (value: string) => {
+    this.controller.mqtt?.subscribeSet(this.id, "lock", "Lock", (value: string) => {
 
       switch(value) {
 
@@ -351,6 +354,7 @@ export class AccessHub extends AccessDevice {
         default:
 
           this.log.error("MQTT: Unknown lock set message received: %s.", value);
+
           break;
       }
     });
@@ -361,15 +365,29 @@ export class AccessHub extends AccessDevice {
   // Utility function to execute lock and unlock actions on a hub.
   private async hubLockCommand(isLocking: boolean): Promise<boolean> {
 
+    const action = isLocking ? "lock" : "unlock";
+
+    // Only allow relocking if we are able to do so.
     if((this.lockDelayInterval === undefined) && isLocking) {
 
       this.log.error("Unable to manually relock when the lock relay is configured to the default settings.");
+
       return false;
     }
 
+    // If we're not online, we're done.
+    if(!this.isOnline) {
+
+      this.log.error("Unable to %s. Device is offline.", action);
+
+      return false;
+    }
+
+    // Execute the action.
     if(!(await this.controller.udaApi.unlock(this.uda, (this.lockDelayInterval === undefined) ? undefined : (isLocking ? 0 : Infinity)))) {
 
-      this.log.error("Unable to %s.", isLocking ? "lock" : "unlock");
+      this.log.error("Unable to %s.", action);
+
       return false;
     }
 
@@ -413,7 +431,7 @@ export class AccessHub extends AccessDevice {
   // Return the current state of the relay lock on the hub.
   private get hubLockState(): CharacteristicValue {
 
-    const lockRelay = this.uda.configs.find(x => x.key === "input_state_rly-lock_dry");
+    const lockRelay = this.uda.configs?.find(x => x.key === "input_state_rly-lock_dry");
 
     return (lockRelay?.value === "off" ?
       this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED) ?? this.hap.Characteristic.LockCurrentState.UNKNOWN;
@@ -471,7 +489,7 @@ export class AccessHub extends AccessDevice {
         this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
 
         // Publish to MQTT, if configured to do so.
-        this.controller.mqtt?.publish(this.accessory, "doorbell", "true");
+        this.controller.mqtt?.publish(this.id, "doorbell", "true");
 
         if(this.hints.logDoorbell) {
 
@@ -494,7 +512,7 @@ export class AccessHub extends AccessDevice {
         this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
 
         // Publish to MQTT, if configured to do so.
-        this.controller.mqtt?.publish(this.accessory, "doorbell", "false");
+        this.controller.mqtt?.publish(this.id, "doorbell", "false");
 
         if(this.hints.logDoorbell) {
 

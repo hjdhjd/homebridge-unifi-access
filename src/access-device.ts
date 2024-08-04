@@ -6,7 +6,6 @@ import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION} from "./settings.js"
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
 import { AccessLogging, AccessReservedNames } from "./access-types.js";
-import { getOptionFloat, getOptionNumber, getOptionValue, isOptionEnabled } from "./access-options.js";
 import { AccessController } from "./access-controller.js";
 import { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
@@ -138,13 +137,13 @@ export abstract class AccessDevice extends AccessBase {
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
     // Sanity check motion detection duration. Make sure it's never less than 2 seconds so we can actually alert the user.
-    if(this.hints.motionDuration < 2 ) {
+    if(this.hints.motionDuration < 2) {
 
       this.hints.motionDuration = 2;
     }
 
     // Sanity check occupancy detection duration. Make sure it's never less than 60 seconds so we can actually alert the user.
-    if(this.hints.occupancyDuration < 60 ) {
+    if(this.hints.occupancyDuration < 60) {
 
       this.hints.occupancyDuration = 60;
     }
@@ -221,6 +220,7 @@ export abstract class AccessDevice extends AccessBase {
       if(!motionService) {
 
         this.log.error("Unable to add motion sensor.");
+
         return false;
       }
 
@@ -289,6 +289,7 @@ export abstract class AccessDevice extends AccessBase {
       if(!switchService) {
 
         this.log.error("Unable to add motion sensor switch.");
+
         return false;
       }
 
@@ -351,6 +352,7 @@ export abstract class AccessDevice extends AccessBase {
       if(!triggerService) {
 
         this.log.error("Unable to add motion sensor trigger.");
+
         return false;
       }
 
@@ -420,6 +422,7 @@ export abstract class AccessDevice extends AccessBase {
 
       // When we get the right message, we trigger the motion event.
       if(value?.toLowerCase() !== "true") {
+
         return;
       }
 
@@ -458,6 +461,7 @@ export abstract class AccessDevice extends AccessBase {
       if(!occupancyService) {
 
         this.log.error("Unable to add occupancy sensor.");
+
         return false;
       }
 
@@ -486,25 +490,25 @@ export abstract class AccessDevice extends AccessBase {
   // Utility function to return a floating point configuration parameter on a device.
   public getFeatureFloat(option: string): number | undefined {
 
-    return getOptionFloat(this.getFeatureValue(option));
+    return this.platform.featureOptions.getFloat(option, this.id, this.controller.id);
   }
 
   // Utility function to return an integer configuration parameter on a device.
   public getFeatureNumber(option: string): number | undefined {
 
-    return getOptionNumber(this.getFeatureValue(option));
+    return this.platform.featureOptions.getInteger(option, this.id, this.controller.id);
   }
 
   // Utility function to return a configuration parameter on a device.
   public getFeatureValue(option: string): string | undefined {
 
-    return getOptionValue(this.platform.featureOptions, this.controller.uda, this.uda, option);
+    return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }
 
   // Utility for checking feature options on a device.
-  public hasFeature(option: string, defaultReturnValue?: boolean): boolean {
+  public hasFeature(option: string): boolean {
 
-    return isOptionEnabled(this.platform.featureOptions, this.controller.uda, this.uda, option, defaultReturnValue ?? this.platform.featureOptionDefault(option));
+    return this.controller.hasFeature(option, this.id);
   }
 
   // Utility function for reserved identifiers for switches.
@@ -516,7 +520,7 @@ export abstract class AccessDevice extends AccessBase {
   // Utility function to determine whether or not a device is currently online.
   public get isOnline(): boolean {
 
-    return this.uda.is_online;
+    return (["is_adopted", "is_connected", "is_managed", "is_online"] as const).every(key => this.uda[key]);
   }
 
   // Return a unique identifier for an Access device.

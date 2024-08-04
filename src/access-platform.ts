@@ -6,6 +6,7 @@ import { API, APIEvent, DynamicPlatformPlugin, Logging, PlatformAccessory, Platf
 import { AccessControllerOptions, AccessOptions, featureOptionCategories, featureOptions } from "./access-options.js";
 import { ACCESS_MQTT_TOPIC } from "./settings.js";
 import { AccessController } from "./access-controller.js";
+import { FeatureOptions } from "homebridge-plugin-utils";
 import util from "node:util";
 
 export class AccessPlatform implements DynamicPlatformPlugin {
@@ -14,8 +15,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   public readonly api: API;
   public readonly config!: AccessOptions;
   private readonly controllers: AccessController[];
-  private featureOptionDefaults: { [index: string]: boolean };
-  public readonly featureOptions: string[];
+  public readonly featureOptions: FeatureOptions;
   public readonly log: Logging;
 
   constructor(log: Logging, config: PlatformConfig, api: API) {
@@ -23,8 +23,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.accessories = [];
     this.api = api;
     this.controllers = [];
-    this.featureOptionDefaults = {};
-    this.featureOptions = [];
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options ?? []);
     this.log = log;
 
     // We can't start without being configured.
@@ -46,29 +45,12 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     if(!this.config.controllers) {
 
       this.log.info("No UniFi Access controllers have been configured.");
+
       return;
     }
 
     // Debugging - most people shouldn't enable this.
     this.debug("Debug logging on. Expect a lot of data.");
-
-    // Build our list of default values for our feature options.
-    for(const category of featureOptionCategories) {
-
-      for(const options of featureOptions[category.name]) {
-
-        this.featureOptionDefaults[(category.name + (options.name.length ? "." + options.name : "")).toLowerCase()] = options.default;
-      }
-    }
-
-    // If we have feature options, put them into their own array, lower-cased for future reference.
-    if(this.config.options) {
-
-      for(const featureOption of this.config.options) {
-
-        this.featureOptions.push(featureOption.toLowerCase());
-      }
-    }
 
     // Loop through each configured NVR and instantiate it.
     for(const controllerConfig of this.config.controllers) {
@@ -77,6 +59,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       if(!controllerConfig.address) {
 
         this.log.info("No host or IP address has been configured.");
+
         continue;
       }
 
@@ -84,21 +67,18 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       if(!controllerConfig.username || !controllerConfig.password) {
 
         this.log.info("No UniFi Access login credentials have been configured.");
+
         continue;
       }
 
       // MQTT topic to use.
-      if(!controllerConfig.mqttTopic) {
-
-        controllerConfig.mqttTopic = ACCESS_MQTT_TOPIC;
-      }
+      controllerConfig.mqttTopic ??= ACCESS_MQTT_TOPIC;
 
       this.controllers.push(new AccessController(this, controllerConfig));
     }
 
     // Avoid a prospective race condition by waiting to configure our controllers until Homebridge is done loading all the cached accessories it knows about, and calling
     // configureAccessory() on each.
-    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     api.on(APIEvent.DID_FINISH_LAUNCHING, this.launchControllers.bind(this));
   }
 
@@ -119,20 +99,6 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       // Login to the Access controller.
       void controller.login();
     }
-  }
-
-  // Utility to return the default value for a feature option.
-  public featureOptionDefault(option: string): boolean {
-
-    const defaultValue = this.featureOptionDefaults[option.toLowerCase()];
-
-    // If it's a feature that's unknown to us, assume it's false.
-    if(defaultValue === undefined) {
-
-      return false;
-    }
-
-    return defaultValue;
   }
 
   // Utility for debug logging.

@@ -1,182 +1,287 @@
 /* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * ui.mjs: HBUA webUI.
+ * ui.mjs: Homebridge UniFi Access webUI.
  */
 "use strict";
 
-// Keep a list of all the feature options and option groups. We dynamically import our modules to avoid browser caches.
-const featureOptions = new (await import("./access-featureoptions.mjs")).AccessFeatureOptions();
+import { webUi } from "./lib/webUi.mjs";
 
-// Show the first run user experience if we don't have valid login credentials.
-function showFirstRun () {
+// Execute our first run screen if we don't have valid Access login credentials and a controller.
+const firstRunIsRequired = () => {
 
-  const buttonFirstRun = document.getElementById("firstRun");
-  const inputAddress = document.getElementById("address");
-  const inputUsername = document.getElementById("username");
-  const inputPassword = document.getElementById("password");
-  const tdLoginError = document.getElementById("loginError");
+  if(ui.featureOptions.currentConfig.length && ui.featureOptions.currentConfig[0].controllers?.length &&
+    ui.featureOptions.currentConfig[0].controllers[0]?.address?.length && ui.featureOptions.currentConfig[0].controllers[0]?.username?.length &&
+    ui.featureOptions.currentConfig[0].controllers[0]?.password?.length) {
 
-  // If we don't have any controllers configured, initialize the list.
-  if(!featureOptions.currentConfig[0].controllers) {
-
-    featureOptions.currentConfig[0].controllers = [ {} ];
+    return false;
   }
 
+  return true;
+}
+
+// Initialize our first run screen with any information from our existing configuration.
+const firstRunOnStart = () => {
+
   // Pre-populate with anything we might already have in our configuration.
-  inputAddress.value = featureOptions.currentConfig[0].controllers[0].address ?? "";
-  inputUsername.value = featureOptions.currentConfig[0].controllers[0].username ?? "";
-  inputPassword.value = featureOptions.currentConfig[0].controllers[0].password ?? "";
+  document.getElementById("address").value = ui.featureOptions.currentConfig[0].controllers?.[0]?.address ?? "";
+  document.getElementById("username").value = ui.featureOptions.currentConfig[0].controllers?.[0]?.username ?? "";
+  document.getElementById("password").value = ui.featureOptions.currentConfig[0].controllers?.[0]?.password ?? "";
 
-  // Clear login error messages when the login credentials change.
-  inputAddress.addEventListener("input", () => {
+  return true;
+};
 
-    tdLoginError.innerHTML = "&nbsp;";
-  });
+// Validate our Access credentials.
+const firstRunOnSubmit = async () => {
 
-  inputUsername.addEventListener("input", () => {
+  const address = document.getElementById("address").value;
+  const username = document.getElementById("username").value;
+  const password = document.getElementById("password").value;
+  const tdLoginError = document.getElementById("loginError");
 
-    tdLoginError.innerHTML = "&nbsp;";
-  });
+  tdLoginError.innerHTML = "&nbsp;";
 
-  inputPassword.addEventListener("input", () => {
+  if(!address?.length || !username?.length || !password?.length) {
 
-    tdLoginError.innerHTML = "&nbsp;";
-  });
+    tdLoginError.innerHTML = "<code class=\"text-danger\">Please enter a valid UniFi Access controller address, username and password.</code>";
+    homebridge.hideSpinner();
 
-  // First run user experience.
-  buttonFirstRun.addEventListener("click", async () => {
+    return false;
+  }
 
-    // Show the beachball while we setup.
-    homebridge.showSpinner();
+  const udaDevices = await homebridge.request("/getDevices", { address: address, username: username, password: password });
 
-    const address = inputAddress.value;
-    const username = inputUsername.value;
-    const password = inputPassword.value;
+  // Couldn't connect to the Access controller for some reason.
+  if(!udaDevices?.length) {
 
-    tdLoginError.innerHTML = "&nbsp;";
+    tdLoginError.innerHTML = "Unable to login to the UniFi Access controller.<br>Please check your controller address, username, and password.<br><code class=\"text-danger\">" + (await homebridge.request("/getErrorMessage")) + "</code>";
+    homebridge.hideSpinner();
 
-    if(!address?.length || !username?.length || !password?.length) {
+    return false;
+  }
 
-      tdLoginError.appendChild(document.createTextNode("Please enter a valid UniFi Access controller address, username and password."));
-      homebridge.hideSpinner();
-      return;
+  // Save the login credentials to our configuration.
+  if(!ui.featureOptions.currentConfig[0].controllers?.length) {
+
+    ui.featureOptions.currentConfig[0].controllers = [{}];
+  }
+
+  ui.featureOptions.currentConfig[0].controllers[0].address = address;
+  ui.featureOptions.currentConfig[0].controllers[0].username = username;
+  ui.featureOptions.currentConfig[0].controllers[0].password = password;
+
+  await homebridge.updatePluginConfig(ui.featureOptions.currentConfig);
+
+  return true;
+};
+
+// Return the list of devices associated with a given Access controller.
+const getDevices = async (controller) => {
+
+  // If we're in the global context, we have no devices.
+  if(!controller) {
+
+    return [];
+  }
+
+  // Retrieve the current list of devices from the Access controller.
+  let devices = await homebridge.request("/getDevices", { address: controller.address, username: controller.username, password: controller.password });
+
+  // Since the controller JSON doesn't have the same properties as the device JSON, let's make the controller JSON emulate the properties we care about.
+  if(devices?.length) {
+
+    devices[0].display_model = "controller";
+    devices[0].ip = devices[0].host.ip;
+    devices[0].is_online = true;
+    devices[0].mac = devices[0].host.mac;
+    devices[0].model = devices[0].host.device_type;
+    devices[0].unique_id = devices[0].host.mac;
+  }
+
+  // Add the fields that the webUI framework is looking for to render.
+  devices = devices.map(device => ({
+
+    ...device,
+    serial: device.mac.replace(/:/g, "").toUpperCase()
+  }));
+
+  return devices;
+};
+
+// Return whether a given device is a controller.
+const isController = (device) => device.modelKey === "controller";
+
+// Show the list of Access devices associated with a controller, grouped by model.
+const showSidebarDevices = (controller, devices) => {
+
+  // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
+  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub")).map(device => device.display_model))]
+
+  // Start with a clean slate.
+  ui.featureOptions.devicesTable.innerHTML = "";
+
+  for(const key of modelKeys) {
+
+    // Get all the devices associated with this device category.
+    const modelDevices = devices.filter(x => x.display_model === key);
+
+    // Nothing in this category, let's keep going.
+    if(!modelDevices.length) {
+
+      continue;
     }
 
-    const udaDevices = await homebridge.request("/getDevices", { address: address, username: username, password: password });
+    // If it's a controller, we handle that case differently.
+    if(key === "controller") {
 
-    // Couldn't connect to the Access controller for some reason.
-    if(!udaDevices?.length) {
+      // Change the name of the controller that we show users once we've connected with the controller.
+      ui.featureOptions.webUiControllerList.map(x => (x.name === controller.address) ? x.childNodes[0].nodeValue = modelDevices[0].host.hostname : true);
 
-      tdLoginError.innerHTML = "Unable to login to the UniFi Access controller.<br>Please check your controller address, username, and password.<br><code class=\"text-danger\">" + (await homebridge.request("/getErrorMessage")) + "</code>";
-      homebridge.hideSpinner();
-      return;
+      continue;
     }
 
-    // Save the login credentials to our configuration.
-    featureOptions.currentConfig[0].controllers[0].address = address;
-    featureOptions.currentConfig[0].controllers[0].username = username;
-    featureOptions.currentConfig[0].controllers[0].password = password;
+    // Create a row for this device category.
+    const trCategory = document.createElement("tr");
 
-    await homebridge.updatePluginConfig(featureOptions.currentConfig);
+    // Disable any pointer events and hover activity.
+    trCategory.style.pointerEvents = "none";
 
-    // Create our UI.
-    document.getElementById("pageFirstRun").style.display = "none";
-    document.getElementById("menuWrapper").style.display = "inline-flex";
-    featureOptions.showUI();
-  });
+    // Create the cell for our device category row.
+    const tdCategory = document.createElement("td");
 
-  document.getElementById("pageFirstRun").style.display = "block";
-}
+    tdCategory.classList.add("m-0", "p-0", "pl-1", "w-100");
 
-// Show the main plugin configuration tab.
-function showSettings () {
+    // Add the category name, with appropriate casing.
+    tdCategory.appendChild(document.createTextNode((key.charAt(0).toUpperCase() + key.slice(1) + "s")));
+    tdCategory.style.fontWeight = "bold";
 
-  // Show the beachball while we setup.
-  homebridge.showSpinner();
+    // Add the cell to the table row.
+    trCategory.appendChild(tdCategory);
 
-  // Create our UI.
-  document.getElementById("menuHome").classList.remove("btn-elegant");
-  document.getElementById("menuHome").classList.add("btn-primary");
-  document.getElementById("menuFeatureOptions").classList.remove("btn-elegant");
-  document.getElementById("menuFeatureOptions").classList.add("btn-primary");
-  document.getElementById("menuSettings").classList.add("btn-elegant");
-  document.getElementById("menuSettings").classList.remove("btn-primary");
+    // Add the table row to the table.
+    ui.featureOptions.devicesTable.appendChild(trCategory);
 
-  document.getElementById("pageSupport").style.display = "none";
-  document.getElementById("pageFeatureOptions").style.display = "none";
+    for(const device of modelDevices) {
 
-  homebridge.showSchemaForm();
+      // Create a row for this device.
+      const trDevice = document.createElement("tr");
 
-  // All done. Let the user interact with us.
-  homebridge.hideSpinner();
-}
+      trDevice.classList.add("m-0", "p-0");
 
-// Show the support tab.
-function showSupport() {
+      // Create a cell for our device.
+      const tdDevice = document.createElement("td");
 
-  // Show the beachball while we setup.
-  homebridge.showSpinner();
-  homebridge.hideSchemaForm();
+      tdDevice.classList.add("m-0", "p-0" , "w-100");
 
-  // Create our UI.
-  document.getElementById("menuHome").classList.add("btn-elegant");
-  document.getElementById("menuHome").classList.remove("btn-primary");
-  document.getElementById("menuFeatureOptions").classList.remove("btn-elegant");
-  document.getElementById("menuFeatureOptions").classList.add("btn-primary");
-  document.getElementById("menuSettings").classList.remove("btn-elegant");
-  document.getElementById("menuSettings").classList.add("btn-primary");
+      const label = document.createElement("label");
 
-  document.getElementById("pageSupport").style.display = "block";
-  document.getElementById("pageFeatureOptions").style.display = "none";
+      label.name = device.serial;
+      label.appendChild(document.createTextNode(device.alias ?? device.display_model));
+      label.style.cursor = "pointer";
+      label.classList.add("mx-2", "my-0", "p-0", "w-100");
 
-  // All done. Let the user interact with us.
-  homebridge.hideSpinner();
-}
+      label.addEventListener("click", () => ui.featureOptions.showDeviceOptions(device.serial));
 
-// Launch our webUI.
-async function launchWebUI() {
+      // Add the device label to our cell.
+      tdDevice.appendChild(label);
 
-  // Retrieve the current plugin configuration.
-  featureOptions.currentConfig = await homebridge.getPluginConfig();
+      // Add the cell to the table row.
+      trDevice.appendChild(tdDevice);
 
-  // Add our event listeners to animate the UI.
-  menuHome.addEventListener("click", () => showSupport());
-  menuFeatureOptions.addEventListener("click", () => featureOptions.showUI());
-  menuSettings.addEventListener("click", () => showSettings());
+      // Add the table row to the table.
+      ui.featureOptions.devicesTable.appendChild(trDevice);
 
-  // If we've got a valid Access controller, username, and password configured, we launch our feature option UI. Otherwise, we launch our first run UI.
-  if(featureOptions.currentConfig.length && featureOptions.currentConfig[0].controllers?.length && featureOptions.currentConfig[0].controllers[0]?.address?.length && featureOptions.currentConfig[0].controllers[0]?.username?.length && featureOptions.currentConfig[0].controllers[0]?.password?.length) {
+      ui.featureOptions.webUiDeviceList.push(label);
+    }
+  }
+};
 
-    document.getElementById("menuWrapper").style.display = "inline-flex";
-    featureOptions.showUI();
+// Only show feature options that are valid for the capabilities of this device.
+const validOption = (device, option) => {
+
+  if(device && (device.display_model !== "controller") && (
+    (option.hasFeature && (!device.capabilities || !option.hasFeature.some(x => device.capabilities[x]))) ||
+    (option.hasProperty && !option.hasProperty.some(x => x in device)) ||
+    (option.modelKey && (option.modelKey !== "all") && !option.modelKey.includes(device.display_model)))) {
+
+    return false;
+  }
+
+  return true;
+};
+
+// Only show feature option categories that are valid for a particular device type.
+const validOptionCategory = (device, category) => {
+
+  if(device && (device.display_model !== "controller") && !category.modelKey.some(model => ["all", device.display_model].includes(model))) {
+
+    return false;
+  }
+
+  return true;
+};
+
+// Show the details for this device.
+const showAccessDetails = (device) => {
+
+  // No device specified, we must be in a global context.
+  if(!device) {
+
+    document.getElementById("device_model").classList.remove("text-center");
+    document.getElementById("device_model").colSpan = 1;
+    document.getElementById("device_model").style.fontWeight = "normal";
+    document.getElementById("device_model").innerHTML = "N/A"
+    document.getElementById("device_mac").innerHTML = "N/A";
+    document.getElementById("device_address").innerHTML = "N/A";
+    document.getElementById("device_online").innerHTML = "N/A";
+
     return;
   }
 
-  // If we have no configuration, let's create one.
-  if(!featureOptions.currentConfig.length) {
+  // Populate the device details.
+  document.getElementById("device_model").classList.remove("text-center");
+  document.getElementById("device_model").colSpan = 1;
+  document.getElementById("device_model").style.fontWeight = "normal";
+  document.getElementById("device_model").innerHTML = device.model ?? device.display_model;
+  document.getElementById("device_mac").innerHTML = device.mac.replace(/:/g, "").toUpperCase();
+  document.getElementById("device_address").innerHTML = device.ip;
+  document.getElementById("device_online").innerHTML = device.is_online ? "Connected" : "Disconnected";
+};
 
-    featureOptions.currentConfig.push({ controllers: [ {} ], name: "UniFi Access" });
-  } else if(!("name" in featureOptions.currentConfig[0])) {
+// Parameters for our feature options webUI.
+const featureOptionsParams = {
 
-    // If we haven't set the name, let's do so now.
-    featureOptions.currentConfig[0].name = "UniFi Access";
+  getDevices: getDevices,
+  hasControllers: true,
+  infoPanel: showAccessDetails,
+  sidebar: {
+
+    controllerLabel: "Access Controllers",
+    deviceLabel: "Access Devices",
+    showDevices: showSidebarDevices
+  },
+  ui: {
+
+    isController: isController,
+    validOption: validOption,
+    validOptionCategory: validOptionCategory
   }
+};
 
-  // Update the plugin configuration and launch the first run UI.
-  await homebridge.updatePluginConfig(featureOptions.currentConfig);
-  showFirstRun();
-}
+// Parameters for our plugin webUI.
+const webUiParams = {
 
-// Fire off our UI, catching errors along the way.
-try {
+  featureOptions: featureOptionsParams,
+  firstRun: {
 
-  launchWebUI();
-} catch(err) {
+    isRequired: firstRunIsRequired,
+    onStart: firstRunOnStart,
+    onSubmit: firstRunOnSubmit
+  },
+  name: "UniFi Access"
+};
 
-  // If we had an error instantiating or updating the UI, notify the user.
-  homebridge.toast.error(err.message, "Error");
-} finally {
+// Instantiate the webUI.
+const ui = new webUi(webUiParams);
 
-  // Always leave the UI in a usable place for the end user.
-  homebridge.hideSpinner();
-}
+// Display the webUI.
+ui.show();

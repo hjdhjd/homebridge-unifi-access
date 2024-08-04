@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.4.0 (2024-08-04)
+  * Improvement: now fully supporting UniFi Access v2, including all Access hubs.
+  * Housekeeping.
+
 ## 1.3.0 (2024-04-20)
   * New feature: add support for the latest generation of UniFi Access hubs.
 
