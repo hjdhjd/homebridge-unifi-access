@@ -17,7 +17,7 @@ const firstRunIsRequired = () => {
   }
 
   return true;
-}
+};
 
 // Initialize our first run screen with any information from our existing configuration.
 const firstRunOnStart = () => {
@@ -48,12 +48,13 @@ const firstRunOnSubmit = async () => {
     return false;
   }
 
-  const udaDevices = await homebridge.request("/getDevices", { address: address, username: username, password: password });
+  const udaDevices = await homebridge.request("/getDevices", { address: address, password: password, username: username });
 
   // Couldn't connect to the Access controller for some reason.
   if(!udaDevices?.length) {
 
-    tdLoginError.innerHTML = "Unable to login to the UniFi Access controller.<br>Please check your controller address, username, and password.<br><code class=\"text-danger\">" + (await homebridge.request("/getErrorMessage")) + "</code>";
+    tdLoginError.innerHTML = "Unable to login to the UniFi Access controller.<br>" +
+      "Please check your controller address, username, and password.<br><code class=\"text-danger\">" + (await homebridge.request("/getErrorMessage")) + "</code>";
     homebridge.hideSpinner();
 
     return false;
@@ -84,17 +85,19 @@ const getDevices = async (controller) => {
   }
 
   // Retrieve the current list of devices from the Access controller.
-  let devices = await homebridge.request("/getDevices", { address: controller.address, username: controller.username, password: controller.password });
+  let devices = await homebridge.request("/getDevices", { address: controller.address, password: controller.password, username: controller.username });
 
   // Since the controller JSON doesn't have the same properties as the device JSON, let's make the controller JSON emulate the properties we care about.
   if(devices?.length) {
 
+    /* eslint-disable camelcase */
     devices[0].display_model = "controller";
     devices[0].ip = devices[0].host.ip;
     devices[0].is_online = true;
     devices[0].mac = devices[0].host.mac;
     devices[0].model = devices[0].host.device_type;
     devices[0].unique_id = devices[0].host.mac;
+    /* eslint-enable camelcase */
   }
 
   // Add the fields that the webUI framework is looking for to render.
@@ -114,7 +117,8 @@ const isController = (device) => device.modelKey === "controller";
 const showSidebarDevices = (controller, devices) => {
 
   // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
-  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub")).map(device => device.display_model))]
+  const modelKeys =
+    [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub")).map(device => device.display_model))];
 
   // Start with a clean slate.
   ui.featureOptions.devicesTable.innerHTML = "";
@@ -229,7 +233,7 @@ const showAccessDetails = (device) => {
     document.getElementById("device_model").classList.remove("text-center");
     document.getElementById("device_model").colSpan = 1;
     document.getElementById("device_model").style.fontWeight = "normal";
-    document.getElementById("device_model").innerHTML = "N/A"
+    document.getElementById("device_model").innerHTML = "N/A";
     document.getElementById("device_mac").innerHTML = "N/A";
     document.getElementById("device_address").innerHTML = "N/A";
     document.getElementById("device_online").innerHTML = "N/A";

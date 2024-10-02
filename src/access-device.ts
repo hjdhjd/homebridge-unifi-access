@@ -9,6 +9,7 @@ import { AccessLogging, AccessReservedNames } from "./access-types.js";
 import { AccessController } from "./access-controller.js";
 import { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
+import { validateName } from "homebridge-plugin-utils";
 
 // Device-specific options and settings.
 export interface AccessHints {
@@ -173,7 +174,7 @@ export abstract class AccessDevice extends AccessBase {
     // Sync the Access name with HomeKit, if configured.
     if(this.hints.syncName) {
 
-      this.accessoryName = this.uda.name;
+      this.accessoryName = this.uda.alias;
     }
 
     return this.setInfo(this.accessory, this.uda);
@@ -539,17 +540,19 @@ export abstract class AccessDevice extends AccessBase {
   public get accessoryName(): string {
 
     return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string) ??
-      (this.uda?.name ?? "Unknown");
+      (this.uda?.alias ?? "Unknown");
   }
 
   // Utility function to set the current accessory name of this device.
   public set accessoryName(name: string) {
 
+    const cleanedName = validateName(name);
+
     // Set all the internally managed names within Homebridge to the new accessory name.
-    this.accessory.displayName = name;
-    this.accessory._associatedHAPAccessory.displayName = name;
+    this.accessory.displayName = cleanedName;
+    this.accessory._associatedHAPAccessory.displayName = cleanedName;
 
     // Set all the HomeKit-visible names.
-    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Name, name);
+    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Name, cleanedName);
   }
 }

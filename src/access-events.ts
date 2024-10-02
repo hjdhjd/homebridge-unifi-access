@@ -9,6 +9,7 @@ import { AccessController} from "./access-controller.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessPlatform } from "./access-platform.js";
 import { EventEmitter } from "node:events";
+import { validateName } from "homebridge-plugin-utils";
 
 export class AccessEvents extends EventEmitter {
 
@@ -79,7 +80,7 @@ export class AccessEvents extends EventEmitter {
           ?.map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice?.isOnline ?? false));
 
         // Sync names, if configured to do so.
-        if(accessDevice.hints.syncName && accessDevice.name !== accessDevice.uda.name) {
+        if(accessDevice.hints.syncName && (accessDevice.accessoryName !== validateName(accessDevice.uda.alias))) {
 
           accessDevice.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
           accessDevice.configureInfo();

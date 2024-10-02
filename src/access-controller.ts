@@ -5,7 +5,7 @@
 import { ACCESS_CONTROLLER_REFRESH_INTERVAL, ACCESS_CONTROLLER_RETRY_INTERVAL, PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
 import { API, HAP, PlatformAccessory } from "homebridge";
 import { AccessApi, AccessControllerConfig, AccessDeviceConfig } from "unifi-access";
-import { MqttClient, retry, sleep } from "homebridge-plugin-utils";
+import { MqttClient, retry, sleep, validateName } from "homebridge-plugin-utils";
 import { AccessControllerOptions } from "./access-options.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessEvents } from "./access-events.js";
@@ -158,7 +158,8 @@ export class AccessController {
           continue;
         }
 
-        this.log.info("Discovered %s: %s.", device.model ?? device.display_model, this.udaApi.getDeviceName(device, device.name ?? device.model, true));
+        this.log.info("Discovered %s: %s.", device.model ?? device.display_model, this.udaApi.getDeviceName(device,
+          (device.alias?.length ? device.alias : device.name) ?? device.model, true));
       }
     }
 
@@ -222,7 +223,7 @@ export class AccessController {
 
       default:
 
-        this.log.error("Unknown device class %s detected for %s.", device.device_type, device.name ?? device.model);
+        this.log.error("Unknown device class %s detected for %s.", device.device_type, device.alias ?? device.model);
 
         return false;
     }
@@ -280,7 +281,7 @@ export class AccessController {
     // See if we already know about this accessory or if it's truly new. If it is new, add it to HomeKit.
     if((accessory = this.platform.accessories.find(x => x.UUID === uuid)) === undefined) {
 
-      accessory = new this.api.platformAccessory(device.name ?? device.model, uuid);
+      accessory = new this.api.platformAccessory(validateName(device.alias ?? device.model), uuid);
 
       this.log.info("%s: Adding %s to HomeKit.", this.udaApi.getFullName(device), device.model);
 
@@ -433,7 +434,7 @@ export class AccessController {
 
         this.deviceRemovalQueue[accessDevice.accessory.UUID] = Date.now();
         this.log.info("%s: Delaying device removal for %s second%s.",
-          accessDevice.uda.name ? this.udaApi.getDeviceName(accessDevice.uda) : accessDevice.accessoryName,
+          accessDevice.uda.alias ? this.udaApi.getDeviceName(accessDevice.uda) : accessDevice.accessoryName,
           delayInterval, delayInterval > 1 ? "s" : "");
 
         return;
@@ -451,7 +452,7 @@ export class AccessController {
 
     // Remove this device.
     this.log.info("%s: Removing %s from HomeKit.",
-      accessDevice.uda.name ? this.udaApi.getDeviceName(accessDevice.uda) : accessDevice.accessoryName,
+      accessDevice.uda.alias ? this.udaApi.getDeviceName(accessDevice.uda) : accessDevice.accessoryName,
       accessDevice.uda.model ? accessDevice.uda.model : "device");
 
     const deletingAccessories = [ accessDevice.accessory ];

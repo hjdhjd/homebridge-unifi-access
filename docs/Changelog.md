@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.5.0 (2024-08-04)
+  * Behavior change: HBUA will now ensure HomeKit accessory names are compliant with [HomeKit's naming guidelines](https://developer.apple.com/design/human-interface-guidelines/homekit#Help-people-choose-useful-names). Invalid characters will be replaced with a space, and multiple spaces will be squashed.
+  * Improvement: support for UniFi Access v2.3.
+  * Housekeeping.
+
 ## 1.4.0 (2024-08-04)
   * Improvement: now fully supporting UniFi Access v2, including all Access hubs.
   * Housekeeping.

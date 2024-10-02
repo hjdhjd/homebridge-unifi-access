@@ -46,7 +46,7 @@ export default ts.config(
 
         projectService: {
 
-          allowDefaultProject: [ "eslint.config.mjs", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/lib/*.@(js|mjs)" ],
+          allowDefaultProject: [ "eslint.config.mjs", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/*.@(js|mjs)", "homebridge-ui/public/lib/*.@(js|mjs)" ],
           defaultProject: "./tsconfig.json"
         }
       },
@@ -72,7 +72,7 @@ export default ts.config(
 
   {
 
-    files: [ "homebridge-ui/public/lib/webUi.mjs", "homebridge-ui/public/lib/webUi-featureoptions.mjs" ],
+    files: [ "homebridge-ui/public/lib/webUi.mjs", "homebridge-ui/public/lib/webUi-featureoptions.mjs", "homebridge-ui/public/ui.mjs" ],
 
     languageOptions: {
 
