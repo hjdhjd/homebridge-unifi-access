@@ -1,11 +1,11 @@
-/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-controller.ts: Access controller device class for UniFi Access.
  */
 import { ACCESS_CONTROLLER_REFRESH_INTERVAL, ACCESS_CONTROLLER_RETRY_INTERVAL, PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
 import { API, HAP, PlatformAccessory } from "homebridge";
 import { AccessApi, AccessControllerConfig, AccessDeviceConfig } from "unifi-access";
-import { MqttClient, retry, sleep, validateName } from "homebridge-plugin-utils";
+import { MqttClient, Nullable, retry, sleep, validateName } from "homebridge-plugin-utils";
 import { AccessControllerOptions } from "./access-options.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessEvents } from "./access-events.js";
@@ -213,6 +213,7 @@ export class AccessController {
 
     switch(device.device_type) {
 
+      case "UA-Hub-Door-Mini":
       case "UAH":
       case "UAH-DOOR":
 
@@ -354,7 +355,7 @@ export class AccessController {
         }
 
         // For certain use cases, we may want to defer removal of an Access device for a brief period of time.
-        const delayInterval = this.getFeatureNumber("Controller.DelayDeviceRemoval");
+        const delayInterval = this.getFeatureNumber("Controller.DelayDeviceRemoval") ?? undefined;
 
         if((delayInterval !== undefined) && (delayInterval > 0)) {
 
@@ -425,7 +426,7 @@ export class AccessController {
     }
 
     // For certain use cases, we may want to defer removal of an Access device.
-    const delayInterval = this.getFeatureNumber("Controller.DelayDeviceRemoval");
+    const delayInterval = this.getFeatureNumber("Controller.DelayDeviceRemoval") ?? undefined;
 
     if((delayInterval !== undefined) && (delayInterval > 0)) {
 
@@ -507,13 +508,13 @@ export class AccessController {
   }
 
   // Utility function to return a floating point configuration parameter on a device.
-  public getFeatureFloat(option: string): number | undefined {
+  public getFeatureFloat(option: string): Nullable<number | undefined> {
 
     return this.platform.featureOptions.getFloat(option, this.id);
   }
 
   // Utility function to return an integer configuration parameter on a device.
-  public getFeatureNumber(option: string): number | undefined {
+  public getFeatureNumber(option: string): Nullable<number | undefined> {
 
     return this.platform.featureOptions.getInteger(option, this.id);
   }

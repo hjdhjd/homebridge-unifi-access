@@ -1,4 +1,4 @@
-/* Copyright(C) 2019-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2019-2025, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-hub.ts: Hub device class for UniFi Access.
  */
@@ -22,7 +22,7 @@ export class AccessHub extends AccessDevice {
 
     this.uda = device;
     this._hkLockState = this.hubLockState;
-    this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval");
+    this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
     this.doorbellRingRequestId = null;
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.

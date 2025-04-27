@@ -1,4 +1,4 @@
-/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-events.ts: Events class for UniFi Access.
  */
@@ -60,7 +60,9 @@ export class AccessEvents extends EventEmitter {
 
     switch((packet.data as AccessDeviceConfig).device_type) {
 
+      case "UA-Hub-Door-Mini":
       case "UAH":
+      case "UAH-DOOR":
       default:
 
         // Lookup the device.

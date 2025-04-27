@@ -1,4 +1,4 @@
-/* Copyright(C) 2017-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-device.ts: Base class for all UniFi Access devices.
  */
@@ -6,10 +6,10 @@ import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION} from "./settings.js"
 import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
 import { AccessLogging, AccessReservedNames } from "./access-types.js";
+import { Nullable, validateName } from "homebridge-plugin-utils";
 import { AccessController } from "./access-controller.js";
 import { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
-import { validateName } from "homebridge-plugin-utils";
 
 // Device-specific options and settings.
 export interface AccessHints {
@@ -489,19 +489,19 @@ export abstract class AccessDevice extends AccessBase {
   }
 
   // Utility function to return a floating point configuration parameter on a device.
-  public getFeatureFloat(option: string): number | undefined {
+  public getFeatureFloat(option: string): Nullable<number | undefined> {
 
     return this.platform.featureOptions.getFloat(option, this.id, this.controller.id);
   }
 
   // Utility function to return an integer configuration parameter on a device.
-  public getFeatureNumber(option: string): number | undefined {
+  public getFeatureNumber(option: string): Nullable<number | undefined> {
 
     return this.platform.featureOptions.getInteger(option, this.id, this.controller.id);
   }
 
   // Utility function to return a configuration parameter on a device.
-  public getFeatureValue(option: string): string | undefined {
+  public getFeatureValue(option: string): Nullable<string | undefined> {
 
     return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }

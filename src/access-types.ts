@@ -1,4 +1,4 @@
-/* Copyright(C) 2020-2024, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2020-2025, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-types.ts: Interface and type definitions for UniFi Access.
  */
