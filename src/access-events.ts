@@ -61,6 +61,7 @@ export class AccessEvents extends EventEmitter {
     switch((packet.data as AccessDeviceConfig).device_type) {
 
       case "UA-Hub-Door-Mini":
+      case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
       default:

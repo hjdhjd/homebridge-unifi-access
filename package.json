@@ -1,6 +1,6 @@
 {
   "name": "homebridge-unifi-access",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "displayName": "Homebridge UniFi Access",
   "description": "Homebridge UniFi Access plugin providing complete HomeKit integration for the UniFi Access ecosystem with full support for most features including autoconfiguration, motion detection, multiple controllers, and realtime updates.",
   "author": {

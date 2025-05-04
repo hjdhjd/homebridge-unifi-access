@@ -214,6 +214,7 @@ export class AccessController {
     switch(device.device_type) {
 
       case "UA-Hub-Door-Mini":
+      case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
 

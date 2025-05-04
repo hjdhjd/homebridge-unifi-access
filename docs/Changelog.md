@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.7.0 (2025-05-04)
+  * New feature: add support UniFi Access Ultra.
+  * Housekeeping.
+
 ## 1.6.0 (2025-04-27)
   * New feature: add support UniFi Access Hub Mini.
   * Housekeeping.
