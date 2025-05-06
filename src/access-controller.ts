@@ -215,6 +215,7 @@ export class AccessController {
 
       case "UA-Hub-Door-Mini":
       case "UA-ULTRA":
+      case "UA-Hub-Gate":
       case "UAH":
       case "UAH-DOOR":
 
