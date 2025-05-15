@@ -82,8 +82,8 @@ export class AccessHub extends AccessDevice {
 
     // Listen for events.
     this.controller.events.on(this.uda.unique_id, this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
-    this.controller.events.on("access.remote_view", this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
-    this.controller.events.on("access.remote_view.change", this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
+    this.controller.events.on("access.remote_view", this.listeners["access.remote_view"] = this.eventHandler.bind(this));
+    this.controller.events.on("access.remote_view.change", this.listeners["access.remote_view.change"] = this.eventHandler.bind(this));
 
     return true;
   }
@@ -431,7 +431,24 @@ export class AccessHub extends AccessDevice {
   // Return the current state of the relay lock on the hub.
   private get hubLockState(): CharacteristicValue {
 
-    const lockRelay = this.uda.configs?.find(x => x.key === "input_state_rly-lock_dry");
+    let relayType;
+
+    switch(this.uda.device_type) {
+
+      case "UA-ULTRA":
+
+        relayType = "output_d1_lock_relay";
+
+        break;
+
+      default:
+
+        relayType = "input_state_rly-lock_dry";
+
+        break;
+    }
+
+    const lockRelay = this.uda.configs?.find(x => x.key === relayType);
 
     return (lockRelay?.value === "off" ?
       this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED) ?? this.hap.Characteristic.LockCurrentState.UNKNOWN;

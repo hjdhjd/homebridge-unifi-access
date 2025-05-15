@@ -397,7 +397,8 @@ export class AccessController {
       }
 
       // Check to see if the device still exists on the Access controller and the user has not chosen to hide it.
-      if(accessDevice.uda.capabilities.includes("is_hub") && this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac === accessDevice.uda.mac) &&
+      if(accessDevice.uda.capabilities.includes("is_hub") &&
+        this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac.toLowerCase() === accessDevice.uda.mac.toLowerCase()) &&
         accessDevice.hasFeature("Device")) {
 
         // In case we have previously queued a device for deletion, let's remove it from the queue since it's reappeared.

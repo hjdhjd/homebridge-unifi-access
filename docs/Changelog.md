@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.7.1 (2025-05-15)
+  * Fix: correctly interpret the lock state of Ultra devices.
+  * Fix: recent Access controller firmwares seem to have quirks that interfered with how HBUA detects new devices and device removals, causing constant add/remove cycles.
+  * Housekeeping.
+
 ## 1.7.0 (2025-05-04)
   * New feature: add support UniFi Access Ultra.
   * Housekeeping.
