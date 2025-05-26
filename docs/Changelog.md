@@ -2,17 +2,21 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.7.2 (2025-05-26)
+  * Fix: correctly interpret the lock state of Door Hub Mini devices.
+  * Housekeeping.
+
 ## 1.7.1 (2025-05-15)
   * Fix: correctly interpret the lock state of Ultra devices.
   * Fix: recent Access controller firmwares seem to have quirks that interfered with how HBUA detects new devices and device removals, causing constant add/remove cycles.
   * Housekeeping.
 
 ## 1.7.0 (2025-05-04)
-  * New feature: add support UniFi Access Ultra.
+  * New feature: add support for UniFi Access Ultra.
   * Housekeeping.
 
 ## 1.6.0 (2025-04-27)
-  * New feature: add support UniFi Access Hub Mini.
+  * New feature: add support for UniFi Access Hub Mini.
   * Housekeeping.
 
 ## 1.5.0 (2024-10-02)
