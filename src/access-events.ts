@@ -2,14 +2,14 @@
  *
  * access-events.ts: Events class for UniFi Access.
  */
-import { API, HAP, Service } from "homebridge";
-import { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { AccessLogging, AccessReservedNames } from "./access-types.js";
-import { AccessController} from "./access-controller.js";
-import { AccessDevice } from "./access-device.js";
-import { AccessPlatform } from "./access-platform.js";
+import type { API, HAP, Service } from "homebridge";
+import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
+import { type HomebridgePluginLogging, validateName } from "homebridge-plugin-utils";
+import type { AccessController} from "./access-controller.js";
+import type { AccessDevice } from "./access-device.js";
+import type { AccessPlatform } from "./access-platform.js";
+import { AccessReservedNames } from "./access-types.js";
 import { EventEmitter } from "node:events";
-import { validateName } from "homebridge-plugin-utils";
 
 export class AccessEvents extends EventEmitter {
 
@@ -18,7 +18,7 @@ export class AccessEvents extends EventEmitter {
   private eventsHandler: ((packet: AccessEventPacket) => void) | null;
   private readonly eventTimers: { [index: string]: NodeJS.Timeout };
   private hap: HAP;
-  private log: AccessLogging;
+  private log: HomebridgePluginLogging;
   private mqttPublishTelemetry: boolean;
   private platform: AccessPlatform;
   private udaApi: AccessApi;

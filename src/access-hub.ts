@@ -2,9 +2,9 @@
  *
  * access-hub.ts: Hub device class for UniFi Access.
  */
-import { AccessDeviceConfig, AccessEventDoorbellCancel, AccessEventDoorbellRing, AccessEventPacket } from "unifi-access";
-import { CharacteristicValue, PlatformAccessory } from "homebridge";
-import { AccessController } from "./access-controller.js";
+import type { AccessDeviceConfig, AccessEventDoorbellCancel, AccessEventDoorbellRing, AccessEventPacket } from "unifi-access";
+import type { CharacteristicValue, PlatformAccessory } from "homebridge";
+import type { AccessController } from "./access-controller.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessReservedNames } from "./access-types.js";
 

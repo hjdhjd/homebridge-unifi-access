@@ -3,15 +3,14 @@
  * access-controller.ts: Access controller device class for UniFi Access.
  */
 import { ACCESS_CONTROLLER_REFRESH_INTERVAL, ACCESS_CONTROLLER_RETRY_INTERVAL, PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
-import { API, HAP, PlatformAccessory } from "homebridge";
-import { AccessApi, AccessControllerConfig, AccessDeviceConfig } from "unifi-access";
-import { MqttClient, Nullable, retry, sleep, validateName } from "homebridge-plugin-utils";
-import { AccessControllerOptions } from "./access-options.js";
-import { AccessDevice } from "./access-device.js";
+import type { API, HAP, PlatformAccessory } from "homebridge";
+import { AccessApi, type AccessControllerConfig, type AccessDeviceConfig } from "unifi-access";
+import { type HomebridgePluginLogging, MqttClient, type Nullable, retry, sleep, validateName } from "homebridge-plugin-utils";
+import type { AccessControllerOptions } from "./access-options.js";
+import type { AccessDevice } from "./access-device.js";
 import { AccessEvents } from "./access-events.js";
 import { AccessHub } from "./access-hub.js";
-import { AccessLogging } from "./access-types.js";
-import { AccessPlatform } from "./access-platform.js";
+import type { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
 
 export class AccessController {
@@ -24,7 +23,7 @@ export class AccessController {
   private isEnabled: boolean;
   private hap: HAP;
   public logApiErrors: boolean;
-  public readonly log: AccessLogging;
+  public readonly log: HomebridgePluginLogging;
   public mqtt: MqttClient | null;
   private name: string;
   public platform: AccessPlatform;

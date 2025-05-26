@@ -2,9 +2,10 @@
  *
  * access-platform.ts: homebridge-unifi-access platform class.
  */
-import { API, APIEvent, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { AccessControllerOptions, AccessOptions, featureOptionCategories, featureOptions } from "./access-options.js";
+import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
+import { type AccessControllerOptions, type AccessOptions, featureOptionCategories, featureOptions } from "./access-options.js";
 import { ACCESS_MQTT_TOPIC } from "./settings.js";
+import { APIEvent } from "homebridge";
 import { AccessController } from "./access-controller.js";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import util from "node:util";

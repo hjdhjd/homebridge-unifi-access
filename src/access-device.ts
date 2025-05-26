@@ -3,12 +3,12 @@
  * access-device.ts: Base class for all UniFi Access devices.
  */
 import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION} from "./settings.js";
-import { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
-import { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { AccessLogging, AccessReservedNames } from "./access-types.js";
-import { Nullable, validateName } from "homebridge-plugin-utils";
-import { AccessController } from "./access-controller.js";
-import { AccessPlatform } from "./access-platform.js";
+import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
+import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
+import { type HomebridgePluginLogging, type Nullable, validateName } from "homebridge-plugin-utils";
+import type { AccessController } from "./access-controller.js";
+import type { AccessPlatform } from "./access-platform.js";
+import { AccessReservedNames } from "./access-types.js";
 import util from "node:util";
 
 // Device-specific options and settings.
@@ -28,7 +28,7 @@ export abstract class AccessBase {
   public readonly api: API;
   private debug: (message: string, ...parameters: unknown[]) => void;
   protected readonly hap: HAP;
-  public readonly log: AccessLogging;
+  public readonly log: HomebridgePluginLogging;
   public readonly controller: AccessController;
   public udaApi: AccessApi;
   public readonly platform: AccessPlatform;

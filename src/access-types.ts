@@ -3,15 +3,6 @@
  * access-types.ts: Interface and type definitions for UniFi Access.
  */
 
-// Define Access logging conventions.
-export interface AccessLogging {
-
-  debug: (message: string, ...parameters: unknown[]) => void,
-  error: (message: string, ...parameters: unknown[]) => void,
-  info: (message: string, ...parameters: unknown[]) => void,
-  warn: (message: string, ...parameters: unknown[]) => void
-}
-
 // HBUA reserved names.
 export enum AccessReservedNames {
 

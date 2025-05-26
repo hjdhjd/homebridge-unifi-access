@@ -3,7 +3,7 @@
  * access-options.ts: Feature option and type definitions for UniFi Access.
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, ACCESS_DEVICE_UNLOCK_INTERVAL } from "./settings.js";
-import { FeatureOptionEntry } from "homebridge-plugin-utils";
+import type { FeatureOptionEntry } from "homebridge-plugin-utils";
 
 // Plugin configuration options.
 export interface AccessOptions {
