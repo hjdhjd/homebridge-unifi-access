@@ -435,6 +435,7 @@ export class AccessHub extends AccessDevice {
 
     switch(this.uda.device_type) {
 
+      case "UA-Hub-Door-Mini":
       case "UA-ULTRA":
 
         relayType = "output_d1_lock_relay";
