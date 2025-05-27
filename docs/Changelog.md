@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.8.0 (2025-05-26)
+  * New feature: door position sensor support on Access hubs that have them.
+  * Housekeeping.
+
 ## 1.7.2 (2025-05-26)
   * Fix: correctly interpret the lock state of Door Hub Mini devices.
   * Housekeeping.

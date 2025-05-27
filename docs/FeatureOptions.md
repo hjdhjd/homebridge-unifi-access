@@ -73,14 +73,15 @@ These option(s) apply to: Access controllers.
 
 #### <A NAME="hub"></A>Hub feature options.
 
-These option(s) apply to: UniFi Access hub.
+These option(s) apply to: all Access device types.
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Hub.LockDelayInterval<I>.Value</I>`             | Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking. **(default: 0)**.
 | `Hub.Lock.Trigger`                               | Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs. **(default: disabled)**.
-| `Hub.Doorbell`                                   | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on Access hubs that have a doorbell.*
-| `Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on Access hubs that have a doorbell.*
+| `Hub.Doorbell`                                   | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| `Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| `Hub.DPS`                                        | Add a contact sensor accessory for the door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a door position sensor.*
 
 #### <A NAME="log"></A>Logging feature options.
 
@@ -88,7 +89,7 @@ These option(s) apply to: all Access device types.
 
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Log.Doorbell`                                   | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on Access hubs that have a doorbell.*
-| `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hub.*
-
+| `Log.Doorbell`                                   | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| `Log.DPS`                                        | Log door position sensor events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a door position sensor.*
+| `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
 
