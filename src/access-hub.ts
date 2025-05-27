@@ -193,7 +193,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Doorbell Trigger",
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.accessoryName + " Doorbell Trigger",
       AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => this.log.info("Enabling the doorbell automation trigger."));
 
     if(!service) {
@@ -204,10 +204,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // Trigger the doorbell.
-    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
-
-      return this.doorbellRingRequestId !== null;
-    });
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.doorbellRingRequestId !== null);
 
     // The state isn't really user-triggerable. We have no way, currently, to trigger a ring event on the hub.
     service.getCharacteristic(this.hap.Characteristic.On)?.onSet(() => {
@@ -232,7 +229,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // Acquire the service.
-    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Lock Trigger",
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.accessoryName + " Lock Trigger",
       AccessReservedNames.SWITCH_LOCK_TRIGGER, () => this.log.info("Enabling the lock automation trigger."));
 
     if(!service) {
@@ -281,6 +278,11 @@ export class AccessHub extends AccessDevice {
 
     // MQTT DPS status.
     this.controller.mqtt?.subscribeGet(this.id, "dps", "Door position sensor", () => {
+
+      if(!this.isDpsWired) {
+
+        return "unknown";
+      }
 
       switch(this.hkDpsState) {
 
@@ -557,11 +559,14 @@ export class AccessHub extends AccessDevice {
           this.hkDpsState = this.hubDpsState;
 
           // Publish to MQTT, if configured to do so.
-          this.controller.mqtt?.publish(this.id, "dps", (this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "false" : "true");
+          if(this.isDpsWired) {
 
-          if(this.hints.logDps && this.isDpsWired) {
+            this.controller.mqtt?.publish(this.id, "dps", (this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "false" : "true");
 
-            this.log.info("Door position sensor " + ((this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "closed." : "open."));
+            if(this.hints.logDps) {
+
+              this.log.info("Door position sensor " + ((this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "closed." : "open."));
+            }
           }
         }
 

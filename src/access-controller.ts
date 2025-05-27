@@ -157,8 +157,8 @@ export class AccessController {
           continue;
         }
 
-        this.log.info("Discovered %s: %s.", device.model ?? device.display_model, this.udaApi.getDeviceName(device,
-          (device.alias?.length ? device.alias : device.name) ?? device.model, true));
+        this.log.info("Discovered %s: %s.", device.display_model ?? device.model, this.udaApi.getDeviceName(device,
+          (device.alias?.length ? device.alias : device.name) ?? device.display_model ?? device.model, true));
       }
     }
 
@@ -216,6 +216,7 @@ export class AccessController {
       case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
+      case "UAH-Ent":
 
         // We have a UniFi Access hub.
         this.configuredDevices[accessory.UUID] = new AccessHub(this, device, accessory);
@@ -224,7 +225,7 @@ export class AccessController {
 
       default:
 
-        this.log.error("Unknown device class %s detected for %s.", device.device_type, device.alias ?? device.model);
+        this.log.error("Unknown device class %s detected for %s.", device.device_type, device.alias ?? device.display_model);
 
         return false;
     }
@@ -274,17 +275,17 @@ export class AccessController {
       return null;
     }
 
-    // Generate this device's unique identifier.
-    const uuid = this.hap.uuid.generate(device.mac);
+    // Generate this device's unique identifier. For devices like the EAH, we can't rely on just the MAC address since they contain multiple doors.
+    const uuid = this.hap.uuid.generate(device.mac + ((device.device_type === "UAH-Ent") ? "-" + device.source_id.toUpperCase() : ""));
 
     let accessory: PlatformAccessory | undefined;
 
     // See if we already know about this accessory or if it's truly new. If it is new, add it to HomeKit.
     if((accessory = this.platform.accessories.find(x => x.UUID === uuid)) === undefined) {
 
-      accessory = new this.api.platformAccessory(validateName(device.alias ?? device.model), uuid);
+      accessory = new this.api.platformAccessory(validateName(device.alias ?? device.display_model), uuid);
 
-      this.log.info("%s: Adding %s to HomeKit.", this.udaApi.getFullName(device), device.model);
+      this.log.info("%s: Adding %s to HomeKit.", this.udaApi.getFullName(device), device.display_model);
 
       // Register this accessory with homebridge and add it to the accessory array so we can track it.
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
@@ -455,7 +456,7 @@ export class AccessController {
     // Remove this device.
     this.log.info("%s: Removing %s from HomeKit.",
       accessDevice.uda.alias ? this.udaApi.getDeviceName(accessDevice.uda) : accessDevice.accessoryName,
-      accessDevice.uda.model ? accessDevice.uda.model : "device");
+      accessDevice.uda.display_model ? accessDevice.uda.display_model : "device");
 
     const deletingAccessories = [ accessDevice.accessory ];
 

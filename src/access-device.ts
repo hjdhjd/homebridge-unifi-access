@@ -67,12 +67,7 @@ export abstract class AccessBase {
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "Ubiquiti Inc.");
 
     // Update the model information for this device.
-    let deviceModel = device.display_model;
-
-    if("model" in device) {
-
-      deviceModel = device.model;
-    }
+    const deviceModel = device.display_model ?? device.model;
 
     if(deviceModel.length) {
 
@@ -529,7 +524,7 @@ export abstract class AccessDevice extends AccessBase {
   // Return a unique identifier for an Access device.
   public get id(): string {
 
-    return this.uda.mac.replace(/:/g, "");
+    return this.uda.mac.replace(/:/g, "") + ((this.uda.device_type === "UAH-Ent") ? "-" + this.uda.source_id.toUpperCase() : "");
   }
 
   // Utility function to return the fully enumerated name of this device.

@@ -82,8 +82,10 @@ class PluginUiServer extends HomebridgePluginUiServer {
 
         devices.sort((a, b) => {
 
-          const aCase = (a.name ?? a.model).toLowerCase();
-          const bCase = (b.name ?? b.model).toLowerCase();
+          const nonEmpty = (...args) => args.find(v => (v !== undefined) && (v !== null) && (v !== ""));
+
+          const aCase = nonEmpty(a.alias, a.name, a.model).toLowerCase();
+          const bCase = nonEmpty(b.alias, b.name, b.model).toLowerCase();
 
           return aCase > bCase ? 1 : (bCase > aCase ? -1 : 0);
         });

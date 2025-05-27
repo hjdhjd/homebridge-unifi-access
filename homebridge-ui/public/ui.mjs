@@ -104,7 +104,7 @@ const getDevices = async (controller) => {
   devices = devices.map(device => ({
 
     ...device,
-    serialNumber: device.mac.replace(/:/g, "").toUpperCase()
+    serialNumber: device.mac.replace(/:/g, "").toUpperCase() + ((device.device_type === "UAH-Ent") ? "-" + device.source_id.toUpperCase() : "")
   }));
 
   return devices;
@@ -117,8 +117,8 @@ const isController = (device) => device.display_model === "controller";
 const showSidebarDevices = (controller, devices) => {
 
   // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
-  const modelKeys =
-    [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub")).map(device => device.display_model))];
+  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub"))
+    .map(device => (device.device_type === "UAH-Ent") ? device.model : device.display_model))];
 
   // Start with a clean slate.
   ui.featureOptions.devicesTable.innerHTML = "";
@@ -126,7 +126,7 @@ const showSidebarDevices = (controller, devices) => {
   for(const key of modelKeys) {
 
     // Get all the devices associated with this device category.
-    const modelDevices = devices.filter(x => x.display_model === key);
+    const modelDevices = devices.filter(x => ((x.device_type === "UAH-Ent") ? x.model : x.display_model) === key);
 
     // Nothing in this category, let's keep going.
     if(!modelDevices.length) {
