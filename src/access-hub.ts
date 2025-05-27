@@ -98,7 +98,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbell(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Doorbell, () => this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell"))) {
+    if(!validService(this.accessory, this.hap.Service.Doorbell, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell"))) {
 
       return false;
     }
@@ -122,7 +122,7 @@ export class AccessHub extends AccessDevice {
   private configureDps(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => this.hints.hasDps, AccessReservedNames.CONTACT_DPS)) {
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, this.hints.hasDps, AccessReservedNames.CONTACT_DPS)) {
 
       return false;
     }
@@ -186,7 +186,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbellTrigger(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger"),
+    if(!validService(this.accessory, this.hap.Service.Switch, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger"),
       AccessReservedNames.SWITCH_DOORBELL_TRIGGER)) {
 
       return false;
@@ -226,7 +226,7 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, () => this.hasFeature("Hub.Lock.Trigger"), AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
+    if(!validService(this.accessory, this.hap.Service.Switch, this.hasFeature("Hub.Lock.Trigger"), AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
 
       return false;
     }
@@ -277,6 +277,26 @@ export class AccessHub extends AccessDevice {
     this.controller.mqtt?.subscribeGet(this.id, "doorbell", "Doorbell ring", () => {
 
       return this.doorbellRingRequestId !== null ? "true" : "false";
+    });
+
+    // MQTT DPS status.
+    this.controller.mqtt?.subscribeGet(this.id, "dps", "Door position sensor", () => {
+
+      switch(this.hkDpsState) {
+
+        case this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED:
+
+          return "false";
+
+
+        case this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED:
+
+          return "true";
+
+        default:
+
+          return "unknown";
+      }
     });
 
     // MQTT lock status.
@@ -506,6 +526,9 @@ export class AccessHub extends AccessDevice {
         // Process an Access unlock event.
         this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
 
+        // Publish to MQTT, if configured to do so.
+        this.controller.mqtt?.publish(this.id, "lock", "false");
+
         if(this.hints.logLock) {
 
           this.log.info("Unlocked.");
@@ -520,6 +543,8 @@ export class AccessHub extends AccessDevice {
 
           this.hkLockState = this.hubLockState;
 
+          this.controller.mqtt?.publish(this.id, "lock", this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
+
           if(this.hints.logLock) {
 
             this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
@@ -530,6 +555,9 @@ export class AccessHub extends AccessDevice {
         if(this.hints.hasDps && (this.hubDpsState !== this.hkDpsState)) {
 
           this.hkDpsState = this.hubDpsState;
+
+          // Publish to MQTT, if configured to do so.
+          this.controller.mqtt?.publish(this.id, "dps", (this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "false" : "true");
 
           if(this.hints.logDps && this.isDpsWired) {
 

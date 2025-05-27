@@ -55,6 +55,7 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 | Topic                 | Message Published
 |-----------------------|----------------------------------
 | `doorbell`            | `true` or `false` when a UniFi Access hub is ringing the doorbell.
+| `dps`                 | `true` or `false` when a UniFi Access hub has opened or closed the door position sensor.
 | `lock`                | `true` or `false` when a UniFi Access hub has locked or unlocked the door lock relay.
 
 Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, or when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to.
@@ -65,6 +66,7 @@ The topics that `homebridge-unifi-access` subscribes to are:
 | Topic                   | Message Expected
 |-------------------------|----------------------------------
 | `doorbell/get`          | `true` will trigger a publish event of the current doorbell ring status for a UniFi Access hub.
+| `dps/get`               | `true` will trigger a publish event of the current door position sensor state for a UniFi Access hub.
 | `lock/get`              | `true` will trigger a publish event of the current door lock relay state for a UniFi Access hub.
 | `lock/set`              | `true` will unlock the door lock relay for a UniFi Access hub. `false` will unlock.
 
