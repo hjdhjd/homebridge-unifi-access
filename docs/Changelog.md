@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.9.0 (2025-05-27)
+  * New feature: MQTT support for door position sensors.
+  * Fix: address a regression in MQTT status updates.
+  * Housekeeping.
+
 ## 1.8.0 (2025-05-26)
   * New feature: door position sensor support on Access hubs that have them.
   * Housekeeping.
