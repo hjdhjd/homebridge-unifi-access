@@ -4,6 +4,7 @@
  */
 import type { AccessDeviceConfig, AccessEventDoorbellCancel, AccessEventDoorbellRing, AccessEventPacket } from "unifi-access";
 import type { CharacteristicValue, PlatformAccessory } from "homebridge";
+import { acquireService, validService } from "homebridge-plugin-utils";
 import type { AccessController } from "./access-controller.js";
 import { AccessDevice } from "./access-device.js";
 import { AccessReservedNames } from "./access-types.js";
@@ -41,7 +42,9 @@ export class AccessHub extends AccessDevice {
     // Configure our parent's hints.
     super.configureHints();
 
+    this.hints.hasDps = this.hasCapability([ "dps_alarm", "dps_mode_selectable", "dps_trigger_level" ]) && this.hasFeature("Hub.DPS");
     this.hints.logDoorbell = this.hasFeature("Log.Doorbell");
+    this.hints.logDps = this.hasFeature("Log.DPS");
     this.hints.logLock = this.hasFeature("Log.Lock");
 
     return true;
@@ -69,13 +72,16 @@ export class AccessHub extends AccessDevice {
     // Configure accessory information.
     this.configureInfo();
 
+    // Configure the lock.
+    this.configureLock();
+    this.configureLockTrigger();
+
     // Configure the doorbell.
     this.configureDoorbell();
     this.configureDoorbellTrigger();
 
-    // Configure the lock.
-    this.configureLock();
-    this.configureLockTrigger();
+    // Configure the door position sensor.
+    this.configureDps();
 
     // Configure MQTT services.
     this.configureMqtt();
@@ -91,37 +97,49 @@ export class AccessHub extends AccessDevice {
   // Configure the doorbell service for HomeKit.
   private configureDoorbell(): boolean {
 
-    // Find the doorbell service, if it exists.
-    let doorbellService = this.accessory.getService(this.hap.Service.Doorbell);
-
-    // If we don't have HKSV or the HKSV recording switch enabled, disable it and we're done.
-    if(!this.hasFeature("Hub.Doorbell")) {
-
-      if(doorbellService) {
-
-        this.accessory.removeService(doorbellService);
-      }
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Doorbell, () => this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell"))) {
 
       return false;
     }
 
-    // Add the doorbell service. HomeKit requires the doorbell service to be marked as the primary service on the accessory.
-    if(!doorbellService) {
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => this.log.info("Enabling the doorbell."));
 
-      doorbellService = new this.hap.Service.Doorbell(this.accessoryName);
+    if(!service) {
 
-      if(!doorbellService) {
+      this.log.error("Unable to add the doorbell.");
 
-        this.log.error("Unable to add doorbell.");
-
-        return false;
-      }
-
-      this.accessory.addService(doorbellService);
+      return false;
     }
 
-    doorbellService.setPrimaryService(true);
-    this.log.info("Enabling doorbell.");
+    service.setPrimaryService(true);
+
+    return true;
+  }
+
+  // Configure the door position sensor for HomeKit.
+  private configureDps(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, () => this.hints.hasDps, AccessReservedNames.CONTACT_DPS)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Door Position Sensor",
+      AccessReservedNames.CONTACT_DPS, () => this.log.info("Enabling the door position sensor."));
+
+    if(!service) {
+
+      this.log.error("Unable to add the door position sensor.");
+
+      return false;
+    }
+
+    // Initialize the light.
+    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this.hubDpsState);
 
     return true;
   }
@@ -129,49 +147,37 @@ export class AccessHub extends AccessDevice {
   // Configure the lock for HomeKit.
   private configureLock(): boolean {
 
-    // Find the service, if it exists.
-    let lockService = this.accessory.getService(this.hap.Service.LockMechanism);
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.LockMechanism, this.accessoryName);
 
-    // Add the service to the accessory, if needed.
-    if(!lockService) {
+    if(!service) {
 
-      lockService = new this.hap.Service.LockMechanism(this.accessoryName);
+      this.log.error("Unable to add the lock.");
 
-      if(!lockService) {
-
-        this.log.error("Unable to add lock.");
-
-        return false;
-      }
-
-      this.accessory.addService(lockService);
+      return false;
     }
 
     // Return the lock state.
-    lockService.getCharacteristic(this.hap.Characteristic.LockCurrentState)?.onGet(() => {
+    service.getCharacteristic(this.hap.Characteristic.LockCurrentState)?.onGet(() => this.hkLockState);
 
-      return this.hkLockState;
-    });
-
-    lockService.getCharacteristic(this.hap.Characteristic.LockTargetState)?.onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState)?.onSet(async (value: CharacteristicValue) => {
 
       if(!(await this.hubLockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
 
         // Revert our target state.
-        setTimeout(() => {
-
-          lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value);
-        }, 50);
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value), 50);
       }
 
-      lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
+      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
     });
 
     // Initialize the lock.
     this._hkLockState = -1;
-    lockService.displayName = this.accessoryName;
-    lockService.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
+    service.displayName = this.accessoryName;
+    service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
     this.hkLockState = this.hubLockState;
+
+    service.setPrimaryService(true);
 
     return true;
   }
@@ -179,58 +185,39 @@ export class AccessHub extends AccessDevice {
   // Configure a switch to manually trigger a doorbell ring event for HomeKit.
   private configureDoorbellTrigger(): boolean {
 
-    // Find the switch service, if it exists.
-    let triggerService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
-
-    // Doorbell switches are disabled by default and primarily exist for automation purposes.
-    if(!this.hasFeature("Hub.Doorbell.Trigger")) {
-
-      if(triggerService) {
-
-        this.accessory.removeService(triggerService);
-      }
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger"),
+      AccessReservedNames.SWITCH_DOORBELL_TRIGGER)) {
 
       return false;
     }
 
-    const triggerName = this.accessoryName + " Doorbell Trigger";
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Doorbell Trigger",
+      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => this.log.info("Enabling the doorbell automation trigger."));
 
-    // Add the switch to the hub, if needed.
-    if(!triggerService) {
+    if(!service) {
 
-      triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
+      this.log.error("Unable to add the doorbell automation trigger.");
 
-      if(!triggerService) {
-
-        this.log.error("Unable to add the doorbell trigger.");
-
-        return false;
-      }
-
-      triggerService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(triggerService);
+      return false;
     }
 
     // Trigger the doorbell.
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
 
       return this.doorbellRingRequestId !== null;
     });
 
     // The state isn't really user-triggerable. We have no way, currently, to trigger a ring event on the hub.
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onSet(() => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(() => {
 
-      setTimeout(() => {
-
-        triggerService?.updateCharacteristic(this.hap.Characteristic.On, this.doorbellRingRequestId !== null);
-      }, 50);
+      setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, this.doorbellRingRequestId !== null), 50);
     });
 
     // Initialize the switch.
-    triggerService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, triggerName);
-    triggerService.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    this.log.info("Enabling doorbell automation trigger.");
+    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Doorbell Trigger");
+    service.updateCharacteristic(this.hap.Characteristic.On, false);
 
     return true;
   }
@@ -238,63 +225,40 @@ export class AccessHub extends AccessDevice {
   // Configure a switch to automate lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service.
   private configureLockTrigger(): boolean {
 
-    // Find the switch service, if it exists.
-    let triggerService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER);
-
-    // Doorbell switches are disabled by default and primarily exist for automation purposes.
-    if(!this.hasFeature("Hub.Lock.Trigger")) {
-
-      if(triggerService) {
-
-        this.accessory.removeService(triggerService);
-      }
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, () => this.hasFeature("Hub.Lock.Trigger"), AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
 
       return false;
     }
 
-    const triggerName = this.accessoryName + " Lock Trigger";
+    // Acquire the service.
+    const service = acquireService(this.hap, this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Lock Trigger",
+      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => this.log.info("Enabling the lock automation trigger."));
 
-    // Add the switch to the hub, if needed.
-    if(!triggerService) {
+    if(!service) {
 
-      triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+      this.log.error("Unable to add the lock automation trigger.");
 
-      if(!triggerService) {
-
-        this.log.error("Unable to add the lock trigger.");
-
-        return false;
-      }
-
-      triggerService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(triggerService);
+      return false;
     }
 
     // Trigger the doorbell.
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
-
-      return this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED;
-    });
+    service.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
 
     // The state isn't really user-triggerable. We have no way, currently, to trigger a lock or unlock event on the hub.
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
 
       // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
       if(!(await this.hubLockCommand(!value))) {
 
         // Revert our state.
-        setTimeout(() => {
-
-          triggerService.updateCharacteristic(this.hap.Characteristic.On, !value);
-        }, 50);
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
       }
     });
 
     // Initialize the switch.
-    triggerService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, triggerName);
-    triggerService.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    this.log.info("Enabling lock automation trigger.");
+    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Lock Trigger");
+    service.updateCharacteristic(this.hap.Characteristic.On, false);
 
     return true;
   }
@@ -394,6 +358,20 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
+  // Return the current HomeKit DPS state that we are tracking for this hub.
+  private get hkDpsState(): CharacteristicValue {
+
+    return this.accessory.getService(this.hap.Service.ContactSensor)?.getCharacteristic(this.hap.Characteristic.ContactSensorState).value ??
+      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+  }
+
+  // Set the current HomeKit DPS state for this hub.
+  private set hkDpsState(value: CharacteristicValue) {
+
+    // Update the state of the contact service.
+    this.accessory.getService(this.hap.Service.ContactSensor)?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, value);
+  }
+
   // Return the current HomeKit lock state that we are tracking for this hub.
   private get hkLockState(): CharacteristicValue {
 
@@ -428,6 +406,38 @@ export class AccessHub extends AccessDevice {
       this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
   }
 
+  // Return the current state of the DPS on the hub.
+  private get hubDpsState(): CharacteristicValue {
+
+    // If we don't have the wiring connected for the DPS, we report our default closed state.
+    if(this.isDpsWired) {
+
+      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
+    }
+
+    let relayType;
+
+    switch(this.uda.device_type) {
+
+      case "UA-Hub-Door-Mini":
+      case "UA-ULTRA":
+
+        relayType = "input_d1_dps";
+
+        break;
+
+      default:
+
+        relayType = "input_state_dps";
+
+        break;
+    }
+
+    // Return our DPS state. If it's anything other than on, we assume it's open.
+    return (this.uda.configs?.find(x => x.key === relayType)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
+      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+  }
+
   // Return the current state of the relay lock on the hub.
   private get hubLockState(): CharacteristicValue {
 
@@ -451,8 +461,39 @@ export class AccessHub extends AccessDevice {
 
     const lockRelay = this.uda.configs?.find(x => x.key === relayType);
 
-    return (lockRelay?.value === "off" ?
-      this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED) ?? this.hap.Characteristic.LockCurrentState.UNKNOWN;
+    return ((lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED) ??
+      this.hap.Characteristic.LockCurrentState.UNKNOWN;
+  }
+
+  // Return whether the DPS has been wired on the hub.
+  private get isDpsWired(): boolean {
+
+    let wiringType = [];
+
+    switch(this.uda.device_type) {
+
+      case "UA-Hub-Door-Mini":
+      case "UA-ULTRA":
+
+        wiringType = [ "wiring_state_d1-dps-neg", "wiring_state_d1-dps-pos" ];
+
+        break;
+
+      default:
+
+        wiringType = [ "wiring_state_dps-neg", "wiring_state_dps-pos" ];
+
+        break;
+    }
+
+    // The DPS is considered wired only if all associated wiring is connected.
+    return wiringType.filter(wire => this.uda.configs?.some(x => x.key === wire && x.value === "on")).length === wiringType.length;
+  }
+
+  // Utility to validate hub capabilities.
+  private hasCapability(capability: string | string[]): boolean {
+
+    return Array.isArray(capability) ? capability.some(c => this.uda?.capabilities?.includes(c)) : this.uda?.capabilities?.includes(capability);
   }
 
   // Handle hub-related events.
@@ -474,17 +515,26 @@ export class AccessHub extends AccessDevice {
 
       case "access.data.device.update":
 
-        // Process an Access device update event if our state has changed.
-        if(this.hubLockState === this.hkLockState) {
+        // Process a lock update event if our state has changed.
+        if(this.hubLockState !== this.hkLockState) {
 
-          break;
+          this.hkLockState = this.hubLockState;
+
+          if(this.hints.logLock) {
+
+            this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
+          }
         }
 
-        this.hkLockState = this.hubLockState;
+        // Process a DPS update event if our state has changed.
+        if(this.hints.hasDps && (this.hubDpsState !== this.hkDpsState)) {
 
-        if(this.hints.logLock) {
+          this.hkDpsState = this.hubDpsState;
 
-          this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
+          if(this.hints.logDps && this.isDpsWired) {
+
+            this.log.info("Door position sensor " + ((this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED) ? "closed." : "open."));
+          }
         }
 
         break;
@@ -492,7 +542,7 @@ export class AccessHub extends AccessDevice {
       case "access.remote_view":
 
         // Process an Access ring event if we're the intended target.
-        if((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) {
+        if(((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
 
           break;
         }

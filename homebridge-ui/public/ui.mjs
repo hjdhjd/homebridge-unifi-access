@@ -104,14 +104,14 @@ const getDevices = async (controller) => {
   devices = devices.map(device => ({
 
     ...device,
-    serial: device.mac.replace(/:/g, "").toUpperCase()
+    serialNumber: device.mac.replace(/:/g, "").toUpperCase()
   }));
 
   return devices;
 };
 
 // Return whether a given device is a controller.
-const isController = (device) => device.modelKey === "controller";
+const isController = (device) => device.display_model === "controller";
 
 // Show the list of Access devices associated with a controller, grouped by model.
 const showSidebarDevices = (controller, devices) => {
@@ -178,12 +178,12 @@ const showSidebarDevices = (controller, devices) => {
 
       const label = document.createElement("label");
 
-      label.name = device.serial;
+      label.name = device.serialNumber;
       label.appendChild(document.createTextNode(device.alias ?? device.display_model));
       label.style.cursor = "pointer";
       label.classList.add("mx-2", "my-0", "p-0", "w-100");
 
-      label.addEventListener("click", () => ui.featureOptions.showDeviceOptions(device.serial));
+      label.addEventListener("click", () => ui.featureOptions.showDeviceOptions(device.serialNumber));
 
       // Add the device label to our cell.
       tdDevice.appendChild(label);
@@ -203,7 +203,7 @@ const showSidebarDevices = (controller, devices) => {
 const validOption = (device, option) => {
 
   if(device && (device.display_model !== "controller") && (
-    (option.hasFeature && (!device.capabilities || !option.hasFeature.some(x => device.capabilities[x]))) ||
+    (option.hasCapability && (!device.capabilities || !option.hasCapability.some(x => device.capabilities.includes(x)))) ||
     (option.hasProperty && !option.hasProperty.some(x => x in device)) ||
     (option.modelKey && (option.modelKey !== "all") && !option.modelKey.includes(device.display_model)))) {
 

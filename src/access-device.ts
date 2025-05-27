@@ -14,8 +14,10 @@ import util from "node:util";
 // Device-specific options and settings.
 export interface AccessHints {
 
+  hasDps: boolean,
   ledStatus: boolean,
   logDoorbell: boolean,
+  logDps: boolean,
   logLock: boolean,
   logMotion: boolean,
   motionDuration: number,

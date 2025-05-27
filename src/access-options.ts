@@ -38,7 +38,7 @@ export const featureOptionCategories = [
 
   { description: "Device feature options.", modelKey: [ "all" ], name: "Device" },
   { description: "Controller feature options.", modelKey: [ "controller" ], name: "Controller" },
-  { description: "Hub feature options.", modelKey: [ "UA Hub" ], name: "Hub" },
+  { description: "Hub feature options.", hasCapability: [ "is_hub" ], modelKey: [ "all" ], name: "Hub" },
   { description: "Logging feature options.", modelKey: [ "all" ], name: "Log" }
 ];
 
@@ -66,13 +66,15 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking.", name: "LockDelayInterval" },
     { default: false, description: "Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs.", name: "Lock.Trigger" },
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", hasCapability: [ "door_bell" ], name: "Doorbell" },
-    { default: false, description: "Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell.", hasCapability: [ "door_bell" ], name: "Doorbell.Trigger" }
+    { default: false, description: "Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell.", hasCapability: [ "door_bell" ], name: "Doorbell.Trigger" },
+    { default: true, description: "Add a contact sensor accessory for the door position sensor.", hasCapability: [ "dps_alarm", "dps_mode_selectable", "dps_trigger_level" ], name: "DPS" }
   ],
 
   // Logging options.
   "Log": [
 
     { default: true, description: "Log doorbell ring events in Homebridge.", hasCapability: [ "door_bell" ], name: "Doorbell" },
+    { default: true, description: "Log door position sensor events in Homebridge.", hasCapability: [ "dps_alarm", "dps_mode_selectable", "dps_trigger_level" ], name: "DPS" },
     { default: true, description: "Log lock events in Homebridge.", hasCapability: [ "is_hub" ], name: "Lock" }
   ]
 };

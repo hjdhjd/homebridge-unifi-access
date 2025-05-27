@@ -6,6 +6,9 @@
 // HBUA reserved names.
 export enum AccessReservedNames {
 
+  // Manage our contact sensor types.
+  CONTACT_DPS = "ContactSensor.DPS",
+
   // Manage our switch types.
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
   SWITCH_LOCK_TRIGGER = "LockTrigger",
