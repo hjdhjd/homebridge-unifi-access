@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.9.2 (2025-05-27)
+  * Housekeeping.
+
 ## 1.9.1 (2025-05-27)
   * Improvement: refinements to MQTT status updates for DPS. It will return `unknown` when the DPS isn't wired.
   * Fix: address a regression to ensure automation triggers are created and managed correctly.
