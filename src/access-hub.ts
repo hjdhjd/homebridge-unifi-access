@@ -432,7 +432,7 @@ export class AccessHub extends AccessDevice {
   private get hubDpsState(): CharacteristicValue {
 
     // If we don't have the wiring connected for the DPS, we report our default closed state.
-    if(this.isDpsWired) {
+    if(!this.isDpsWired) {
 
       return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
     }
@@ -495,17 +495,25 @@ export class AccessHub extends AccessDevice {
     switch(this.uda.device_type) {
 
       case "UA-Hub-Door-Mini":
-      case "UA-ULTRA":
 
         wiringType = [ "wiring_state_d1-dps-neg", "wiring_state_d1-dps-pos" ];
 
         break;
 
-      default:
+      case "UAH":
 
         wiringType = [ "wiring_state_dps-neg", "wiring_state_dps-pos" ];
 
         break;
+
+      case "UA-ULTRA":
+
+        return true;
+
+      default:
+
+        // By default, let's assume the wiring is not there.
+        return false;
     }
 
     // The DPS is considered wired only if all associated wiring is connected.
