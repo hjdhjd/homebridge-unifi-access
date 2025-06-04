@@ -39,6 +39,7 @@ export const featureOptionCategories = [
   { description: "Device feature options.", modelKey: [ "all" ], name: "Device" },
   { description: "Controller feature options.", modelKey: [ "controller" ], name: "Controller" },
   { description: "Hub feature options.", hasCapability: [ "is_hub" ], modelKey: [ "all" ], name: "Hub" },
+  { description: "Reader feature options.", hasCapability: [ "is_reader" ], modelKey: [ "all" ], name: "Reader" },
   { description: "Logging feature options.", modelKey: [ "all" ], name: "Log" }
 ];
 
@@ -68,6 +69,11 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", hasCapability: [ "door_bell" ], name: "Doorbell" },
     { default: false, description: "Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell.", hasCapability: [ "door_bell" ], name: "Doorbell.Trigger" },
     { default: true, description: "Add a contact sensor accessory for the door position sensor.", hasCapability: [ "dps_alarm", "dps_mode_selectable", "dps_trigger_level" ], name: "DPS" }
+  ],
+
+  // Reader options.
+  "Reader": [
+    { default: true, description: "Add a switch to control the hand-wave functionality.", name: "HandWave" }
   ],
 
   // Logging options.
