@@ -10,6 +10,7 @@ import type { AccessControllerOptions } from "./access-options.js";
 import type { AccessDevice } from "./access-device.js";
 import { AccessEvents } from "./access-events.js";
 import { AccessHub } from "./access-hub.js";
+import { AccessReader } from "./access-reader.js";
 import type { AccessPlatform } from "./access-platform.js";
 import util from "node:util";
 
@@ -210,6 +211,8 @@ export class AccessController {
       return false;
     }
 
+    this.log.info("Adding device with type %s", device.device_type);
+
     switch(device.device_type) {
 
       case "UA-Hub-Door-Mini":
@@ -220,6 +223,13 @@ export class AccessController {
 
         // We have a UniFi Access hub.
         this.configuredDevices[accessory.UUID] = new AccessHub(this, device, accessory);
+
+        return true;
+
+      case "UA-LITE":
+      case "UA-G2-MINI":
+        // We have a UniFi Access reader.
+        this.configuredDevices[accessory.UUID] = new AccessReader(this, device, accessory);
 
         return true;
 
@@ -243,6 +253,11 @@ export class AccessController {
     return true;
   }
 
+  // Utility to check if a device has supported capabilities.
+  private hasSupportedCapabilities(device: AccessDeviceConfig): boolean {
+    return device.capabilities.includes("is_hub") || device.capabilities.includes("is_reader");
+  }
+
   // Add a newly detected Access device to HomeKit.
   public addHomeKitDevice(device: AccessDeviceConfig): AccessDevice | null {
 
@@ -253,7 +268,7 @@ export class AccessController {
     }
 
     // We only support certain device capabilities.
-    if(!device.capabilities.includes("is_hub")) {
+    if(!this.hasSupportedCapabilities(device)) {
 
       // If we've already informed the user about this one, we're done.
       if(this.unsupportedDevices[device.mac]) {
@@ -264,7 +279,7 @@ export class AccessController {
       // Notify the user we see this device, but we aren't adding it to HomeKit.
       this.unsupportedDevices[device.mac] = true;
 
-      this.log.info("UniFi Access device type '%s' is not currently supported, ignoring: %s.", device.device_type, this.udaApi.getDeviceName(device));
+      this.log.info("UniFi Access device type '%s' is not currently supported, ignoring: %s. Device capabilities: %s", device.device_type, this.udaApi.getDeviceName(device), device.capabilities.join(", "));
 
       return null;
     }
@@ -397,7 +412,7 @@ export class AccessController {
       }
 
       // Check to see if the device still exists on the Access controller and the user has not chosen to hide it.
-      if(accessDevice.uda.capabilities.includes("is_hub") &&
+      if(this.hasSupportedCapabilities(accessDevice.uda) &&
         this.udaApi.devices?.some((x: AccessDeviceConfig) => x.mac.toLowerCase() === accessDevice.uda.mac.toLowerCase()) &&
         accessDevice.hasFeature("Device")) {
 
