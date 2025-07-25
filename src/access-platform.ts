@@ -38,6 +38,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
       controllers: config.controllers as AccessControllerOptions[],
       debugAll: false,
+      doorbellDoorGuardIds: config.doorbellDoorGuardIds as string[] ?? [],
       options: config.options as string[],
       ringDelay: config.ringDelay as number ?? 0
     };

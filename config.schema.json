@@ -103,6 +103,23 @@
         "maximum": 60,
         "placeholder": "e.g. 5",
         "description": "Delay between doorbell rings. Setting this to a non-zero value will prevent multiple rings of a doorbell over the specified duration.  Default: 0."
+      },
+
+      "doorbellDoorGuardIds": {
+
+        "type": "array",
+        "title": "Doorbell Door Guard IDs Filter",
+        "required": false,
+
+        "items": {
+          "type": "string",
+          "title": "Door Guard ID",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "placeholder": "e.g. 12345678-1234-1234-1234-123456789abc",
+          "description": "Door guard GUID to listen for doorbell rings (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."
+        },
+
+        "description": "Only doorbell rings from these specific door guard GUIDs will trigger HomeKit doorbell events. If empty, all doorbell rings will be processed. Default: Empty (all doorbell rings processed)."
       }
     }
   },
@@ -193,7 +210,33 @@
         {
           "description": "These settings should be rarely used or needed by most people. Use these with caution.",
           "items": [
-            "name"
+            "name",
+            "ringDelay"
+          ]
+        }
+      ]
+    },
+
+    {
+      "type": "section",
+      "title": "Doorbell Settings (Optional)",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "description": "Configure doorbell filtering and behavior settings.",
+          "items": [
+            {
+              "key": "doorbellDoorGuardIds",
+              "type": "array",
+              "name": " ",
+              "description": "Specify door guard GUIDs to filter doorbell rings. Only rings from these door guards will trigger HomeKit doorbell events.",
+              "orderable": false,
+              "buttonText": "Add Door Guard GUID",
+              "items": [
+                "doorbellDoorGuardIds[]"
+              ]
+            }
           ]
         }
       ]

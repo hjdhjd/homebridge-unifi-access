@@ -572,7 +572,7 @@ export class AccessHub extends AccessDevice {
 
         break;
 
-      case "access.remote_view":
+      case "access.remote_view": {
 
         // Process an Access ring event if we're the intended target.
         if(((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
@@ -580,7 +580,27 @@ export class AccessHub extends AccessDevice {
           break;
         }
 
-        this.doorbellRingRequestId = (packet.data as AccessEventDoorbellRing).request_id;
+        // Filter doorbell rings by door guard IDs if configured.
+        const doorbellEvent = packet.data as AccessEventDoorbellRing;
+        const configuredDoorGuardIds = this.controller.platform.config.doorbellDoorGuardIds;
+
+        if(configuredDoorGuardIds.length > 0) {
+
+          const hasMatchingDoorGuard = doorbellEvent.door_guard_ids?.some(id => configuredDoorGuardIds.includes(id));
+
+          if(!hasMatchingDoorGuard) {
+
+            if(this.hints.logDoorbell) {
+
+              this.log.info("Doorbell ring from door guard GUIDs [%s] filtered out (not in configured list: [%s]).",
+                doorbellEvent.door_guard_ids?.join(", ") ?? "none", configuredDoorGuardIds.join(", "));
+            }
+
+            break;
+          }
+        }
+
+        this.doorbellRingRequestId = doorbellEvent.request_id;
 
         // Trigger the doorbell event in HomeKit.
         this.accessory.getService(this.hap.Service.Doorbell)?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
@@ -598,6 +618,7 @@ export class AccessHub extends AccessDevice {
         }
 
         break;
+      }
 
       case "access.remote_view.change":
 

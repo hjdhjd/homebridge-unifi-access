@@ -10,6 +10,7 @@ export interface AccessOptions {
 
   controllers: AccessControllerOptions[],
   debugAll: boolean,
+  doorbellDoorGuardIds: string[],
   options: string[],
   ringDelay: number
 }
