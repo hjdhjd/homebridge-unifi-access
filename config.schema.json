@@ -211,21 +211,7 @@
           "description": "These settings should be rarely used or needed by most people. Use these with caution.",
           "items": [
             "name",
-            "ringDelay"
-          ]
-        }
-      ]
-    },
-
-    {
-      "type": "section",
-      "title": "Doorbell Settings (Optional)",
-      "expandable": true,
-      "expanded": false,
-      "items": [
-        {
-          "description": "Configure doorbell filtering and behavior settings.",
-          "items": [
+            "ringDelay",
             {
               "key": "doorbellDoorGuardIds",
               "type": "array",
