@@ -64,6 +64,7 @@ export class AccessEvents extends EventEmitter {
       case "UA-ULTRA":
       case "UAH":
       case "UAH-DOOR":
+      case "UGT":
       default:
 
         // Lookup the device.
