@@ -217,6 +217,7 @@ export class AccessController {
       case "UAH":
       case "UAH-DOOR":
       case "UAH-Ent":
+      case "UGT":
 
         // We have a UniFi Access hub.
         this.configuredDevices[accessory.UUID] = new AccessHub(this, device, accessory);
