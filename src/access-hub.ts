@@ -448,6 +448,12 @@ export class AccessHub extends AccessDevice {
 
         break;
 
+      case "UGT":
+
+        relayType = "input_gate_dps";
+
+        break;
+
       default:
 
         relayType = "input_state_dps";
@@ -471,6 +477,12 @@ export class AccessHub extends AccessDevice {
       case "UA-ULTRA":
 
         relayType = "output_d1_lock_relay";
+
+        break;
+
+      case "UGT":
+
+        relayType = "output_oper1_relay";
 
         break;
 
@@ -509,6 +521,12 @@ export class AccessHub extends AccessDevice {
       case "UA-ULTRA":
 
         return true;
+
+      case "UGT":
+
+        wiringType = [ "wiring_state_gate-dps-neg", "wiring_state_gate-dps-pos" ];
+
+        break;
 
       default:
 
