@@ -117,7 +117,7 @@ const isController = (device) => device.display_model === "controller";
 const showSidebarDevices = (controller, devices) => {
 
   // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
-  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub"))
+  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub") || device.capabilities.includes("is_reader"))
     .map(device => (device.device_type === "UAH-Ent") ? device.model : device.display_model))];
 
   // Start with a clean slate.
@@ -216,7 +216,9 @@ const validOption = (device, option) => {
 // Only show feature option categories that are valid for a particular device type.
 const validOptionCategory = (device, category) => {
 
-  if(device && (device.display_model !== "controller") && !category.modelKey.some(model => ["all", device.display_model].includes(model))) {
+  if(device && (device.display_model !== "controller") && (
+    !category.modelKey.some(model => ["all", device.display_model].includes(model)) ||
+    (category.hasCapability && !category.hasCapability.some(cap => device.capabilities?.includes(cap))))) {
 
     return false;
   }

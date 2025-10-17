@@ -13,5 +13,6 @@ export enum AccessReservedNames {
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
   SWITCH_LOCK_TRIGGER = "LockTrigger",
   SWITCH_MOTION_SENSOR = "MotionSensorSwitch",
-  SWITCH_MOTION_TRIGGER = "MotionSensorTrigger"
+  SWITCH_MOTION_TRIGGER = "MotionSensorTrigger",
+  SWITCH_READER_HAND_WAVE = "ReaderHandWaveSwitch"
 }

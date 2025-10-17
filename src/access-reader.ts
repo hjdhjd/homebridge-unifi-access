@@ -34,12 +34,8 @@ export class AccessReader extends AccessDevice {
     // Configure accessory information.
     this.configureInfo();
 
-    // Add the hand-wave switch service if the device supports it
-    if(this.hasCapability("hand_wave")) {
-      this.configureHandWaveService();
-    } else {
-      this.log.info("%s: Device does not support hand-wave access method.", this.accessoryName);
-    }
+    // Configure the hand-wave switch.
+    this.configureHandWaveService();
 
     // Listen for events.
     this.controller.events.on(this.uda.unique_id, this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
@@ -49,34 +45,40 @@ export class AccessReader extends AccessDevice {
 
   // Configure the hand-wave switch service.
   private configureHandWaveService(): boolean {
-    this.log.info("Configuring hand-wave service for %s", this.accessoryName);
-    
-    // Get or create the switch service.
-    const switchService = acquireService(this.hap, this.accessory, this.hap.Service.Switch, this.accessoryName + " Hand Wave");
 
-    // If we couldn't get the service, log an error and return
-    if (!switchService) {
-      this.log.error("%s: Failed to create hand-wave switch service", this.accessoryName);
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch,
+      this.hasCapability("hand_wave") && this.hasFeature("Reader.HandWave"),
+      AccessReservedNames.SWITCH_READER_HAND_WAVE)) {
+
       return false;
     }
 
-    // Configure the switch service.
-    switchService
-      .setCharacteristic(this.hap.Characteristic.Name, this.accessoryName + " Hand Wave")
-      .setCharacteristic(this.hap.Characteristic.On, this.handWaveEnabled);
+    // Acquire the service.
+    const switchService = acquireService(this.hap, this.accessory, this.hap.Service.Switch,
+      this.accessoryName + " Hand Wave", AccessReservedNames.SWITCH_READER_HAND_WAVE,
+      () => this.log.info("%s: Enabling the hand-wave switch.", this.accessoryName));
+
+    if (!switchService) {
+      this.log.error("%s: Unable to add the hand-wave switch.", this.accessoryName);
+      return false;
+    }
 
     // Handle changes from HomeKit
-    switchService.getCharacteristic(this.hap.Characteristic.On)
-      .onSet(async (value: CharacteristicValue) => {
-        // Update the hand-wave setting through the API
-        const success = await this.setHandWaveState(value as boolean);
-        if (!success) {
-          // If the update failed, revert the switch state
-          switchService.updateCharacteristic(this.hap.Characteristic.On, this.handWaveEnabled);
-        } else {
-          this.handWaveEnabled = value as boolean;
-        }
-      });
+    switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet(async (value: CharacteristicValue) => {
+      // Update the hand-wave setting through the API
+      const success = await this.setHandWaveState(value as boolean);
+      if (!success) {
+        // If the update failed, revert the switch state
+        setTimeout(() => switchService.updateCharacteristic(this.hap.Characteristic.On, this.handWaveEnabled), 50);
+      } else {
+        this.handWaveEnabled = value as boolean;
+      }
+    });
+
+    // Initialize the switch.
+    switchService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Hand Wave");
+    switchService.updateCharacteristic(this.hap.Characteristic.On, this.handWaveEnabled);
 
     return true;
   }
