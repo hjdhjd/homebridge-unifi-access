@@ -3,7 +3,7 @@
  * access-platform.ts: homebridge-unifi-access platform class.
  */
 import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from "homebridge";
-import { type AccessControllerOptions, type AccessOptions, featureOptionCategories, featureOptions } from "./access-options.js";
+import { type AccessOptions, featureOptionCategories, featureOptions } from "./access-options.js";
 import { ACCESS_MQTT_TOPIC } from "./settings.js";
 import { APIEvent } from "homebridge";
 import { AccessController } from "./access-controller.js";
@@ -14,12 +14,12 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
   public accessories: PlatformAccessory[];
   public readonly api: API;
-  public readonly config!: AccessOptions;
+  public readonly config: AccessOptions;
   private readonly controllers: AccessController[];
   public readonly featureOptions: FeatureOptions;
   public readonly log: Logging;
 
-  constructor(log: Logging, config: PlatformConfig, api: API) {
+  constructor(log: Logging, config: PlatformConfig | undefined, api: API) {
 
     this.accessories = [];
     this.api = api;
@@ -27,23 +27,17 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options ?? []);
     this.log = log;
 
-    // We can't start without being configured.
-    if(!config) {
-
-      return;
-    }
-
     // Plugin options into our config variables.
     this.config = {
 
-      controllers: config.controllers as AccessControllerOptions[],
+      controllers: config?.controllers ?? [],
       debugAll: false,
-      options: config.options as string[],
-      ringDelay: config.ringDelay as number ?? 0
+      options: config?.options ?? [],
+      ringDelay: config?.ringDelay ?? 0
     };
 
     // We need a UniFi Access controller configured to do anything.
-    if(!this.config.controllers) {
+    if(!this.config.controllers.length) {
 
       this.log.info("No UniFi Access controllers have been configured.");
 
@@ -73,7 +67,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       }
 
       // MQTT topic to use.
-      controllerConfig.mqttTopic ??= ACCESS_MQTT_TOPIC;
+      controllerConfig.mqttTopic ||= ACCESS_MQTT_TOPIC;
 
       this.controllers.push(new AccessController(this, controllerConfig));
     }

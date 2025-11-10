@@ -4,7 +4,7 @@
  */
 import type { API, HAP, Service } from "homebridge";
 import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { type HomebridgePluginLogging, validateName } from "homebridge-plugin-utils";
+import { type HomebridgePluginLogging, sanitizeName } from "homebridge-plugin-utils";
 import type { AccessController} from "./access-controller.js";
 import type { AccessDevice } from "./access-device.js";
 import type { AccessPlatform } from "./access-platform.js";
@@ -16,7 +16,7 @@ export class AccessEvents extends EventEmitter {
   private api: API;
   private controller: AccessController;
   private eventsHandler: ((packet: AccessEventPacket) => void) | null;
-  private readonly eventTimers: { [index: string]: NodeJS.Timeout };
+  private readonly eventTimers: { [index: string]: NodeJS.Timeout | undefined };
   private hap: HAP;
   private log: HomebridgePluginLogging;
   private mqttPublishTelemetry: boolean;
@@ -56,40 +56,25 @@ export class AccessEvents extends EventEmitter {
   // Process Access API update events.
   private udaUpdates(packet: AccessEventPacket): void {
 
-    let accessDevice: AccessDevice | null;
+    // Lookup the device.
+    const accessDevice = this.controller.deviceLookup(packet.event_object_id);
 
-    switch((packet.data as AccessDeviceConfig).device_type) {
+    // We have the device, let's check for device updates.
+    if(accessDevice) {
 
-      case "UA-Hub-Door-Mini":
-      case "UA-ULTRA":
-      case "UAH":
-      case "UAH-DOOR":
-      default:
+      // Update our device configuration state.
+      accessDevice.uda = packet.data as AccessDeviceConfig;
 
-        // Lookup the device.
-        accessDevice = this.controller.deviceLookup(packet.event_object_id);
+      // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
+      accessDevice.accessory.services.filter(x => x.testCharacteristic(this.hap.Characteristic.StatusActive))
+        .map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice.isOnline));
 
-        // No device found, we're done.
-        if(!accessDevice) {
+      // Sync names, if configured to do so.
+      if(accessDevice.hints.syncName && accessDevice.uda.alias && (accessDevice.accessoryName !== sanitizeName(accessDevice.uda.alias))) {
 
-          break;
-        }
-
-        // Update our device configuration state.
-        accessDevice.uda = packet.data as AccessDeviceConfig;
-
-        // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
-        accessDevice.accessory.services.filter(x => x.testCharacteristic(this.hap.Characteristic.StatusActive))
-          ?.map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice?.isOnline ?? false));
-
-        // Sync names, if configured to do so.
-        if(accessDevice.hints.syncName && (accessDevice.accessoryName !== validateName(accessDevice.uda.alias))) {
-
-          accessDevice.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
-          accessDevice.configureInfo();
-        }
-
-        break;
+        accessDevice.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
+        accessDevice.configureInfo();
+      }
     }
 
     // Update the internal list we maintain.
@@ -112,7 +97,7 @@ export class AccessEvents extends EventEmitter {
       }
 
       // Remove the device.
-      this.controller.removeHomeKitDevice(accessDevice);
+      this.controller.removeHomeKitDevice(accessDevice.accessory);
 
       return;
     }
@@ -142,13 +127,19 @@ export class AccessEvents extends EventEmitter {
       // Emit messages based on the specific device.
       this.emit(packet.event_object_id, packet);
 
+      // For v2 device update events, we need to unpack the metadata to determine which device we're targeting.
+      if((packet.event === "access.data.v2.device.update") && (packet.meta?.object_type === "device")) {
+
+        this.emit(packet.meta.id, packet);
+      }
+
       // Finally, emit messages based on the specific event and device combination.
       this.emit(packet.event + "." + packet.event_object_id, packet);
 
       // If enabled, publish all the event traffic coming from the Access controller to MQTT.
       if(this.mqttPublishTelemetry) {
 
-        this.controller.mqtt?.publish(this.controller.uda.host.mac.replace(/:/g, ""), "telemetry", JSON.stringify(packet));
+        this.controller.mqtt?.publish(this.controller.id ?? "", "telemetry", JSON.stringify(packet));
       }
     });
 
@@ -157,11 +148,6 @@ export class AccessEvents extends EventEmitter {
 
   // Motion event processing from UniFi Access.
   public motionEventHandler(accessDevice: AccessDevice): void {
-
-    if(!accessDevice) {
-
-      return;
-    }
 
     // Only notify the user if we have a motion sensor and it's active.
     const motionService = accessDevice.accessory.getService(this.hap.Service.MotionSensor);
@@ -174,11 +160,6 @@ export class AccessEvents extends EventEmitter {
 
   // Motion event delivery to HomeKit.
   private motionEventDelivery(accessDevice: AccessDevice, motionService: Service): void {
-
-    if(!accessDevice) {
-
-      return;
-    }
 
     // If we have disabled motion events, we're done here.
     if(("detectMotion" in accessDevice.accessory.context) && !accessDevice.accessory.context.detectMotion) {

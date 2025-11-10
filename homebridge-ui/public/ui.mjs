@@ -75,17 +75,42 @@ const firstRunOnSubmit = async () => {
   return true;
 };
 
+// Return whether a given device is a controller.
+const isController = (device) => device.display_model === "controller";
+
+// Return the list of controllers from our plugin configuration.
+const getControllers = () => {
+
+  const controllers = [];
+
+  // Grab the controllers from our configuration.
+  for(const controller of ui.featureOptions.currentConfig[0].controllers ?? []) {
+
+    controllers.push({ name: controller.address, serialNumber: controller.address });
+  }
+
+  return controllers;
+};
+
 // Return the list of devices associated with a given Access controller.
-const getDevices = async (controller) => {
+const getDevices = async (selectedController) => {
 
   // If we're in the global context, we have no devices.
+  if(!selectedController) {
+
+    return [];
+  }
+
+  // Find the entry in our plugin configuration.
+  const controller = (ui.featureOptions.currentConfig[0].controllers ?? []).find(c => c.address === selectedController.serialNumber);
+
   if(!controller) {
 
     return [];
   }
 
-  // Retrieve the current list of devices from the Access controller.
-  let devices = await homebridge.request("/getDevices", { address: controller.address, password: controller.password, username: controller.username });
+  // Retrieve the current list of devices from the Protect controller.
+  const devices = await homebridge.request("/getDevices", { address: controller.address, password: controller.password, username: controller.username });
 
   // Since the controller JSON doesn't have the same properties as the device JSON, let's make the controller JSON emulate the properties we care about.
   if(devices?.length) {
@@ -100,103 +125,41 @@ const getDevices = async (controller) => {
     /* eslint-enable camelcase */
   }
 
-  // Add the fields that the webUI framework is looking for to render.
-  devices = devices.map(device => ({
-
-    ...device,
-    serialNumber: device.mac.replace(/:/g, "").toUpperCase() + ((device.device_type === "UAH-Ent") ? "-" + device.source_id.toUpperCase() : "")
-  }));
-
-  return devices;
-};
-
-// Return whether a given device is a controller.
-const isController = (device) => device.display_model === "controller";
-
-// Show the list of Access devices associated with a controller, grouped by model.
-const showSidebarDevices = (controller, devices) => {
-
   // Workaround for the time being to reduce the number of models we see to just the currently supported ones.
-  const modelKeys = [...new Set(devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub"))
-    .map(device => (device.device_type === "UAH-Ent") ? device.model : device.display_model))];
+  const modelKeys = [...new Set(
+    devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub") || device.capabilities.includes("is_reader"))
+      .map(device => (device.device_type === "UAH-Ent") ? device.model : device.display_model))];
 
-  // Start with a clean slate.
-  ui.featureOptions.devicesTable.innerHTML = "";
+  // Add the fields that the webUI framework is looking for to render.
+  for(const device of devices) {
 
-  for(const key of modelKeys) {
+    device.name ??= device.alias ?? device.display_model;
+    device.serialNumber = device.mac.replace(/:/g, "").toUpperCase() + ((device.device_type === "UAH-Ent") ? "-" + device.source_id.toUpperCase() : "");
 
-    // Get all the devices associated with this device category.
-    const modelDevices = devices.filter(x => ((x.device_type === "UAH-Ent") ? x.model : x.display_model) === key);
+    const model = (device.device_type === "UAH-Ent") ? device.model : device.display_model;
 
-    // Nothing in this category, let's keep going.
-    if(!modelDevices.length) {
+    if(!modelKeys.includes(model)) {
 
-      continue;
+      device.sidebarGroup = "hidden";
     }
 
-    // If it's a controller, we handle that case differently.
-    if(key === "controller") {
+    device.sidebarGroup ??= device.capabilities.includes("is_hub") ? "Hubs" : "Readers";
 
-      // Change the name of the controller that we show users once we've connected with the controller.
-      ui.featureOptions.webUiControllerList.map(x => (x.name === controller.address) ? x.childNodes[0].nodeValue = modelDevices[0].host.hostname : true);
+    // We update the name of the controller that we show users once we've connected with the controller and have it's name.
+    if(isController(device)) {
 
-      continue;
-    }
+      device.sidebarGroup = "controllers";
 
-    // Create a row for this device category.
-    const trCategory = document.createElement("tr");
+      const activeController = [...document.querySelectorAll("[data-navigation='controller']")].find(c => c.getAttribute("data-device-serial") === controller.address);
 
-    // Disable any pointer events and hover activity.
-    trCategory.style.pointerEvents = "none";
+      if(activeController) {
 
-    // Create the cell for our device category row.
-    const tdCategory = document.createElement("td");
-
-    tdCategory.classList.add("m-0", "p-0", "pl-1", "w-100");
-
-    // Add the category name, with appropriate casing.
-    tdCategory.appendChild(document.createTextNode((key.charAt(0).toUpperCase() + key.slice(1) + "s")));
-    tdCategory.style.fontWeight = "bold";
-
-    // Add the cell to the table row.
-    trCategory.appendChild(tdCategory);
-
-    // Add the table row to the table.
-    ui.featureOptions.devicesTable.appendChild(trCategory);
-
-    for(const device of modelDevices) {
-
-      // Create a row for this device.
-      const trDevice = document.createElement("tr");
-
-      trDevice.classList.add("m-0", "p-0");
-
-      // Create a cell for our device.
-      const tdDevice = document.createElement("td");
-
-      tdDevice.classList.add("m-0", "p-0" , "w-100");
-
-      const label = document.createElement("label");
-
-      label.name = device.serialNumber;
-      label.appendChild(document.createTextNode(device.alias ?? device.display_model));
-      label.style.cursor = "pointer";
-      label.classList.add("mx-2", "my-0", "p-0", "w-100");
-
-      label.addEventListener("click", () => ui.featureOptions.showDeviceOptions(device.serialNumber));
-
-      // Add the device label to our cell.
-      tdDevice.appendChild(label);
-
-      // Add the cell to the table row.
-      trDevice.appendChild(tdDevice);
-
-      // Add the table row to the table.
-      ui.featureOptions.devicesTable.appendChild(trDevice);
-
-      ui.featureOptions.webUiDeviceList.push(label);
+        activeController.textContent = device.host.hostname;
+      }
     }
   }
+
+  return devices;
 };
 
 // Only show feature options that are valid for the capabilities of this device.
@@ -216,7 +179,9 @@ const validOption = (device, option) => {
 // Only show feature option categories that are valid for a particular device type.
 const validOptionCategory = (device, category) => {
 
-  if(device && (device.display_model !== "controller") && !category.modelKey.some(model => ["all", device.display_model].includes(model))) {
+  if(device && (device.display_model !== "controller") && (
+    !category.modelKey.some(model => [ "all", device.display_model ].includes(model)) ||
+    (category.hasCapability && (!device.capabilities || !category.hasCapability.some(x => device.capabilities.includes(x)))))) {
 
     return false;
   }
@@ -227,41 +192,47 @@ const validOptionCategory = (device, category) => {
 // Show the details for this device.
 const showAccessDetails = (device) => {
 
+  const deviceStatsContainer = document.getElementById("deviceStatsContainer");
+
   // No device specified, we must be in a global context.
   if(!device) {
 
-    document.getElementById("device_model").classList.remove("text-center");
-    document.getElementById("device_model").colSpan = 1;
-    document.getElementById("device_model").style.fontWeight = "normal";
-    document.getElementById("device_model").innerHTML = "N/A";
-    document.getElementById("device_mac").innerHTML = "N/A";
-    document.getElementById("device_address").innerHTML = "N/A";
-    document.getElementById("device_online").innerHTML = "N/A";
+    deviceStatsContainer.innerHTML = "";
 
     return;
   }
 
-  // Populate the device details.
-  document.getElementById("device_model").classList.remove("text-center");
-  document.getElementById("device_model").colSpan = 1;
-  document.getElementById("device_model").style.fontWeight = "normal";
-  document.getElementById("device_model").innerHTML = device.model ?? device.display_model;
-  document.getElementById("device_mac").innerHTML = device.mac.replace(/:/g, "").toUpperCase();
-  document.getElementById("device_address").innerHTML = device.ip;
-  document.getElementById("device_online").innerHTML = device.is_online ? "Connected" : "Disconnected";
+  // Populate the device details using the new CSS Grid layout. This provides a more flexible and responsive display than the previous table layout.
+  deviceStatsContainer.innerHTML =
+    "<div class=\"device-stats-grid\">" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">Model</span>" +
+        "<span class=\"stat-value\">" + (device.model ?? device.display_model) + "</span>" +
+      "</div>" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">MAC Address</span>" +
+        "<span class=\"stat-value font-monospace\">" + device.serialNumber + "</span>" +
+      "</div>" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">IP Address</span>" +
+        "<span class=\"stat-value font-monospace\">" + device.ip + "</span>" +
+      "</div>" +
+      "<div class=\"stat-item\">" +
+        "<span class=\"stat-label\">Status</span>" +
+        "<span class=\"stat-value\">" + (device.is_online ? "Connected" : "Disconnected") + "</span>" +
+      "</div>" +
+    "</div>";
 };
 
 // Parameters for our feature options webUI.
 const featureOptionsParams = {
 
+  getControllers: getControllers,
   getDevices: getDevices,
-  hasControllers: true,
   infoPanel: showAccessDetails,
   sidebar: {
 
-    controllerLabel: "Access Controllers",
-    deviceLabel: "Access Devices",
-    showDevices: showSidebarDevices
+    controllerLabel: "Access Controllers"
   },
   ui: {
 

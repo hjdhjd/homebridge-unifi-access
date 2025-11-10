@@ -51,6 +51,7 @@ Feature options provide a rich mechanism for tailoring your `homebridge-unifi-ac
  * [Device](#device): Device feature options.
  * [Controller](#controller): Controller feature options.
  * [Hub](#hub): Hub feature options.
+ * [AccessMethod](#accessmethod): Access method feature options.
  * [Log](#log): Logging feature options.
 
 #### <A NAME="device"></A>Device feature options.
@@ -81,7 +82,23 @@ These option(s) apply to: all Access device types.
 | `Hub.Lock.Trigger`                               | Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs. **(default: disabled)**.
 | `Hub.Doorbell`                                   | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
 | `Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| `Hub.DPS`                                        | Add a contact sensor accessory for the door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a door position sensor.*
+| `Hub.DPS`                                        | Add a contact sensor accessory for the door position sensor. **(default: enabled)**.
+| `Hub.REL`                                        | Add a contact sensor accessory for the remote release. **(default: enabled)**.
+| `Hub.REN`                                        | Add a contact sensor accessory for the request to enter sensor. **(default: enabled)**.
+| `Hub.REX`                                        | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**.
+
+#### <A NAME="accessmethod"></A>Access method feature options.
+
+These option(s) apply to: all Access device types.
+
+| Option                                           | Description
+|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| `AccessMethod.Face`                              | Add a switch accessory to control the face unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support face unlock authentication.*
+| `AccessMethod.Hand`                              | Add a switch accessory to control the hand wave unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support hand wave authentication.*
+| `AccessMethod.Mobile`                            | Add a switch accessory to control the mobile unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support mobile authentication.*
+| `AccessMethod.NFC`                               | Add a switch accessory to control the NFC card access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support NFC authentication.*
+| `AccessMethod.PIN`                               | Add a switch accessory to control the PIN unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support PIN authentication.*
+| `AccessMethod.QR`                                | Add a switch accessory to control the QR unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support QR code authentication.*
 
 #### <A NAME="log"></A>Logging feature options.
 
@@ -90,6 +107,9 @@ These option(s) apply to: all Access device types.
 | Option                                           | Description
 |--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | `Log.Doorbell`                                   | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| `Log.DPS`                                        | Log door position sensor events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a door position sensor.*
+| `Log.DPS`                                        | Log door position sensor events in Homebridge. **(default: enabled)**.
+| `Log.REL`                                        | Log door remote release events in Homebridge. **(default: enabled)**.
+| `Log.REN`                                        | Log door request to enter events in Homebridge. **(default: enabled)**.
+| `Log.REX`                                        | Log door request to exit events in Homebridge. **(default: enabled)**.
 | `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
 

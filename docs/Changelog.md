@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.10.0 (2025-11-10)
+  * New feature: UniFi Access Gate Hub support. Thank you to @tdabasinskas for the plumbing tidbits - I appreciate your contribution to the community!
+  * New feature: UniFi Access readers are now supported. Readers, and hubs with reader functionality, now expose access-method switches that let you selectively enable or disable individual methods. Depending on device capabilities, HBUA can now toggle face, hand-wave, mobile, NFC, PIN, or QR access. Credit to @master-nevi for the suggestion. Thank you for your contributions to the community!
+  * New feature: all dry contact sensors that are available to Hub, Hub Mini, and Ultra devices. The dry contacts that are available are: DPS, REL, REN, REX. They will appear as contact sensors in HomeKit and are enabled by default. As always, you can adjust their availability in HomeKit through the HBUA webUI. For the Ultra, given it has a configurable dry contact, HBUA will autodetect which one is enabled and make that available dynamically.
+  * Behavior change: by default device delay interval is on.
+  * Housekeeping.
+
 ## 1.9.2 (2025-05-27)
   * Housekeeping.
 

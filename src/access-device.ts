@@ -5,7 +5,7 @@
 import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION} from "./settings.js";
 import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { type HomebridgePluginLogging, type Nullable, validateName } from "homebridge-plugin-utils";
+import { type HomebridgePluginLogging, type Nullable, sanitizeName } from "homebridge-plugin-utils";
 import type { AccessController } from "./access-controller.js";
 import type { AccessPlatform } from "./access-platform.js";
 import { AccessReservedNames } from "./access-types.js";
@@ -14,15 +14,29 @@ import util from "node:util";
 // Device-specific options and settings.
 export interface AccessHints {
 
-  hasDps: boolean,
-  ledStatus: boolean,
-  logDoorbell: boolean,
-  logDps: boolean,
-  logLock: boolean,
-  logMotion: boolean,
-  motionDuration: number,
-  occupancyDuration: number,
-  syncName: boolean
+  enabled: boolean;
+  hasMethodFace: boolean;
+  hasMethodHand: boolean;
+  hasMethodMobile: boolean;
+  hasMethodNfc: boolean;
+  hasMethodPin: boolean;
+  hasMethodQr: boolean;
+  hasMethodTwoStep: boolean;
+  hasWiringDps: boolean;
+  hasWiringRel: boolean;
+  hasWiringRen: boolean;
+  hasWiringRex: boolean;
+  ledStatus: boolean;
+  logDoorbell: boolean;
+  logDps: boolean;
+  logLock: boolean;
+  logMotion: boolean;
+  logRel: boolean;
+  logRen: boolean;
+  logRex: boolean;
+  motionDuration: number;
+  occupancyDuration: number;
+  syncName: boolean;
 }
 
 export abstract class AccessBase {
@@ -57,12 +71,6 @@ export abstract class AccessBase {
   // Configure the device information for HomeKit.
   protected setInfo(accessory: PlatformAccessory, device: AccessDeviceConfig): boolean {
 
-    // If we don't have a device, we're done.
-    if(!device) {
-
-      return false;
-    }
-
     // Update the manufacturer information for this device.
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "Ubiquiti Inc.");
 
@@ -75,18 +83,18 @@ export abstract class AccessBase {
     }
 
     // Update the serial number for this device.
-    if(device.mac?.length) {
+    if(device.mac.length) {
 
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber,
         device.mac.replace(/:/g, "").toUpperCase());
     }
 
     // Update the firmware revision for this device.
-    if(device.firmware?.length) {
+    if(device.firmware.length) {
 
       // Capture the version of the device firmware, ensuring we get major, minor, and patch levels if they exist.
       const versionRegex = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(.+))?$/;
-      const match = versionRegex.exec(device.firmware);
+      const match: Nullable<(string | undefined)[]> = versionRegex.exec(device.firmware);
 
       // Update our firmware revision.
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision,
@@ -119,16 +127,14 @@ export abstract class AccessDevice extends AccessBase {
     this.hints = {} as AccessHints;
     this.listeners = {};
 
-    // Set the accessory, if we have it. Otherwise, we expect configureDevice to assign it.
-    if(accessory) {
-
-      this.accessory = accessory;
-    }
+    // Set the accessory.
+    this.accessory = accessory;
   }
 
   // Configure device-specific settings.
   protected configureHints(): boolean {
 
+    this.hints.enabled = this.hasFeature("Device");
     this.hints.logMotion = this.hasFeature("Log.Motion");
     this.hints.motionDuration = this.getFeatureNumber("Motion.Duration") ?? ACCESS_MOTION_DURATION;
     this.hints.occupancyDuration = this.getFeatureNumber("Motion.OccupancySensor.Duration") ?? ACCESS_OCCUPANCY_DURATION;
@@ -169,7 +175,7 @@ export abstract class AccessDevice extends AccessBase {
   public configureInfo(): boolean {
 
     // Sync the Access name with HomeKit, if configured.
-    if(this.hints.syncName) {
+    if(this.hints.syncName && this.uda.alias) {
 
       this.accessoryName = this.uda.alias;
     }
@@ -214,13 +220,6 @@ export abstract class AccessDevice extends AccessBase {
 
       // We don't have it, add the motion sensor to the device.
       motionService = new this.hap.Service.MotionSensor(this.accessoryName);
-
-      if(!motionService) {
-
-        this.log.error("Unable to add motion sensor.");
-
-        return false;
-      }
 
       this.accessory.addService(motionService);
       isInitialized = false;
@@ -284,24 +283,17 @@ export abstract class AccessDevice extends AccessBase {
 
       switchService = new this.hap.Service.Switch(switchName, AccessReservedNames.SWITCH_MOTION_SENSOR);
 
-      if(!switchService) {
-
-        this.log.error("Unable to add motion sensor switch.");
-
-        return false;
-      }
-
       switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
       this.accessory.addService(switchService);
     }
 
     // Activate or deactivate motion detection.
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    switchService.getCharacteristic(this.hap.Characteristic.On).onGet(() => {
 
       return this.accessory.context.detectMotion === true;
     });
 
-    switchService.getCharacteristic(this.hap.Characteristic.On)?.onSet((value: CharacteristicValue) => {
+    switchService.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
       if(this.accessory.context.detectMotion !== value) {
 
@@ -347,13 +339,6 @@ export abstract class AccessDevice extends AccessBase {
 
       triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_MOTION_TRIGGER);
 
-      if(!triggerService) {
-
-        this.log.error("Unable to add motion sensor trigger.");
-
-        return false;
-      }
-
       triggerService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
       this.accessory.addService(triggerService);
     }
@@ -362,22 +347,19 @@ export abstract class AccessDevice extends AccessBase {
     const switchService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_SENSOR);
 
     // Activate or deactivate motion detection.
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onGet(() => {
+    triggerService.getCharacteristic(this.hap.Characteristic.On).onGet(() => {
 
       return motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value === true;
     });
 
-    triggerService.getCharacteristic(this.hap.Characteristic.On)?.onSet((isOn: CharacteristicValue) => {
+    triggerService.getCharacteristic(this.hap.Characteristic.On).onSet((isOn: CharacteristicValue) => {
 
       if(isOn) {
 
         // Check to see if motion events are disabled.
         if(switchService && !switchService.getCharacteristic(this.hap.Characteristic.On).value) {
 
-          setTimeout(() => {
-
-            triggerService?.updateCharacteristic(this.hap.Characteristic.On, false);
-          }, 50);
+          setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, false), 50);
 
         } else {
 
@@ -394,10 +376,7 @@ export abstract class AccessDevice extends AccessBase {
       // If the motion sensor is still on, we should be as well.
       if(motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value) {
 
-        setTimeout(() => {
-
-          triggerService?.updateCharacteristic(this.hap.Characteristic.On, true);
-        }, 50);
+        setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, true), 50);
       }
     });
 
@@ -419,7 +398,7 @@ export abstract class AccessDevice extends AccessBase {
       const value = message.toString();
 
       // When we get the right message, we trigger the motion event.
-      if(value?.toLowerCase() !== "true") {
+      if(value.toLowerCase() !== "true") {
 
         return;
       }
@@ -455,13 +434,6 @@ export abstract class AccessDevice extends AccessBase {
 
       // We don't have it, add the occupancy sensor to the device.
       occupancyService = new this.hap.Service.OccupancySensor(this.accessoryName);
-
-      if(!occupancyService) {
-
-        this.log.error("Unable to add occupancy sensor.");
-
-        return false;
-      }
 
       this.accessory.addService(occupancyService);
     }
@@ -506,7 +478,7 @@ export abstract class AccessDevice extends AccessBase {
   // Utility for checking feature options on a device.
   public hasFeature(option: string): boolean {
 
-    return this.controller.hasFeature(option, this.id);
+    return this.controller.hasFeature(option, this.uda);
   }
 
   // Utility function for reserved identifiers for switches.
@@ -518,7 +490,7 @@ export abstract class AccessDevice extends AccessBase {
   // Utility function to determine whether or not a device is currently online.
   public get isOnline(): boolean {
 
-    return (["is_adopted", "is_connected", "is_managed", "is_online"] as const).every(key => this.uda[key]);
+    return ([ "is_adopted", "is_connected", "is_managed", "is_online" ] as const).every(key => this.uda[key]);
   }
 
   // Return a unique identifier for an Access device.
@@ -536,14 +508,14 @@ export abstract class AccessDevice extends AccessBase {
   // Utility function to return the current accessory name of this device.
   public get accessoryName(): string {
 
-    return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string) ??
-      (this.uda?.alias ?? "Unknown");
+    return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined) ??
+      (this.uda.alias ?? "Unknown");
   }
 
   // Utility function to set the current accessory name of this device.
   public set accessoryName(name: string) {
 
-    const cleanedName = validateName(name);
+    const cleanedName = sanitizeName(name);
 
     // Set all the internally managed names within Homebridge to the new accessory name.
     this.accessory.displayName = cleanedName;
