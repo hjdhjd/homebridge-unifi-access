@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.10.1 (2025-11-24)
+  * Housekeeping.
+
 ## 1.10.0 (2025-11-10)
   * New feature: UniFi Access Gate Hub support. Thank you to @tdabasinskas for the plumbing tidbits - I appreciate your contribution to the community!
   * New feature: UniFi Access readers are now supported. Readers, and hubs with reader functionality, now expose access-method switches that let you selectively enable or disable individual methods. Depending on device capabilities, HBUA can now toggle face, hand-wave, mobile, NFC, PIN, or QR access. Credit to @master-nevi for the suggestion. Thank you for your contributions to the community!
