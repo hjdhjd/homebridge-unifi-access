@@ -49,7 +49,7 @@ const sensorWiring: Record<SensorInput, { proxyMode?: "dps" | "rex"; wiring?: Re
     wiring: {
 
       "UA-Hub-Door-Mini": [ "wiring_state_d1-dps-neg", "wiring_state_d1-dps-pos" ],
-      UAH: [ "wiring_state_dps-neg",    "wiring_state_dps-pos"    ],
+      UAH: [ "wiring_state_dps-neg", "wiring_state_dps-pos" ],
       UGT: [ "wiring_state_gate-dps-neg", "wiring_state_gate-dps-pos" ]
     }
   },
@@ -74,7 +74,7 @@ const sensorWiring: Record<SensorInput, { proxyMode?: "dps" | "rex"; wiring?: Re
     wiring: {
 
       "UA-Hub-Door-Mini": [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos" ],
-      UAH: [ "wiring_state_rex-neg",       "wiring_state_rex-pos"       ]
+      UAH: [ "wiring_state_rex-neg", "wiring_state_rex-pos" ]
     }
   }
 };
@@ -92,7 +92,7 @@ export type AccessHubWiredProps = {
 };
 
 // Merge the declarations into the definition of the class, so TypeScript knows that these properties will exist.
-export interface AccessHub extends AccessHubHKProps, AccessHubWiredProps {}
+export interface AccessHub extends AccessHubHKProps, AccessHubWiredProps { }
 
 // Utility to assist us in constructing typing for the properties we will be using.
 type KeyOf<T, Prefix extends string, Suffix extends string = ""> = Extract<keyof T, `${Prefix}${SensorInput}${Suffix}`>;
@@ -107,8 +107,10 @@ type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 export class AccessHub extends AccessDevice {
 
   private _hkLockState: CharacteristicValue;
+  private _hkSideDoorLockState: CharacteristicValue;
   private doorbellRingRequestId: string | null;
   private lockDelayInterval: number | undefined;
+  private sideDoorLockDelayInterval: number | undefined;
   public uda: AccessDeviceConfig;
 
   // Create an instance.
@@ -118,13 +120,20 @@ export class AccessHub extends AccessDevice {
 
     this.uda = device;
     this._hkLockState = this.hubLockState;
+    this._hkSideDoorLockState = this.hubSideDoorLockState;
     this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
+    this.sideDoorLockDelayInterval = this.getFeatureNumber("Hub.SideDoor.LockDelayInterval") ?? undefined;
     this.doorbellRingRequestId = null;
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
     if((this.lockDelayInterval !== undefined) && (this.lockDelayInterval < 0)) {
 
       this.lockDelayInterval = undefined;
+    }
+
+    if((this.sideDoorLockDelayInterval !== undefined) && (this.sideDoorLockDelayInterval < 0)) {
+
+      this.sideDoorLockDelayInterval = undefined;
     }
 
     this.configureHints();
@@ -137,6 +146,7 @@ export class AccessHub extends AccessDevice {
     // Configure our parent's hints.
     super.configureHints();
 
+    this.hints.hasSideDoor = (this.uda.device_type === "UGT") && this.hasFeature("Hub.SideDoor");
     this.hints.hasWiringDps = [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.DPS");
     this.hints.hasWiringRel = ["UA Hub"].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.REL");
     this.hints.hasWiringRen = ["UA Hub"].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.REN");
@@ -147,6 +157,7 @@ export class AccessHub extends AccessDevice {
     this.hints.logRel = this.hasFeature("Log.REL");
     this.hints.logRen = this.hasFeature("Log.REN");
     this.hints.logRex = this.hasFeature("Log.REX");
+    this.hints.logSideDoorLock = this.hasFeature("Log.SideDoorLock");
 
     // The Ultra has a single terminal input that's selectable between DPS and REX modes. We detect which mode it's operating in, and adjust accordingly. We've
     // over-engineered this a bit for future-proofing.
@@ -162,6 +173,7 @@ export class AccessHub extends AccessDevice {
   private configureDevice(): boolean {
 
     this._hkLockState = this.hubLockState;
+    this._hkSideDoorLockState = this.hubSideDoorLockState;
 
     // Clean out the context object in case it's been polluted somehow.
     this.accessory.context = {};
@@ -177,6 +189,18 @@ export class AccessHub extends AccessDevice {
         this.lockDelayInterval === 0 ? "indefinitely" : "for " + this.lockDelayInterval.toString() + " minutes");
     }
 
+    if(this.hints.hasSideDoor) {
+
+      if(this.sideDoorLockDelayInterval === undefined) {
+
+        this.log.info("The side door lock relay will lock five seconds after unlocking in HomeKit.");
+      } else {
+
+        this.log.info("The side door lock relay will remain unlocked %s after unlocking in HomeKit.",
+          this.sideDoorLockDelayInterval === 0 ? "indefinitely" : "for " + this.sideDoorLockDelayInterval.toString() + " minutes");
+      }
+    }
+
     // Configure accessory information.
     this.configureInfo();
 
@@ -186,6 +210,10 @@ export class AccessHub extends AccessDevice {
     // Configure the lock, if we're a hub device.
     this.configureLock();
     this.configureLockTrigger();
+
+    // Configure the side door lock, if we're a UA Gate device.
+    this.configureSideDoorLock();
+    this.configureSideDoorLockTrigger();
 
     // Configure the doorbell, if we have one.
     this.configureDoorbell();
@@ -471,6 +499,91 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
+  // Configure the side door lock for HomeKit (UA Gate only).
+  private configureSideDoorLock(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hints.hasSideDoor, AccessReservedNames.LOCK_SIDE_DOOR)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_SIDE_DOOR,
+      () => this.log.info("Enabling the side door lock."));
+
+    if(!service) {
+
+      this.log.error("Unable to add the side door lock.");
+
+      return false;
+    }
+
+    // Return the lock state.
+    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(() => this.hkSideDoorLockState);
+
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+
+      if(!(await this.hubSideDoorLockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
+
+        // Revert our target state.
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value), 50);
+      }
+
+      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkSideDoorLockState);
+    });
+
+    // Initialize the lock.
+    this._hkSideDoorLockState = -1;
+    service.displayName = this.accessoryName + " Side Door";
+    service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName + " Side Door");
+    this.hkSideDoorLockState = this.hubSideDoorLockState;
+
+    return true;
+  }
+
+  // Configure a switch to automate side door lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service.
+  private configureSideDoorLockTrigger(): boolean {
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger"),
+      AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Side Door Lock Trigger",
+      AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER, () => this.log.info("Enabling the side door lock automation trigger."));
+
+    if(!service) {
+
+      this.log.error("Unable to add the side door lock automation trigger.");
+
+      return false;
+    }
+
+    // Trigger the lock state.
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+
+    // The state isn't really user-triggerable. We have no way, currently, to trigger a lock or unlock event on the hub.
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+
+      // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
+      if(!(await this.hubSideDoorLockCommand(!value))) {
+
+        // Revert our state.
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+      }
+    });
+
+    // Initialize the switch.
+    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Side Door Lock Trigger");
+    service.updateCharacteristic(this.hap.Characteristic.On, false);
+
+    return true;
+  }
+
   // Configure MQTT capabilities of this light.
   private configureMqtt(): boolean {
 
@@ -556,6 +669,52 @@ export class AccessHub extends AccessDevice {
       }
     });
 
+    // MQTT side door lock status (UA Gate only).
+    if(this.hints.hasSideDoor) {
+
+      this.controller.mqtt?.subscribeGet(this.id, "sidedoorlock", "Side Door Lock", () => {
+
+        switch(this.hkSideDoorLockState) {
+
+          case this.hap.Characteristic.LockCurrentState.SECURED:
+
+            return "true";
+
+          case this.hap.Characteristic.LockCurrentState.UNSECURED:
+
+            return "false";
+
+          default:
+
+            return "unknown";
+        }
+      });
+
+      this.controller.mqtt?.subscribeSet(this.id, "sidedoorlock", "Side Door Lock", (value: string) => {
+
+        switch(value) {
+
+          case "true":
+
+            void this.hubSideDoorLockCommand(true);
+
+            break;
+
+          case "false":
+
+            void this.hubSideDoorLockCommand(false);
+
+            break;
+
+          default:
+
+            this.log.error("MQTT: Unknown side door lock set message received: %s.", value);
+
+            break;
+        }
+      });
+    }
+
     return true;
   }
 
@@ -614,6 +773,57 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
+  // Utility function to execute side door lock and unlock actions on a UA Gate hub.
+  private async hubSideDoorLockCommand(isLocking: boolean): Promise<boolean> {
+
+    const action = isLocking ? "lock" : "unlock";
+
+    // Only allow relocking if we are able to do so.
+    if((this.sideDoorLockDelayInterval === undefined) && isLocking) {
+
+      this.log.error("Unable to manually relock the side door when the lock relay is configured to the default settings.");
+
+      return false;
+    }
+
+    // If we're not online, we're done.
+    if(!this.isOnline) {
+
+      this.log.error("Unable to %s the side door. Device is offline.", action);
+
+      return false;
+    }
+
+    // Get the side door location from the extensions (port_setting with target_name = "oper2").
+    const sideDoorExtension = this.uda.extensions?.find(ext => ext.extension_name === "port_setting" && ext.target_name === "oper2");
+    const sideDoorLocationId = sideDoorExtension?.target_value;
+
+    if(!sideDoorLocationId) {
+
+      this.log.error("Unable to %s the side door. Side door configuration not found.", action);
+
+      return false;
+    }
+
+    // Execute the action using the side door location.
+    const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + sideDoorLocationId + "/unlock";
+
+    const response = await this.controller.udaApi.retrieve(endpoint, {
+
+      body: JSON.stringify({}),
+      method: "PUT"
+    });
+
+    if(!this.controller.udaApi.responseOk(response?.statusCode)) {
+
+      this.log.error("Unable to %s the side door.", action);
+
+      return false;
+    }
+
+    return true;
+  }
+
   // Return the current HomeKit lock state that we are tracking for this hub.
   private get hkLockState(): CharacteristicValue {
 
@@ -646,6 +856,40 @@ export class AccessHub extends AccessDevice {
     lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
     this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On,
       this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+  }
+
+  // Return the current HomeKit side door lock state that we are tracking for this hub.
+  private get hkSideDoorLockState(): CharacteristicValue {
+
+    return this._hkSideDoorLockState;
+  }
+
+  // Set the current HomeKit side door lock state for this hub.
+  private set hkSideDoorLockState(value: CharacteristicValue) {
+
+    // If nothing is changed, we're done.
+    if(this.hkSideDoorLockState === value) {
+
+      return;
+    }
+
+    // Update the lock state.
+    this._hkSideDoorLockState = value;
+
+    // Retrieve the side door lock service.
+    const lockService = this.accessory.getServiceById(this.hap.Service.LockMechanism, AccessReservedNames.LOCK_SIDE_DOOR);
+
+    if(!lockService) {
+
+      return;
+    }
+
+    // Update the state in HomeKit.
+    lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.UNSECURED ?
+      this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.SECURED);
+    lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkSideDoorLockState);
+    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On,
+      this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
   }
 
   // Return the current state of the DPS on the hub.
@@ -714,6 +958,20 @@ export class AccessHub extends AccessDevice {
     }
 
     const lockRelay = this.uda.configs?.find(entry => entry.key === relayType);
+
+    return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
+  }
+
+  // Return the current state of the side door relay lock on the UA Gate hub.
+  private get hubSideDoorLockState(): CharacteristicValue {
+
+    // Side door lock is only available on UA Gate.
+    if(this.uda.device_type !== "UGT") {
+
+      return this.hap.Characteristic.LockCurrentState.SECURED;
+    }
+
+    const lockRelay = this.uda.configs?.find(entry => entry.key === "output_oper2_relay");
 
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
   }
@@ -818,7 +1076,7 @@ export class AccessHub extends AccessDevice {
     // UA-ULTRA proxies via button mode.
     if((this.uda.device_type === "UA-ULTRA") && sensorWiring[input].proxyMode) {
 
-      return this.uda.extensions?.[0]?.target_config?.some(e => e.config_key   === "rex_button_mode" && e.config_value === sensorWiring[input].proxyMode) ?? false;
+      return this.uda.extensions?.[0]?.target_config?.some(e => e.config_key === "rex_button_mode" && e.config_value === sensorWiring[input].proxyMode) ?? false;
     }
 
     // Find the wiring keys for this model.
@@ -892,6 +1150,19 @@ export class AccessHub extends AccessDevice {
           if(this.hints.logLock) {
 
             this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
+          }
+        }
+
+        // Process a side door lock update event if our state has changed (UA Gate only).
+        if(this.hints.hasSideDoor && (this.hubSideDoorLockState !== this.hkSideDoorLockState)) {
+
+          this.hkSideDoorLockState = this.hubSideDoorLockState;
+
+          this.controller.mqtt?.publish(this.id, "sidedoorlock", this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
+
+          if(this.hints.logSideDoorLock) {
+
+            this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
           }
         }
 
@@ -1028,7 +1299,7 @@ export class AccessHub extends AccessDevice {
     // We define the specific sensor input properties we need.
     for(const input of sensorInputs) {
 
-      let propName = "hk"  + input + "State";
+      let propName = "hk" + input + "State";
       const enumKey = "CONTACT_" + input.toUpperCase();
 
       Object.defineProperty(AccessHub.prototype, propName, {
@@ -1053,7 +1324,7 @@ export class AccessHub extends AccessDevice {
       Object.defineProperty(AccessHub.prototype, propName, {
 
         configurable: true,
-        enumerable:   true,
+        enumerable: true,
         get(this: AccessHub) {
 
           return this.isWired(input);
