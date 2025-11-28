@@ -79,20 +79,20 @@ export abstract class AccessBase {
     // Update the model information for this device.
     const deviceModel = device.display_model ?? device.model;
 
-    if (deviceModel.length) {
+    if(deviceModel.length) {
 
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, deviceModel);
     }
 
     // Update the serial number for this device.
-    if (device.mac.length) {
+    if(device.mac.length) {
 
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber,
         device.mac.replace(/:/g, "").toUpperCase());
     }
 
     // Update the firmware revision for this device.
-    if (device.firmware.length) {
+    if(device.firmware.length) {
 
       // Capture the version of the device firmware, ensuring we get major, minor, and patch levels if they exist.
       const versionRegex = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(.+))?$/;
@@ -143,29 +143,29 @@ export abstract class AccessDevice extends AccessBase {
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
     // Sanity check motion detection duration. Make sure it's never less than 2 seconds so we can actually alert the user.
-    if (this.hints.motionDuration < 2) {
+    if(this.hints.motionDuration < 2) {
 
       this.hints.motionDuration = 2;
     }
 
     // Sanity check occupancy detection duration. Make sure it's never less than 60 seconds so we can actually alert the user.
-    if (this.hints.occupancyDuration < 60) {
+    if(this.hints.occupancyDuration < 60) {
 
       this.hints.occupancyDuration = 60;
     }
 
     // Inform the user if we've opted for something other than the defaults.
-    if (this.hints.syncName) {
+    if(this.hints.syncName) {
 
       this.log.info("Syncing Access device name to HomeKit.");
     }
 
-    if (this.hints.motionDuration !== ACCESS_MOTION_DURATION) {
+    if(this.hints.motionDuration !== ACCESS_MOTION_DURATION) {
 
       this.log.info("Motion event duration set to %s seconds.", this.hints.motionDuration);
     }
 
-    if (this.hints.occupancyDuration !== ACCESS_OCCUPANCY_DURATION) {
+    if(this.hints.occupancyDuration !== ACCESS_OCCUPANCY_DURATION) {
 
       this.log.info("Occupancy event duration set to %s seconds.", this.hints.occupancyDuration);
     }
@@ -177,7 +177,7 @@ export abstract class AccessDevice extends AccessBase {
   public configureInfo(): boolean {
 
     // Sync the Access name with HomeKit, if configured.
-    if (this.hints.syncName && this.uda.alias) {
+    if(this.hints.syncName && this.uda.alias) {
 
       this.accessoryName = this.uda.alias;
     }
@@ -188,7 +188,7 @@ export abstract class AccessDevice extends AccessBase {
   // Cleanup our event handlers and any other activities as needed.
   public cleanup(): void {
 
-    for (const eventName of Object.keys(this.listeners)) {
+    for(const eventName of Object.keys(this.listeners)) {
 
       this.controller.events.removeListener(eventName, this.listeners[eventName]);
       delete this.listeners[eventName];
@@ -202,9 +202,9 @@ export abstract class AccessDevice extends AccessBase {
     let motionService = this.accessory.getService(this.hap.Service.MotionSensor);
 
     // Have we disabled the motion sensor?
-    if (!isEnabled) {
+    if(!isEnabled) {
 
-      if (motionService) {
+      if(motionService) {
 
         this.accessory.removeService(motionService);
         this.controller.mqtt?.unsubscribe(this.id, "motion/trigger");
@@ -218,7 +218,7 @@ export abstract class AccessDevice extends AccessBase {
     }
 
     // We don't have a motion sensor, let's add it to the device.
-    if (!motionService) {
+    if(!motionService) {
 
       // We don't have it, add the motion sensor to the device.
       motionService = new this.hap.Service.MotionSensor(this.accessoryName);
@@ -231,7 +231,7 @@ export abstract class AccessDevice extends AccessBase {
 
     // Have we previously initialized this sensor? We assume not by default, but this allows for scenarios where you may be dynamically reconfiguring a sensor at
     // runtime (e.g. UniFi sensors can be reconfigured for various sensor modes in realtime).
-    if (!isInitialized) {
+    if(!isInitialized) {
 
       // Initialize the state of the motion sensor.
       motionService.displayName = this.accessoryName;
@@ -262,9 +262,9 @@ export abstract class AccessDevice extends AccessBase {
     let switchService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_SENSOR);
 
     // Motion switches are disabled by default unless the user enables them.
-    if (!isEnabled || !this.hasFeature("Motion.Switch")) {
+    if(!isEnabled || !this.hasFeature("Motion.Switch")) {
 
-      if (switchService) {
+      if(switchService) {
 
         this.accessory.removeService(switchService);
       }
@@ -281,7 +281,7 @@ export abstract class AccessDevice extends AccessBase {
     const switchName = this.accessoryName + " Motion Events";
 
     // Add the switch to the device, if needed.
-    if (!switchService) {
+    if(!switchService) {
 
       switchService = new this.hap.Service.Switch(switchName, AccessReservedNames.SWITCH_MOTION_SENSOR);
 
@@ -297,7 +297,7 @@ export abstract class AccessDevice extends AccessBase {
 
     switchService.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
 
-      if (this.accessory.context.detectMotion !== value) {
+      if(this.accessory.context.detectMotion !== value) {
 
         this.log.info("Motion detection %s.", (value === true) ? "enabled" : "disabled");
       }
@@ -306,7 +306,7 @@ export abstract class AccessDevice extends AccessBase {
     });
 
     // Initialize the switch state.
-    if (!("detectMotion" in this.accessory.context)) {
+    if(!("detectMotion" in this.accessory.context)) {
 
       this.accessory.context.detectMotion = true;
     }
@@ -324,9 +324,9 @@ export abstract class AccessDevice extends AccessBase {
     let triggerService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_TRIGGER);
 
     // Motion triggers are disabled by default and primarily exist for automation purposes.
-    if (!isEnabled || !this.hasFeature("Motion.Trigger")) {
+    if(!isEnabled || !this.hasFeature("Motion.Trigger")) {
 
-      if (triggerService) {
+      if(triggerService) {
 
         this.accessory.removeService(triggerService);
       }
@@ -337,7 +337,7 @@ export abstract class AccessDevice extends AccessBase {
     const triggerName = this.accessoryName + " Motion Trigger";
 
     // Add the switch to the device, if needed.
-    if (!triggerService) {
+    if(!triggerService) {
 
       triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_MOTION_TRIGGER);
 
@@ -356,10 +356,10 @@ export abstract class AccessDevice extends AccessBase {
 
     triggerService.getCharacteristic(this.hap.Characteristic.On).onSet((isOn: CharacteristicValue) => {
 
-      if (isOn) {
+      if(isOn) {
 
         // Check to see if motion events are disabled.
-        if (switchService && !switchService.getCharacteristic(this.hap.Characteristic.On).value) {
+        if(switchService && !switchService.getCharacteristic(this.hap.Characteristic.On).value) {
 
           setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, false), 50);
 
@@ -376,7 +376,7 @@ export abstract class AccessDevice extends AccessBase {
       }
 
       // If the motion sensor is still on, we should be as well.
-      if (motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value) {
+      if(motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value) {
 
         setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, true), 50);
       }
@@ -400,7 +400,7 @@ export abstract class AccessDevice extends AccessBase {
       const value = message.toString();
 
       // When we get the right message, we trigger the motion event.
-      if (value.toLowerCase() !== "true") {
+      if(value.toLowerCase() !== "true") {
 
         return;
       }
@@ -420,9 +420,9 @@ export abstract class AccessDevice extends AccessBase {
     let occupancyService = this.accessory.getService(this.hap.Service.OccupancySensor);
 
     // Occupancy sensors are disabled by default and primarily exist for automation purposes.
-    if (!isEnabled || !this.hasFeature("Motion.OccupancySensor")) {
+    if(!isEnabled || !this.hasFeature("Motion.OccupancySensor")) {
 
-      if (occupancyService) {
+      if(occupancyService) {
 
         this.accessory.removeService(occupancyService);
         this.log.info("Disabling occupancy sensor.");
@@ -432,7 +432,7 @@ export abstract class AccessDevice extends AccessBase {
     }
 
     // We don't have an occupancy sensor, let's add it to the device.
-    if (!occupancyService) {
+    if(!occupancyService) {
 
       // We don't have it, add the occupancy sensor to the device.
       occupancyService = new this.hap.Service.OccupancySensor(this.accessoryName);
@@ -442,7 +442,7 @@ export abstract class AccessDevice extends AccessBase {
 
     // Have we previously initialized this sensor? We assume not by default, but this allows for scenarios where you may be dynamically reconfiguring a sensor at
     // runtime (e.g. UniFi sensors can be reconfigured for various sensor modes in realtime).
-    if (!isInitialized) {
+    if(!isInitialized) {
 
       // Initialize the state of the occupancy sensor.
       occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
@@ -492,7 +492,7 @@ export abstract class AccessDevice extends AccessBase {
   // Utility function to determine whether or not a device is currently online.
   public get isOnline(): boolean {
 
-    return (["is_adopted", "is_connected", "is_managed", "is_online"] as const).every(key => this.uda[key]);
+    return ([ "is_adopted", "is_connected", "is_managed", "is_online" ] as const).every(key => this.uda[key]);
   }
 
   // Return a unique identifier for an Access device.
