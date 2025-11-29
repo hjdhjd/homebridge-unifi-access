@@ -81,7 +81,7 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: false, description: "Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs.", name: "Lock.Trigger" },
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", hasCapability: ["door_bell"], name: "Doorbell" },
     { default: false, description: "Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell.", hasCapability: ["door_bell"], name: "Doorbell.Trigger" },
-    { default: true, description: "Add a contact sensor accessory for the door position sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "DPS" },
+    { default: true, description: "Add a contact sensor accessory for the door position sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ], name: "DPS" },
     { default: true, description: "Add a contact sensor accessory for the remote release.", modelKey: ["UA Hub"], name: "REL" },
     { default: true, description: "Add a contact sensor accessory for the request to enter sensor.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Add a contact sensor accessory for the request to exit sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },
@@ -95,7 +95,7 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
   "Log": [
 
     { default: true, description: "Log doorbell ring events in Homebridge.", hasCapability: ["door_bell"], name: "Doorbell" },
-    { default: true, description: "Log door position sensor events in Homebridge.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "DPS" },
+    { default: true, description: "Log door position sensor events in Homebridge.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ], name: "DPS" },
     { default: true, description: "Log door remote release events in Homebridge.", modelKey: ["UA Hub"], name: "REL" },
     { default: true, description: "Log door request to enter events in Homebridge.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Log door request to exit events in Homebridge.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },

@@ -5,7 +5,7 @@
 import type { API, HAP, Service } from "homebridge";
 import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
 import { type HomebridgePluginLogging, sanitizeName } from "homebridge-plugin-utils";
-import type { AccessController} from "./access-controller.js";
+import type { AccessController } from "./access-controller.js";
 import type { AccessDevice } from "./access-device.js";
 import type { AccessPlatform } from "./access-platform.js";
 import { AccessReservedNames } from "./access-types.js";
@@ -23,7 +23,7 @@ export class AccessEvents extends EventEmitter {
   private platform: AccessPlatform;
   private udaApi: AccessApi;
   private udaDeviceState: { [index: string]: AccessDeviceConfig };
-  private udaUpdatesHandler:  ((packet: AccessEventPacket) => void) | null;
+  private udaUpdatesHandler: ((packet: AccessEventPacket) => void) | null;
   private unsupportedDevices: { [index: string]: boolean };
 
   // Initialize an instance of our Access events handler.
@@ -120,6 +120,14 @@ export class AccessEvents extends EventEmitter {
 
     // Listen for any messages coming in from our listener. We route events to the appropriate handlers based on the type of event that comes across.
     this.udaApi.on("message", this.eventsHandler = (packet: AccessEventPacket): void => {
+
+      // Debug: Log all events related to device updates or unlocks.
+      if(packet.event.includes("device") || packet.event.includes("unlock") || packet.event.includes("door")) {
+
+        this.log.debug("Event received: %s, object_id: %s, data keys: %s.",
+          packet.event, packet.event_object_id,
+          Object.keys(packet.data).slice(0, 10).join(", "));
+      }
 
       // Emit messages based on the event type.
       this.emit(packet.event, packet);
