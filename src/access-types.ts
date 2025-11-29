@@ -12,7 +12,9 @@ export enum AccessReservedNames {
   CONTACT_REN = "ContactSensor.REN",
   CONTACT_REX = "ContactSensor.REX",
 
-  // Manage our lock types.
+  // Manage our door/lock types.
+  DOOR_MAIN = "Door.Main",
+  DOOR_SIDE = "Door.Side",
   LOCK_SIDE_DOOR = "Lock.SideDoor",
 
   // Manage our switch types.

@@ -104,13 +104,18 @@ type HkStateKey = KeyOf<AccessHub, "hk", "State">;
 type LogHintKey = KeyOf<AccessHints, "log">;
 type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 
+// Valid door service types.
+type DoorServiceType = "Lock" | "GarageDoorOpener" | "Door";
+
 export class AccessHub extends AccessDevice {
 
   private _hkLockState: CharacteristicValue;
   private _hkSideDoorLockState: CharacteristicValue;
   private doorbellRingRequestId: string | null;
+  private doorServiceType: DoorServiceType;
   private lockDelayInterval: number | undefined;
   private sideDoorLockDelayInterval: number | undefined;
+  private sideDoorServiceType: DoorServiceType;
   public uda: AccessDeviceConfig;
 
   // Create an instance.
@@ -121,8 +126,10 @@ export class AccessHub extends AccessDevice {
     this.uda = device;
     this._hkLockState = this.hubLockState;
     this._hkSideDoorLockState = this.hubSideDoorLockState;
+    this.doorServiceType = this.getDoorServiceType("Hub.DoorServiceType");
     this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
     this.sideDoorLockDelayInterval = this.getFeatureNumber("Hub.SideDoor.LockDelayInterval") ?? undefined;
+    this.sideDoorServiceType = this.getDoorServiceType("Hub.SideDoor.ServiceType");
     this.doorbellRingRequestId = null;
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
@@ -167,6 +174,28 @@ export class AccessHub extends AccessDevice {
     }
 
     return true;
+  }
+
+  // Get the door service type from configuration.
+  private getDoorServiceType(option: string): DoorServiceType {
+
+    const value = this.getFeatureValue(option)?.toLowerCase();
+
+    switch(value) {
+
+      case "garagedooropener":
+      case "garage":
+
+        return "GarageDoorOpener";
+
+      case "door":
+
+        return "Door";
+
+      default:
+
+        return "Lock";
+    }
   }
 
   // Initialize and configure the light accessory for HomeKit.
@@ -376,40 +405,58 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure the lock for HomeKit.
+  // Configure the main door for HomeKit - supports Lock, GarageDoorOpener, and Door service types.
   private configureLock(): boolean {
 
+    // First, remove any previous service types that are no longer selected.
+    const serviceTypes = [ this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener, this.hap.Service.Door ];
+    const selectedService = this.doorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener :
+      this.doorServiceType === "Door" ? this.hap.Service.Door : this.hap.Service.LockMechanism;
+
+    for(const serviceType of serviceTypes) {
+
+      if(serviceType !== selectedService) {
+
+        const oldService = this.accessory.getServiceById(serviceType, AccessReservedNames.DOOR_MAIN) ??
+          this.accessory.getService(serviceType);
+
+        if(oldService && !oldService.subtype) {
+
+          this.accessory.removeService(oldService);
+        }
+      }
+    }
+
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hasCapability("is_hub"))) {
+    if(!validService(this.accessory, selectedService, this.hasCapability("is_hub"), AccessReservedNames.DOOR_MAIN)) {
 
       return false;
     }
 
     // Acquire the service.
-    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName);
+    const service = acquireService(this.accessory, selectedService, this.accessoryName, AccessReservedNames.DOOR_MAIN,
+      () => this.log.info("Configuring main door as %s service.", this.doorServiceType));
 
     if(!service) {
 
-      this.log.error("Unable to add the lock.");
+      this.log.error("Unable to add the door.");
 
       return false;
     }
 
-    // Return the lock state.
-    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(() => this.hkLockState);
+    // Configure based on service type.
+    if(this.doorServiceType === "GarageDoorOpener") {
 
-    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+      this.configureGarageDoorService(service, false);
+    } else if(this.doorServiceType === "Door") {
 
-      if(!(await this.hubLockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
+      this.configureDoorService(service, false);
+    } else {
 
-        // Revert our target state.
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value), 50);
-      }
+      this.configureLockService(service, false);
+    }
 
-      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
-    });
-
-    // Initialize the lock.
+    // Initialize the state.
     this._hkLockState = -1;
     service.displayName = this.accessoryName;
     service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
@@ -418,6 +465,116 @@ export class AccessHub extends AccessDevice {
     service.setPrimaryService(true);
 
     return true;
+  }
+
+  // Configure a LockMechanism service.
+  private configureLockService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
+
+    if(!service) {
+
+      return;
+    }
+
+    const lockStateGetter = isSideDoor ? (): CharacteristicValue => this.hkSideDoorLockState : (): CharacteristicValue => this.hkLockState;
+    const lockCommand = isSideDoor ?
+      async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
+      async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
+
+    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(lockStateGetter);
+
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+
+      if(!(await lockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
+
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value), 50);
+      }
+
+      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, lockStateGetter());
+    });
+  }
+
+  // Configure a GarageDoorOpener service.
+  private configureGarageDoorService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
+
+    if(!service) {
+
+      return;
+    }
+
+    const lockStateGetter = isSideDoor ? (): CharacteristicValue => this.hkSideDoorLockState : (): CharacteristicValue => this.hkLockState;
+    const lockCommand = isSideDoor ?
+      async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
+      async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
+
+    // Map lock state to door state: SECURED = CLOSED, UNSECURED = OPEN
+    const getDoorState = (): CharacteristicValue => {
+
+      const lockState = lockStateGetter();
+
+      return lockState === this.hap.Characteristic.LockCurrentState.SECURED ?
+        this.hap.Characteristic.CurrentDoorState.CLOSED : this.hap.Characteristic.CurrentDoorState.OPEN;
+    };
+
+    service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(getDoorState);
+
+    service.getCharacteristic(this.hap.Characteristic.TargetDoorState).onSet(async (value: CharacteristicValue) => {
+
+      const shouldLock = value === this.hap.Characteristic.TargetDoorState.CLOSED;
+
+      if(!(await lockCommand(shouldLock))) {
+
+        // Revert target state on failure.
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.TargetDoorState,
+          value === this.hap.Characteristic.TargetDoorState.CLOSED ?
+            this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED), 50);
+      }
+
+      service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, getDoorState());
+    });
+
+    // ObstructionDetected is required - we always report no obstruction.
+    service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => false);
+  }
+
+  // Configure a Door service.
+  private configureDoorService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
+
+    if(!service) {
+
+      return;
+    }
+
+    const lockStateGetter = isSideDoor ? (): CharacteristicValue => this.hkSideDoorLockState : (): CharacteristicValue => this.hkLockState;
+    const lockCommand = isSideDoor ?
+      async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
+      async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
+
+    // Map lock state to position: SECURED = 0 (closed), UNSECURED = 100 (open)
+    const getPosition = (): CharacteristicValue => {
+
+      const lockState = lockStateGetter();
+
+      return lockState === this.hap.Characteristic.LockCurrentState.SECURED ? 0 : 100;
+    };
+
+    service.getCharacteristic(this.hap.Characteristic.CurrentPosition).onGet(getPosition);
+
+    service.getCharacteristic(this.hap.Characteristic.TargetPosition).onSet(async (value: CharacteristicValue) => {
+
+      // Treat anything < 50 as closed, >= 50 as open.
+      const shouldLock = (value as number) < 50;
+
+      if(!(await lockCommand(shouldLock))) {
+
+        // Revert target position on failure.
+        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.TargetPosition, getPosition()), 50);
+      }
+
+      service.updateCharacteristic(this.hap.Characteristic.CurrentPosition, getPosition());
+    });
+
+    // PositionState is required - we always report stopped since it's an instant action.
+    service.getCharacteristic(this.hap.Characteristic.PositionState).onGet(() => this.hap.Characteristic.PositionState.STOPPED);
   }
 
   // Configure a switch to manually trigger a doorbell ring event for HomeKit.
@@ -499,39 +656,55 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure the side door lock for HomeKit (UA Gate only).
+  // Configure the side door for HomeKit (UA Gate only) - supports Lock, GarageDoorOpener, and Door service types.
   private configureSideDoorLock(): boolean {
 
+    // First, remove any previous service types that are no longer selected.
+    const serviceTypes = [ this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener, this.hap.Service.Door ];
+    const selectedService = this.sideDoorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener :
+      this.sideDoorServiceType === "Door" ? this.hap.Service.Door : this.hap.Service.LockMechanism;
+
+    for(const serviceType of serviceTypes) {
+
+      if(serviceType !== selectedService) {
+
+        const oldService = this.accessory.getServiceById(serviceType, AccessReservedNames.LOCK_SIDE_DOOR);
+
+        if(oldService) {
+
+          this.accessory.removeService(oldService);
+        }
+      }
+    }
+
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hints.hasSideDoor, AccessReservedNames.LOCK_SIDE_DOOR)) {
+    if(!validService(this.accessory, selectedService, this.hints.hasSideDoor, AccessReservedNames.LOCK_SIDE_DOOR)) {
 
       return false;
     }
 
     // Acquire the service.
-    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_SIDE_DOOR,
-      () => this.log.info("Enabling the side door lock."));
+    const service = acquireService(this.accessory, selectedService, this.accessoryName + " Side Door", AccessReservedNames.LOCK_SIDE_DOOR,
+      () => this.log.info("Configuring side door as %s service.", this.sideDoorServiceType));
 
     if(!service) {
 
-      this.log.error("Unable to add the side door lock.");
+      this.log.error("Unable to add the side door.");
 
       return false;
     }
 
-    // Return the lock state.
-    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(() => this.hkSideDoorLockState);
+    // Configure based on service type.
+    if(this.sideDoorServiceType === "GarageDoorOpener") {
 
-    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+      this.configureGarageDoorService(service, true);
+    } else if(this.sideDoorServiceType === "Door") {
 
-      if(!(await this.hubSideDoorLockCommand(value === this.hap.Characteristic.LockTargetState.SECURED))) {
+      this.configureDoorService(service, true);
+    } else {
 
-        // Revert our target state.
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState, !value), 50);
-      }
-
-      service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkSideDoorLockState);
-    });
+      this.configureLockService(service, true);
+    }
 
     // Initialize the lock.
     this._hkSideDoorLockState = -1;
@@ -936,20 +1109,58 @@ export class AccessHub extends AccessDevice {
     // Update the lock state.
     this._hkLockState = value;
 
-    // Retrieve the lock service.
-    const lockService = this.accessory.getService(this.hap.Service.LockMechanism);
+    // Update based on door service type.
+    this.updateDoorServiceState(false);
+  }
 
-    if(!lockService) {
+  // Update door service state based on configured service type.
+  private updateDoorServiceState(isSideDoor: boolean): void {
 
-      return;
+    const serviceType = isSideDoor ? this.sideDoorServiceType : this.doorServiceType;
+    const subtype = isSideDoor ? AccessReservedNames.LOCK_SIDE_DOOR : AccessReservedNames.DOOR_MAIN;
+    const lockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
+    const triggerSubtype = isSideDoor ? AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER : AccessReservedNames.SWITCH_LOCK_TRIGGER;
+
+    if(serviceType === "GarageDoorOpener") {
+
+      const service = this.accessory.getServiceById(this.hap.Service.GarageDoorOpener, subtype);
+
+      if(service) {
+
+        const doorState = lockState === this.hap.Characteristic.LockCurrentState.SECURED ?
+          this.hap.Characteristic.CurrentDoorState.CLOSED : this.hap.Characteristic.CurrentDoorState.OPEN;
+        const targetState = lockState === this.hap.Characteristic.LockCurrentState.SECURED ?
+          this.hap.Characteristic.TargetDoorState.CLOSED : this.hap.Characteristic.TargetDoorState.OPEN;
+
+        service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, targetState);
+        service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, doorState);
+      }
+    } else if(serviceType === "Door") {
+
+      const service = this.accessory.getServiceById(this.hap.Service.Door, subtype);
+
+      if(service) {
+
+        const position = lockState === this.hap.Characteristic.LockCurrentState.SECURED ? 0 : 100;
+
+        service.updateCharacteristic(this.hap.Characteristic.TargetPosition, position);
+        service.updateCharacteristic(this.hap.Characteristic.CurrentPosition, position);
+      }
+    } else {
+
+      const service = this.accessory.getServiceById(this.hap.Service.LockMechanism, subtype);
+
+      if(service) {
+
+        service.updateCharacteristic(this.hap.Characteristic.LockTargetState, lockState === this.hap.Characteristic.LockCurrentState.UNSECURED ?
+          this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.SECURED);
+        service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, lockState);
+      }
     }
 
-    // Update the state in HomeKit.
-    lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.hkLockState === this.hap.Characteristic.LockCurrentState.UNSECURED ?
-      this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.SECURED);
-    lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkLockState);
-    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On,
-      this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+    // Update the lock trigger switch if enabled.
+    this.accessory.getServiceById(this.hap.Service.Switch, triggerSubtype)?.updateCharacteristic(this.hap.Characteristic.On,
+      lockState !== this.hap.Characteristic.LockCurrentState.SECURED);
   }
 
   // Return the current HomeKit side door lock state that we are tracking for this hub.
@@ -970,20 +1181,8 @@ export class AccessHub extends AccessDevice {
     // Update the lock state.
     this._hkSideDoorLockState = value;
 
-    // Retrieve the side door lock service.
-    const lockService = this.accessory.getServiceById(this.hap.Service.LockMechanism, AccessReservedNames.LOCK_SIDE_DOOR);
-
-    if(!lockService) {
-
-      return;
-    }
-
-    // Update the state in HomeKit.
-    lockService.updateCharacteristic(this.hap.Characteristic.LockTargetState, this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.UNSECURED ?
-      this.hap.Characteristic.LockTargetState.UNSECURED : this.hap.Characteristic.LockTargetState.SECURED);
-    lockService.updateCharacteristic(this.hap.Characteristic.LockCurrentState, this.hkSideDoorLockState);
-    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On,
-      this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+    // Update based on door service type.
+    this.updateDoorServiceState(true);
   }
 
   // Return the current state of the DPS on the hub.

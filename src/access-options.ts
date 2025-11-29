@@ -76,6 +76,7 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
   // Hub options.
   "Hub": [
 
+    { default: false, defaultValue: "Lock", description: "Set the HomeKit service type for the main door. Valid values are: Lock (default), GarageDoorOpener, or Door.", hasCapability: ["is_hub"], name: "DoorServiceType" },
     { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking.", name: "LockDelayInterval" },
     { default: false, description: "Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs.", name: "Lock.Trigger" },
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", hasCapability: ["door_bell"], name: "Doorbell" },
@@ -85,6 +86,7 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: true, description: "Add a contact sensor accessory for the request to enter sensor.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Add a contact sensor accessory for the request to exit sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },
     { default: true, description: "Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices.", modelKey: ["UA Gate"], name: "SideDoor" },
+    { default: false, defaultValue: "Lock", description: "Set the HomeKit service type for the side door. Valid values are: Lock (default), GarageDoorOpener, or Door.", modelKey: ["UA Gate"], name: "SideDoor.ServiceType" },
     { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the side door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the side door lock relay will lock five seconds after unlocking.", modelKey: ["UA Gate"], name: "SideDoor.LockDelayInterval" },
     { default: false, description: "Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks.", modelKey: ["UA Gate"], name: "SideDoor.Lock.Trigger" }
   ],
