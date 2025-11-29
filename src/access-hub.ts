@@ -804,7 +804,8 @@ export class AccessHub extends AccessDevice {
     this.log.debug("Side door lookup - Device unique_id: %s, mac: %s, primary door: %s.",
       this.uda.unique_id, this.uda.mac, primaryDoorId ?? "none");
     this.log.debug("Side door lookup - Extensions found: %s.", JSON.stringify(this.uda.extensions ?? []));
-    this.log.debug("Side door lookup - Available doors: %d.", this.controller.udaApi.doors?.length ?? 0);
+    this.log.debug("Side door lookup - Available doors: %d, floors: %d.",
+      this.controller.udaApi.doors?.length ?? 0, this.controller.udaApi.floors?.length ?? 0);
 
     // If not found in extensions, try to find a second door associated with this hub.
     // This handles setups where the side door is configured as a separate door/location rather than oper2.
@@ -817,14 +818,78 @@ export class AccessHub extends AccessDevice {
           door.name, door.unique_id, JSON.stringify(door.device_groups?.map(d => ({ id: d.unique_id, mac: d.mac })) ?? []));
       }
 
-      // Find another door that has this device in its device_groups (meaning it's connected to this hub).
-      const sideDoor = this.controller.udaApi.doors.find(door => door.unique_id !== primaryDoorId &&
+      // Strategy 1: Find a door that has this device in its device_groups.
+      let sideDoor = this.controller.udaApi.doors.find(door => door.unique_id !== primaryDoorId &&
         door.device_groups?.some(device => device.unique_id === this.uda.unique_id || device.mac === this.uda.mac)
       );
 
+      // Strategy 2: If device_groups didn't work, find another door on the same floor as the primary door.
+      // This works for setups where doors are bound to the same hub but device_groups isn't populated.
+      if (!sideDoor && primaryDoorId && this.uda.floor?.unique_id) {
+
+        const floorId = this.uda.floor.unique_id;
+
+        this.log.debug("Side door lookup - Trying floor-based lookup. Floor ID: %s.", floorId);
+
+        // Find another door on the same floor
+        sideDoor = this.controller.udaApi.doors.find(door =>
+          door.unique_id !== primaryDoorId &&
+          this.controller.udaApi.floors?.some(floor => floor.unique_id === floorId && floor.doors?.some(fd => fd.unique_id === door.unique_id))
+        );
+      }
+
+      // Strategy 3: If we only have 2 doors total, assume the other one is the side door.
+      if (!sideDoor && primaryDoorId && this.controller.udaApi.doors.length === 2) {
+
+        this.log.debug("Side door lookup - Using fallback: only 2 doors exist, using the other one.");
+        sideDoor = this.controller.udaApi.doors.find(door => door.unique_id !== primaryDoorId);
+      }
+
+      // Strategy 4: If primary door is unknown but we have exactly 2 doors, find the door named "Portillon" or similar
+      // (common naming for pedestrian/side gates in French-speaking regions).
+      if (!sideDoor && !primaryDoorId && this.controller.udaApi.doors.length === 2) {
+
+        this.log.debug("Side door lookup - Primary door unknown, searching by name pattern.");
+
+        // Look for door with a name suggesting it's a side/pedestrian gate
+        sideDoor = this.controller.udaApi.doors.find(door =>
+          /portillon|side|pedestrian|wicket|pieton/i.test(door.name)
+        );
+
+        // If no match by name, just pick the second door in the list
+        if (!sideDoor) {
+
+          this.log.debug("Side door lookup - No name match, using second door in list.");
+          sideDoor = this.controller.udaApi.doors[1];
+        }
+      }
+
+      // Strategy 5: If we still don't have a side door but have multiple doors, try to find one that matches
+      // the device's floor (if floor info is available on the device).
+      if (!sideDoor && !primaryDoorId && this.uda.floor?.unique_id && this.controller.udaApi.floors) {
+
+        const deviceFloorId = this.uda.floor.unique_id;
+
+        this.log.debug("Side door lookup - Searching doors on device floor: %s.", deviceFloorId);
+
+        const floor = this.controller.udaApi.floors.find(f => f.unique_id === deviceFloorId);
+
+        if (floor?.doors && floor.doors.length >= 2) {
+
+          // Find a door on this floor that looks like a side door
+          sideDoor = floor.doors.find(door => /portillon|side|pedestrian|wicket|pieton/i.test(door.name));
+
+          if (!sideDoor) {
+
+            // Just use the second door on the floor
+            sideDoor = floor.doors[1];
+          }
+        }
+      }
+
       if (sideDoor) {
 
-        this.log.debug("Found side door via device_groups: %s (ID: %s).", sideDoor.name, sideDoor.unique_id);
+        this.log.debug("Found side door: %s (ID: %s).", sideDoor.name, sideDoor.unique_id);
         sideDoorLocationId = sideDoor.unique_id;
       }
     }
