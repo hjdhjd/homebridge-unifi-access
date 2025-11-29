@@ -797,18 +797,18 @@ export class AccessHub extends AccessDevice {
     // Try to get the side door location ID from extensions first (port_setting with target_name = "oper2").
     let sideDoorLocationId = this.uda.extensions?.find(ext => ext.extension_name === "port_setting" && ext.target_name === "oper2")?.target_value;
 
+    // Get the primary door ID for this device (may be undefined if no door is bound).
+    const primaryDoorId = this.uda.door?.unique_id;
+
     // Debug logging.
     this.log.debug("Side door lookup - Device unique_id: %s, mac: %s, primary door: %s.",
-      this.uda.unique_id, this.uda.mac, this.uda.door.unique_id);
+      this.uda.unique_id, this.uda.mac, primaryDoorId ?? "none");
     this.log.debug("Side door lookup - Extensions found: %s.", JSON.stringify(this.uda.extensions ?? []));
     this.log.debug("Side door lookup - Available doors: %d.", this.controller.udaApi.doors?.length ?? 0);
 
     // If not found in extensions, try to find a second door associated with this hub.
     // This handles setups where the side door is configured as a separate door/location rather than oper2.
     if (!sideDoorLocationId && this.controller.udaApi.doors) {
-
-      // Get the primary door ID for this device.
-      const primaryDoorId = this.uda.door.unique_id;
 
       // Log all doors for debugging.
       for (const door of this.controller.udaApi.doors) {
