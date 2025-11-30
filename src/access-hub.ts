@@ -116,7 +116,7 @@ type LogHintKey = KeyOf<AccessHints, "log">;
 type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 
 // Valid door service types.
-type DoorServiceType = "Lock" | "GarageDoorOpener" | "Door";
+type DoorServiceType = "Lock" | "GarageDoorOpener";
 
 export class AccessHub extends AccessDevice {
 
@@ -210,10 +210,6 @@ export class AccessHub extends AccessDevice {
       case "garage":
 
         return "GarageDoorOpener";
-
-      case "door":
-
-        return "Door";
 
       default:
 
@@ -340,7 +336,7 @@ export class AccessHub extends AccessDevice {
         this._hkLockState = newLockState;
 
         // Update the door service.
-        if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door") {
+        if (this.doorServiceType === "GarageDoorOpener") {
 
           this.updateDoorServiceState(false);
         }
@@ -374,7 +370,7 @@ export class AccessHub extends AccessDevice {
         this._hkSideDoorLockState = newLockState;
 
         // Update the door service.
-        if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door") {
+        if (this.sideDoorServiceType === "GarageDoorOpener") {
 
           this.updateDoorServiceState(true);
         }
@@ -501,12 +497,12 @@ export class AccessHub extends AccessDevice {
       }
 
       // Update the door service (GarageDoorOpener or Door).
-      if (isMainDoor && (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door")) {
+      if (isMainDoor && (this.doorServiceType === "GarageDoorOpener")) {
 
         this.updateDoorServiceState(false);
       }
 
-      if (isSideDoor && (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door")) {
+      if (isSideDoor && (this.sideDoorServiceType === "GarageDoorOpener")) {
 
         this.updateDoorServiceState(true);
       }
@@ -753,13 +749,12 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure the main door for HomeKit - supports Lock, GarageDoorOpener, and Door service types.
+  // Configure the main door for HomeKit - supports Lock and GarageDoorOpener service types.
   private configureLock(): boolean {
 
     // First, remove any previous service types that are no longer selected.
-    const serviceTypes = [this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener, this.hap.Service.Door];
-    const selectedService = this.doorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener :
-      this.doorServiceType === "Door" ? this.hap.Service.Door : this.hap.Service.LockMechanism;
+    const serviceTypes = [this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener];
+    const selectedService = this.doorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener : this.hap.Service.LockMechanism;
 
     for (const serviceType of serviceTypes) {
 
@@ -796,9 +791,6 @@ export class AccessHub extends AccessDevice {
     if (this.doorServiceType === "GarageDoorOpener") {
 
       this.configureGarageDoorService(service, false);
-    } else if (this.doorServiceType === "Door") {
-
-      this.configureDoorService(service, false);
     } else {
 
       this.configureLockService(service, false);
@@ -930,48 +922,6 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => false);
   }
 
-  // Configure a Door service.
-  private configureDoorService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
-
-    if (!service) {
-
-      return;
-    }
-
-    const lockCommand = isSideDoor ?
-      async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
-      async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
-
-    // Use DPS (Door Position Sensor) state for position: CONTACT_DETECTED = 0 (closed), CONTACT_NOT_DETECTED = 100 (open)
-    // Use the appropriate tracked DPS state based on whether this is the main door or side door.
-    const getPosition = (): CharacteristicValue => {
-
-      const dpsState = isSideDoor ? this._hkSideDoorDpsState : this._hkDpsState;
-
-      return dpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED ? 0 : 100;
-    };
-
-    service.getCharacteristic(this.hap.Characteristic.CurrentPosition).onGet(getPosition);
-
-    service.getCharacteristic(this.hap.Characteristic.TargetPosition).onSet(async (value: CharacteristicValue) => {
-
-      // Treat anything < 50 as closed, >= 50 as open.
-      const shouldLock = (value as number) < 50;
-
-      if (!(await lockCommand(shouldLock))) {
-
-        // Revert target position on failure.
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.TargetPosition, getPosition()), 50);
-      }
-
-      // Update position from DPS sensor.
-      service.updateCharacteristic(this.hap.Characteristic.CurrentPosition, getPosition());
-    });
-
-    // PositionState is required - we always report stopped since it's an instant action.
-    service.getCharacteristic(this.hap.Characteristic.PositionState).onGet(() => this.hap.Characteristic.PositionState.STOPPED);
-  }
-
   // Configure a switch to manually trigger a doorbell ring event for HomeKit.
   private configureDoorbellTrigger(): boolean {
 
@@ -1051,13 +1001,12 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure the side door for HomeKit (UA Gate only) - supports Lock, GarageDoorOpener, and Door service types.
+  // Configure the side door for HomeKit (UA Gate only) - supports Lock and GarageDoorOpener service types.
   private configureSideDoorLock(): boolean {
 
     // First, remove any previous service types that are no longer selected.
-    const serviceTypes = [this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener, this.hap.Service.Door];
-    const selectedService = this.sideDoorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener :
-      this.sideDoorServiceType === "Door" ? this.hap.Service.Door : this.hap.Service.LockMechanism;
+    const serviceTypes = [this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener];
+    const selectedService = this.sideDoorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener : this.hap.Service.LockMechanism;
 
     for (const serviceType of serviceTypes) {
 
@@ -1093,9 +1042,6 @@ export class AccessHub extends AccessDevice {
     if (this.sideDoorServiceType === "GarageDoorOpener") {
 
       this.configureGarageDoorService(service, true);
-    } else if (this.sideDoorServiceType === "Door") {
-
-      this.configureDoorService(service, true);
     } else {
 
       this.configureLockService(service, true);
@@ -1683,22 +1629,6 @@ export class AccessHub extends AccessDevice {
         service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, targetState);
         service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, doorState);
       }
-    } else if (serviceType === "Door") {
-
-      const service = this.accessory.getServiceById(this.hap.Service.Door, subtype);
-
-      if (service) {
-
-        // Use DPS (Door Position Sensor) state for position: CONTACT_DETECTED = 0 (closed), CONTACT_NOT_DETECTED = 100 (open)
-        // Use the tracked HomeKit DPS state based on whether this is the main door or side door.
-        const dpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
-        const position = dpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED ? 0 : 100;
-
-        this.log.debug("Updating Door (isSideDoor=%s): dpsState=%s, position=%s.", isSideDoor, dpsState, position);
-
-        service.updateCharacteristic(this.hap.Characteristic.TargetPosition, position);
-        service.updateCharacteristic(this.hap.Characteristic.CurrentPosition, position);
-      }
     } else {
 
       const service = this.accessory.getServiceById(this.hap.Service.LockMechanism, subtype);
@@ -2150,7 +2080,7 @@ export class AccessHub extends AccessDevice {
             }
 
             // Update the side door GarageDoorOpener or Door service if configured.
-            if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door") {
+            if (this.sideDoorServiceType === "GarageDoorOpener") {
 
               this.updateDoorServiceState(true);
             }
@@ -2194,7 +2124,7 @@ export class AccessHub extends AccessDevice {
             // Note: Side door has its own DPS (input_ped_dps) which is not tracked in terminalInputs.
             if (input === "Dps") {
 
-              if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door") {
+              if (this.doorServiceType === "GarageDoorOpener") {
 
                 this.updateDoorServiceState(false);
               }
@@ -2299,13 +2229,13 @@ export class AccessHub extends AccessDevice {
                 this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
 
                 // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-                if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door" || this.hints.logDps) {
+                if (this.doorServiceType === "GarageDoorOpener" || this.hints.logDps) {
 
                   this.log.info("Door position sensor %s.", contactDetected ? "closed" : "open");
                 }
 
                 // Update GarageDoorOpener or Door service if configured.
-                if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door") {
+                if (this.doorServiceType === "GarageDoorOpener") {
 
                   this.updateDoorServiceState(false);
                 }
@@ -2364,13 +2294,13 @@ export class AccessHub extends AccessDevice {
                   this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
 
                   // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-                  if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door" || this.hints.logDps) {
+                  if (this.sideDoorServiceType === "GarageDoorOpener" || this.hints.logDps) {
 
                     this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
                   }
 
                   // Update side door GarageDoorOpener or Door service if configured.
-                  if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door") {
+                  if (this.sideDoorServiceType === "GarageDoorOpener") {
 
                     this.updateDoorServiceState(true);
                   }
@@ -2452,12 +2382,12 @@ export class AccessHub extends AccessDevice {
               this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
 
               // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-              if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door" || this.hints.logDps) {
+              if (this.doorServiceType === "GarageDoorOpener" || this.hints.logDps) {
 
                 this.log.info("Door position sensor " + (contactDetected ? "closed" : "open") + ".");
               }
 
-              if (this.doorServiceType === "GarageDoorOpener" || this.doorServiceType === "Door") {
+              if (this.doorServiceType === "GarageDoorOpener") {
 
                 this.updateDoorServiceState(false);
               }
@@ -2499,12 +2429,12 @@ export class AccessHub extends AccessDevice {
               this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
 
               // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-              if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door" || this.hints.logDps) {
+              if (this.sideDoorServiceType === "GarageDoorOpener" || this.hints.logDps) {
 
                 this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
               }
 
-              if (this.sideDoorServiceType === "GarageDoorOpener" || this.sideDoorServiceType === "Door") {
+              if (this.sideDoorServiceType === "GarageDoorOpener") {
 
                 this.updateDoorServiceState(true);
               }
