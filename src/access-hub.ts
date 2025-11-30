@@ -227,9 +227,6 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    this.log.debug("Discovering door IDs. Available doors: %s.",
-      JSON.stringify(doors.map(d => ({ id: d.unique_id, name: d.name }))));
-
     // Get the primary door ID from device config (may be undefined).
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     const primaryDoorId = this.uda.door?.unique_id;
@@ -238,7 +235,6 @@ export class AccessHub extends AccessDevice {
     if(primaryDoorId) {
 
       this.mainDoorLocationId = primaryDoorId;
-      this.log.debug("Main door from device config: %s.", primaryDoorId);
     } else if(doors.length >= 1) {
 
       // Strategy 2: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
@@ -246,16 +242,8 @@ export class AccessHub extends AccessDevice {
         !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name)
       );
 
-      if(mainDoor) {
-
-        this.mainDoorLocationId = mainDoor.unique_id;
-        this.log.debug("Main door by name pattern: %s (%s).", mainDoor.name, mainDoor.unique_id);
-      } else {
-
-        // Strategy 3: Use the first door as main door.
-        this.mainDoorLocationId = doors[0].unique_id;
-        this.log.debug("Main door (first available): %s (%s).", doors[0].name, doors[0].unique_id);
-      }
+      // Strategy 3: Use the first door as main door.
+      this.mainDoorLocationId = mainDoor?.unique_id ?? doors[0].unique_id;
     }
 
     // Find the side door (if enabled).
@@ -269,7 +257,6 @@ export class AccessHub extends AccessDevice {
       if(sideDoorFromExt) {
 
         this.sideDoorLocationId = sideDoorFromExt;
-        this.log.debug("Side door from extensions: %s.", sideDoorFromExt);
       } else {
 
         // Strategy 2: Look for a door named like "side", "portillon", "pedestrian".
@@ -280,17 +267,12 @@ export class AccessHub extends AccessDevice {
         if(sideDoor) {
 
           this.sideDoorLocationId = sideDoor.unique_id;
-          this.log.debug("Side door by name pattern: %s (%s).", sideDoor.name, sideDoor.unique_id);
         } else if(doors.length === 2) {
 
           // Strategy 3: If we have exactly 2 doors, the other one is the side door.
           const otherDoor = doors.find(door => door.unique_id !== this.mainDoorLocationId);
 
-          if(otherDoor) {
-
-            this.sideDoorLocationId = otherDoor.unique_id;
-            this.log.debug("Side door (other of 2): %s (%s).", otherDoor.name, otherDoor.unique_id);
-          }
+          this.sideDoorLocationId = otherDoor?.unique_id;
         }
       }
     }
@@ -369,140 +351,6 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Fetch initial door states from the locations API.
-  // This is kept as a fallback but is no longer called by default since we use bootstrap data.
-  private async fetchInitialDoorStates(retryCount = 0): Promise<void> {
-
-    const maxRetries = 5;
-    const retryDelay = 10000;
-
-    if(!this.mainDoorLocationId && !this.sideDoorLocationId) {
-
-      return;
-    }
-
-    this.log.debug("Fetching initial door states (attempt %d/%d)...", retryCount + 1, maxRetries + 1);
-
-    // Build list of door IDs to fetch.
-    const doorIds = [ this.mainDoorLocationId, this.sideDoorLocationId ].filter((id): id is string => id !== undefined);
-
-    // Fetch all door states in parallel.
-    const results = await Promise.all(doorIds.map(async doorId => this.fetchDoorState(doorId)));
-
-    const fetchedAny = results.some(result => result);
-
-    // If we failed to fetch any door states and have retries left, try again.
-    if(!fetchedAny && retryCount < maxRetries) {
-
-      this.log.debug("Failed to fetch door states, retrying in %d seconds...", retryDelay / 1000);
-      setTimeout(() => void this.fetchInitialDoorStates(retryCount + 1), retryDelay);
-
-      return;
-    }
-
-    if(fetchedAny) {
-
-      this.log.info("Initial door states fetched successfully.");
-    } else {
-
-      this.log.warn("Failed to fetch initial door states after %d attempts. States will update when events are received.", maxRetries + 1);
-    }
-  }
-
-  // Fetch state for a single door location.
-  private async fetchDoorState(doorId: string): Promise<boolean> {
-
-    try {
-
-      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId;
-      const response = await this.controller.udaApi.retrieve(endpoint);
-
-      if(!response || !this.controller.udaApi.responseOk(response.statusCode)) {
-
-        this.log.debug("Failed to fetch state for door %s (status: %s).", doorId, response?.statusCode ?? "no response");
-
-        return false;
-      }
-
-      const responseData = await response.body.json() as {
-        data?: {
-          unique_id?: string;
-          id?: string;
-          name: string;
-          // Old API format
-          door_lock_relay_status?: "lock" | "unlock";
-          door_position_status?: "open" | "close";
-          // New API format (v2)
-          state?: {
-            lock: "locked" | "unlocked";
-            dps: "open" | "close";
-          };
-        };
-      };
-
-      const doorData = responseData.data;
-
-      if(!doorData) {
-
-        return false;
-      }
-
-      // Handle both old and new API formats.
-      const lockStatus = doorData.state?.lock ?? (doorData.door_lock_relay_status === "unlock" ? "unlocked" : "locked");
-      const dpsStatus = doorData.state?.dps ?? doorData.door_position_status ?? "close";
-
-      this.log.info("Initial door state for %s: lock=%s, position=%s.",
-        doorData.name, lockStatus, dpsStatus);
-
-      const isMainDoor = doorId === this.mainDoorLocationId;
-      const isSideDoor = doorId === this.sideDoorLocationId;
-
-      // Update lock state.
-      const newLockState = lockStatus === "unlocked" ?
-        this.hap.Characteristic.LockCurrentState.UNSECURED :
-        this.hap.Characteristic.LockCurrentState.SECURED;
-
-      if(isMainDoor) {
-
-        this._hkLockState = newLockState;
-      }
-
-      if(isSideDoor) {
-
-        this._hkSideDoorLockState = newLockState;
-      }
-
-      // Update DPS state.
-      const newDpsState = dpsStatus === "open" ?
-        this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-        this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-      if(isMainDoor) {
-
-        this.hkDpsState = newDpsState;
-      }
-
-      if(isSideDoor) {
-
-        this._hkSideDoorDpsState = newDpsState;
-      }
-
-      // Update the door service (GarageDoorOpener or Door).
-      if(isMainDoor && (this.doorServiceType === "GarageDoorOpener")) {
-
-        this.updateDoorServiceState(false);
-      }
-
-      return true;
-
-    } catch(error) {
-
-      this.log.debug("Error fetching initial state for door %s: %s.", doorId, error);
-
-      return false;
-    }
-  }
-
   // Initialize and configure the light accessory for HomeKit.
   private configureDevice(): boolean {
 
@@ -577,13 +425,11 @@ export class AccessHub extends AccessDevice {
       if(this.mainDoorLocationId) {
 
         this.controller.events.on(this.mainDoorLocationId, this.listeners[this.mainDoorLocationId] = this.eventHandler.bind(this));
-        this.log.debug("Subscribed to events for main door (ID: %s).", this.mainDoorLocationId);
       }
 
       if(this.sideDoorLocationId) {
 
         this.controller.events.on(this.sideDoorLocationId, this.listeners[this.sideDoorLocationId] = this.eventHandler.bind(this));
-        this.log.debug("Subscribed to events for side door (ID: %s).", this.sideDoorLocationId);
       }
     }
 
@@ -1251,49 +1097,15 @@ export class AccessHub extends AccessDevice {
     // For UA Gate (UGT), use the location-based unlock API since the device API is not supported.
     if(this.uda.device_type === "UGT") {
 
-      // Use the already-discovered main door ID if available.
-      let mainDoorId: string | undefined = this.mainDoorLocationId;
+      if(!this.mainDoorLocationId) {
 
-      // If not discovered yet, try to find it from the doors list.
-      if(!mainDoorId) {
-
-        const doors = this.controller.udaApi.doors;
-
-        this.log.debug("Looking for main door. Discovered ID: %s, doors list: %s.",
-          this.mainDoorLocationId, JSON.stringify(doors?.map(d => ({ id: d.unique_id, name: d.name }))));
-
-        if(doors && doors.length > 0) {
-
-          // Strategy 1: Look for a door named "Portail" or similar (main gate naming)
-          const mainDoor = doors.find(door => /portail|main|gate|principal/i.test(door.name) && !/portillon|side|pedestrian|pieton/i.test(door.name));
-
-          if(mainDoor) {
-
-            mainDoorId = mainDoor.unique_id;
-          } else if(doors.length === 2) {
-
-            // Strategy 2: If we have exactly 2 doors, pick the one that's NOT the side door
-            const sideDoor = doors.find(door => /portillon|side|pedestrian|pieton/i.test(door.name));
-            const otherDoor = doors.find(door => door.unique_id !== sideDoor?.unique_id);
-
-            mainDoorId = otherDoor?.unique_id;
-          } else {
-
-            // Strategy 3: Just use the first door
-            mainDoorId = doors[0]?.unique_id;
-          }
-        }
-      }
-
-      if(!mainDoorId) {
-
-        this.log.error("Unable to %s. Door configuration not found for UA Gate.", action);
+        this.log.error("Unable to %s. Main door ID not discovered for UA Gate.", action);
 
         return false;
       }
 
       // Execute the action using the location endpoint (same as the library's unlock method).
-      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + mainDoorId + "/unlock";
+      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + this.mainDoorLocationId + "/unlock";
 
       const response = await this.controller.udaApi.retrieve(endpoint, {
 
@@ -1344,8 +1156,6 @@ export class AccessHub extends AccessDevice {
 
     const action = isLocking ? "lock" : "unlock";
 
-    this.log.debug("hubSideDoorLockCommand called: isLocking=%s, lockDelayInterval=%s", isLocking, this.lockDelayInterval);
-
     // Only allow relocking if we are able to do so.
     if((this.lockDelayInterval === undefined) && isLocking) {
 
@@ -1362,116 +1172,16 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Try to get the side door location ID from the discovered value first.
-    let sideDoorLocationId = this.sideDoorLocationId;
-
-    // If not discovered, try extensions (port_setting with target_name = "oper2").
-    sideDoorLocationId ??= this.uda.extensions?.find(ext => ext.extension_name === "port_setting" && ext.target_name === "oper2")?.target_value;
-
-    // Get the primary door ID for this device (may be undefined if no door is bound).
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    const primaryDoorId = this.uda.door?.unique_id;
-
-    // Debug logging.
-    this.log.debug("Side door lookup - Device unique_id: %s, mac: %s, primary door: %s.",
-      this.uda.unique_id, this.uda.mac, primaryDoorId);
-    this.log.debug("Side door lookup - Extensions found: %s.", JSON.stringify(this.uda.extensions ?? []));
-    this.log.debug("Side door lookup - Available doors: %d, floors: %d.",
-      this.controller.udaApi.doors?.length ?? 0, this.controller.udaApi.floors?.length ?? 0);
-
-    // If not found in extensions, try to find a second door associated with this hub.
-    // This handles setups where the side door is configured as a separate door/location rather than oper2.
-    if(!sideDoorLocationId && this.controller.udaApi.doors) {
-
-      const doors = this.controller.udaApi.doors;
-      const floors = this.controller.udaApi.floors;
-
-      // Log all doors for debugging.
-      for(const door of doors) {
-
-        this.log.debug("Side door lookup - Door: %s (ID: %s), device_groups: %s.",
-          door.name, door.unique_id, JSON.stringify(door.device_groups?.map(d => ({ id: d.unique_id, mac: d.mac })) ?? []));
-      }
-
-      // Strategy 1: Find a door that has this device in its device_groups.
-      let sideDoor = doors.find(door => door.unique_id !== primaryDoorId &&
-        door.device_groups?.some(device => device.unique_id === this.uda.unique_id || device.mac === this.uda.mac)
-      );
-
-      // Strategy 2: If device_groups didn't work, find another door on the same floor as the primary door.
-      // This works for setups where doors are bound to the same hub but device_groups isn't populated.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if(!sideDoor && primaryDoorId && this.uda.floor?.unique_id) {
-
-        const floorId = this.uda.floor.unique_id;
-
-        this.log.debug("Side door lookup - Trying floor-based lookup. Floor ID: %s.", floorId);
-
-        // Find another door on the same floor
-        sideDoor = doors.find(door => door.unique_id !== primaryDoorId &&
-          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-          floors?.some(floor => floor.unique_id === floorId && floor.doors?.some(fd => fd.unique_id === door.unique_id))
-        );
-      }
-
-      // Strategy 3: If we only have 2 doors total, assume the other one is the side door.
-      if(!sideDoor && primaryDoorId && doors.length === 2) {
-
-        this.log.debug("Side door lookup - Using fallback: only 2 doors exist, using the other one.");
-        sideDoor = doors.find(door => door.unique_id !== primaryDoorId);
-      }
-
-      // Strategy 4: If primary door is unknown but we have exactly 2 doors, find the door named "Portillon" or similar
-      // (common naming for pedestrian/side gates in French-speaking regions).
-      if(!sideDoor && !primaryDoorId && doors.length === 2) {
-
-        this.log.debug("Side door lookup - Primary door unknown, searching by name pattern.");
-
-        // Look for door with a name suggesting it's a side/pedestrian gate
-        sideDoor = doors.find(door => /portillon|side|pedestrian|wicket|pieton/i.test(door.name)
-        );
-
-        // If no match by name, just pick the second door in the list
-        sideDoor ??= doors[1];
-      }
-
-      // Strategy 5: If we still don't have a side door but have multiple doors, try to find one that matches
-      // the device's floor (if floor info is available on the device).
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if(!sideDoor && !primaryDoorId && this.uda.floor && floors) {
-
-        const deviceFloorId = this.uda.floor.unique_id;
-
-        this.log.debug("Side door lookup - Searching doors on device floor: %s.", deviceFloorId);
-
-        const floor = floors.find(f => f.unique_id === deviceFloorId);
-
-        if(floor?.doors && floor.doors.length >= 2) {
-
-          // Find a door on this floor that looks like a side door
-          sideDoor = floor.doors.find(door => /portillon|side|pedestrian|wicket|pieton/i.test(door.name));
-
-          // Just use the second door on the floor
-          sideDoor ??= floor.doors[1];
-        }
-      }
-
-      if(sideDoor) {
-
-        this.log.debug("Found side door: %s (ID: %s).", sideDoor.name, sideDoor.unique_id);
-        sideDoorLocationId = sideDoor.unique_id;
-      }
-    }
-
-    if(!sideDoorLocationId) {
+    // Use the already-discovered side door location ID.
+    if(!this.sideDoorLocationId) {
 
       this.log.error("Unable to %s the side door. Side door configuration not found.", action);
 
       return false;
     }
 
-    // Execute the action using the location endpoint (same as the library's unlock method).
-    const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + sideDoorLocationId + "/unlock";
+    // Execute the action using the location endpoint.
+    const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + this.sideDoorLocationId + "/unlock";
 
     const response = await this.controller.udaApi.retrieve(endpoint, {
 
@@ -1896,9 +1606,6 @@ export class AccessHub extends AccessDevice {
 
           const eventDoorId = packet.event_object_id;
 
-          this.log.debug("remote_unlock event - eventDoorId: %s, mainDoorId: %s, sideDoorId: %s.",
-            eventDoorId, this.mainDoorLocationId, this.sideDoorLocationId);
-
           if(this.sideDoorLocationId && eventDoorId === this.sideDoorLocationId) {
 
             // Side door unlock event.
@@ -1945,11 +1652,6 @@ export class AccessHub extends AccessDevice {
               }
             }, 5000);
 
-          } else {
-
-            // Unknown door, log for debugging.
-            this.log.debug("Unknown door in remote_unlock event: %s (known: main=%s, side=%s).",
-              eventDoorId, this.mainDoorLocationId, this.sideDoorLocationId);
           }
 
         } else {
@@ -1967,14 +1669,6 @@ export class AccessHub extends AccessDevice {
         break;
 
       case "access.data.device.update":
-
-        // Debug: Log all config keys for UGT devices to understand what's available.
-        if(this.uda.device_type === "UGT") {
-
-          const dpsConfigs = this.uda.configs?.filter(e => /dps|door|gate|oper|wiring/i.test(e.key)) ?? [];
-
-          this.log.debug("UGT device update - Relevant configs: %s.", JSON.stringify(dpsConfigs.map(c => ({ key: c.key, value: c.value }))));
-        }
 
         // Process a lock update event if our state has changed.
         // Skip for UGT devices since we handle state manually (controller doesn't emit proper events).
@@ -2016,10 +1710,6 @@ export class AccessHub extends AccessDevice {
 
           const newSideDoorDpsState = this.hubSideDoorDpsState;
 
-          this.log.debug("Side door DPS check: current=%s, new=%s, input_door_dps=%s.",
-            this._hkSideDoorDpsState, newSideDoorDpsState,
-            this.uda.configs?.find(entry => entry.key === "input_door_dps")?.value ?? "not found");
-
           if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
 
             this._hkSideDoorDpsState = newSideDoorDpsState;
@@ -2045,14 +1735,6 @@ export class AccessHub extends AccessDevice {
           const wiredKey = ("is" + input + "Wired") as WiredKey;
 
           if(this.hints[hasKey] && this[hubKey] !== this[hkKey]) {
-
-            // Debug logging for DPS state changes.
-            if(input === "Dps") {
-
-              this.log.debug("Main DPS check: current=%s, new=%s, input_gate_dps=%s.",
-                this[hkKey], this[hubKey],
-                this.uda.configs?.find(entry => entry.key === "input_gate_dps")?.value ?? "not found");
-            }
 
             this[hkKey] = this[hubKey];
 
@@ -2126,24 +1808,16 @@ export class AccessHub extends AccessDevice {
 
           const locationStates = (packet.data as AccessEventDeviceUpdateV2).location_states;
 
-          this.log.debug("UGT location_states event: %s.", JSON.stringify(locationStates));
-          this.log.debug("Known door IDs - Main: %s, Side: %s.", this.mainDoorLocationId, this.sideDoorLocationId);
-
           // Find the main door location state.
           // Try port1 extension first, then fall back to discovered main door ID.
           const mainDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port1");
           const mainDoorId = mainDoorExtension?.target_value ?? this.mainDoorLocationId;
-
-          this.log.debug("Main door ID resolution: extension=%s, discovered=%s, using=%s.",
-            mainDoorExtension?.target_value, this.mainDoorLocationId, mainDoorId);
 
           if(mainDoorId) {
 
             const mainDoorState = locationStates?.find(state => state.location_id === mainDoorId);
 
             if(mainDoorState) {
-
-              this.log.debug("Main door state found: lock=%s, dps=%s.", mainDoorState.lock, mainDoorState.dps);
 
               const newLockState = mainDoorState.lock === "unlocked" ?
                 this.hap.Characteristic.LockCurrentState.UNSECURED :
@@ -2198,16 +1872,11 @@ export class AccessHub extends AccessDevice {
             const sideDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port2");
             const sideDoorId = sideDoorExtension?.target_value ?? this.sideDoorLocationId;
 
-            this.log.debug("Side door ID resolution: extension=%s, discovered=%s, using=%s.",
-              sideDoorExtension?.target_value, this.sideDoorLocationId, sideDoorId);
-
             if(sideDoorId) {
 
               const sideDoorState = locationStates?.find(state => state.location_id === sideDoorId);
 
               if(sideDoorState) {
-
-                this.log.debug("Side door state found: lock=%s, dps=%s.", sideDoorState.lock, sideDoorState.dps);
 
                 const newSideDoorLockState = sideDoorState.lock === "unlocked" ?
                   this.hap.Characteristic.LockCurrentState.UNSECURED :
@@ -2283,13 +1952,8 @@ export class AccessHub extends AccessDevice {
 
           if(!isMainDoor && !isSideDoor) {
 
-            this.log.debug("Location update for unknown door %s (%s), ignoring.", locationData.name, locationId);
-
             break;
           }
-
-          this.log.debug("Location update for %s door (%s): lock=%s, dps=%s.",
-            isMainDoor ? "main" : "side", locationData.name, locationData.state.lock, locationData.state.dps);
 
           if(isMainDoor) {
 
