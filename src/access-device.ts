@@ -35,7 +35,6 @@ export interface AccessHints {
   logRel: boolean;
   logRen: boolean;
   logRex: boolean;
-  logSideDoorLock: boolean;
   motionDuration: number;
   occupancyDuration: number;
   syncName: boolean;

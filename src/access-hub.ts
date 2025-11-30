@@ -131,8 +131,6 @@ export class AccessHub extends AccessDevice {
   private mainDoorLocationId: string | undefined;
   private sideDoorLocationId: string | undefined;
   private sideDoorGateTransitionUntil: number;
-  private sideDoorLockDelayInterval: number | undefined;
-  private sideDoorServiceType: DoorServiceType;
   public uda: AccessDeviceConfig;
 
   // Create an instance.
@@ -151,19 +149,12 @@ export class AccessHub extends AccessDevice {
     this.mainDoorLocationId = undefined;
     this.sideDoorLocationId = undefined;
     this.sideDoorGateTransitionUntil = 0;
-    this.sideDoorLockDelayInterval = this.getFeatureNumber("Hub.SideDoor.LockDelayInterval") ?? undefined;
-    this.sideDoorServiceType = this.getDoorServiceType("Hub.SideDoor.ServiceType");
     this.doorbellRingRequestId = null;
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
     if((this.lockDelayInterval !== undefined) && (this.lockDelayInterval < 0)) {
 
       this.lockDelayInterval = undefined;
-    }
-
-    if((this.sideDoorLockDelayInterval !== undefined) && (this.sideDoorLockDelayInterval < 0)) {
-
-      this.sideDoorLockDelayInterval = undefined;
     }
 
     this.configureHints();
@@ -187,7 +178,6 @@ export class AccessHub extends AccessDevice {
     this.hints.logRel = this.hasFeature("Log.REL");
     this.hints.logRen = this.hasFeature("Log.REN");
     this.hints.logRex = this.hasFeature("Log.REX");
-    this.hints.logSideDoorLock = this.hasFeature("Log.SideDoorLock");
 
     // The Ultra has a single terminal input that's selectable between DPS and REX modes. We detect which mode it's operating in, and adjust accordingly. We've
     // over-engineered this a bit for future-proofing.
@@ -200,6 +190,7 @@ export class AccessHub extends AccessDevice {
   }
 
   // Get the door service type from configuration.
+  // UA Gate devices default to GarageDoorOpener, other hubs default to Lock.
   private getDoorServiceType(option: string): DoorServiceType {
 
     const value = this.getFeatureValue(option)?.toLowerCase();
@@ -211,9 +202,15 @@ export class AccessHub extends AccessDevice {
 
         return "GarageDoorOpener";
 
-      default:
+      case "lock":
 
         return "Lock";
+
+      default:
+
+        // UA Gate defaults to GarageDoorOpener (gates are typically operated like garage doors).
+        // Other hubs default to Lock.
+        return this.uda.device_type === "UGT" ? "GarageDoorOpener" : "Lock";
     }
   }
 
@@ -368,12 +365,6 @@ export class AccessHub extends AccessDevice {
           this.hap.Characteristic.LockCurrentState.SECURED;
 
         this._hkSideDoorLockState = newLockState;
-
-        // Update the door service.
-        if(this.sideDoorServiceType === "GarageDoorOpener") {
-
-          this.updateDoorServiceState(true);
-        }
       }
     }
   }
@@ -502,11 +493,6 @@ export class AccessHub extends AccessDevice {
         this.updateDoorServiceState(false);
       }
 
-      if(isSideDoor && (this.sideDoorServiceType === "GarageDoorOpener")) {
-
-        this.updateDoorServiceState(true);
-      }
-
       return true;
 
     } catch(error) {
@@ -541,13 +527,13 @@ export class AccessHub extends AccessDevice {
 
     if(this.hints.hasSideDoor) {
 
-      if(this.sideDoorLockDelayInterval === undefined) {
+      if(this.lockDelayInterval === undefined) {
 
         this.log.info("The side door lock relay will lock five seconds after unlocking in HomeKit.");
       } else {
 
         this.log.info("The side door lock relay will remain unlocked %s after unlocking in HomeKit.",
-          this.sideDoorLockDelayInterval === 0 ? "indefinitely" : "for " + this.sideDoorLockDelayInterval.toString() + " minutes");
+          this.lockDelayInterval === 0 ? "indefinitely" : "for " + this.lockDelayInterval.toString() + " minutes");
       }
     }
 
@@ -1001,35 +987,26 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure the side door for HomeKit (UA Gate only) - supports Lock and GarageDoorOpener service types.
+  // Configure the side door for HomeKit (UA Gate only) - always uses Lock service.
   private configureSideDoorLock(): boolean {
 
-    // First, remove any previous service types that are no longer selected.
-    const serviceTypes = [ this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener ];
-    const selectedService = this.sideDoorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener : this.hap.Service.LockMechanism;
+    // Remove any previous GarageDoorOpener service if it exists (from previous configuration).
+    const oldGarageDoorService = this.accessory.getServiceById(this.hap.Service.GarageDoorOpener, AccessReservedNames.LOCK_SIDE_DOOR);
 
-    for(const serviceType of serviceTypes) {
+    if(oldGarageDoorService) {
 
-      if(serviceType !== selectedService) {
-
-        const oldService = this.accessory.getServiceById(serviceType, AccessReservedNames.LOCK_SIDE_DOOR);
-
-        if(oldService) {
-
-          this.accessory.removeService(oldService);
-        }
-      }
+      this.accessory.removeService(oldGarageDoorService);
     }
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, selectedService, this.hints.hasSideDoor, AccessReservedNames.LOCK_SIDE_DOOR)) {
+    if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hints.hasSideDoor, AccessReservedNames.LOCK_SIDE_DOOR)) {
 
       return false;
     }
 
     // Acquire the service.
-    const service = acquireService(this.accessory, selectedService, this.accessoryName + " Side Door", AccessReservedNames.LOCK_SIDE_DOOR,
-      () => this.log.info("Configuring side door as %s service.", this.sideDoorServiceType));
+    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_SIDE_DOOR,
+      () => this.log.info("Configuring side door lock."));
 
     if(!service) {
 
@@ -1038,14 +1015,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Configure based on service type.
-    if(this.sideDoorServiceType === "GarageDoorOpener") {
-
-      this.configureGarageDoorService(service, true);
-    } else {
-
-      this.configureLockService(service, true);
-    }
+    // Configure the lock service.
+    this.configureLockService(service, true);
 
     // Initialize the lock.
     this._hkSideDoorLockState = -1;
@@ -1373,27 +1344,20 @@ export class AccessHub extends AccessDevice {
 
     const action = isLocking ? "lock" : "unlock";
 
-    this.log.info("hubSideDoorLockCommand called: isLocking=%s, sideDoorServiceType=%s, sideDoorLockDelayInterval=%s",
-      isLocking, this.sideDoorServiceType, this.sideDoorLockDelayInterval);
+    this.log.debug("hubSideDoorLockCommand called: isLocking=%s, lockDelayInterval=%s", isLocking, this.lockDelayInterval);
 
     // Only allow relocking if we are able to do so.
-    // Exception: GarageDoorOpener and Door service types always allow relocking (closing).
-    if((this.sideDoorLockDelayInterval === undefined) && isLocking && this.sideDoorServiceType === "Lock") {
+    if((this.lockDelayInterval === undefined) && isLocking) {
 
-      this.log.error("Unable to manually relock the side door when the lock relay is configured to the default settings. " +
-        "If using GarageDoorOpener service type, add 'Enable.Hub.SideDoor.ServiceType.GarageDoorOpener.%s' to your options.", this.uda.mac);
+      this.log.error("Unable to manually relock the side door when the lock relay is configured to the default settings.");
 
       return false;
     }
 
-    // For GarageDoorOpener, we always send unlock (trigger) regardless of isLocking.
-    // The gate motor determines direction based on current state.
-    const actualAction = this.sideDoorServiceType === "GarageDoorOpener" ? "unlock" : action;
-
     // If we're not online, we're done.
     if(!this.isOnline) {
 
-      this.log.error("Unable to %s the side door. Device is offline.", actualAction);
+      this.log.error("Unable to %s the side door. Device is offline.", action);
 
       return false;
     }
@@ -1528,7 +1492,7 @@ export class AccessHub extends AccessDevice {
 
       this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
 
-      if(this.hints.logSideDoorLock) {
+      if(this.hints.logLock) {
 
         this.log.info("Side door unlocked.");
       }
@@ -1538,7 +1502,7 @@ export class AccessHub extends AccessDevice {
 
         this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
 
-        if(this.hints.logSideDoorLock) {
+        if(this.hints.logLock) {
 
           this.log.info("Side door locked.");
         }
@@ -1595,7 +1559,7 @@ export class AccessHub extends AccessDevice {
   // Update door service state based on configured service type.
   private updateDoorServiceState(isSideDoor: boolean): void {
 
-    const serviceType = isSideDoor ? this.sideDoorServiceType : this.doorServiceType;
+    const serviceType = isSideDoor ? "Lock" : this.doorServiceType;
     const subtype = isSideDoor ? AccessReservedNames.LOCK_SIDE_DOOR : AccessReservedNames.DOOR_MAIN;
     const lockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
     const triggerSubtype = isSideDoor ? AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER : AccessReservedNames.SWITCH_LOCK_TRIGGER;
@@ -1664,18 +1628,8 @@ export class AccessHub extends AccessDevice {
     // Update the lock state.
     this._hkSideDoorLockState = value;
 
-    // For Lock service type, update the service. For GarageDoorOpener/Door, DPS events handle updates.
-    if(this.sideDoorServiceType === "Lock") {
-
-      this.updateDoorServiceState(true);
-    } else {
-
-      // Still update the lock trigger switch if enabled.
-      const triggerSubtype = AccessReservedNames.SWITCH_SIDEDOOR_LOCK_TRIGGER;
-
-      this.accessory.getServiceById(this.hap.Service.Switch, triggerSubtype)?.updateCharacteristic(this.hap.Characteristic.On,
-        value !== this.hap.Characteristic.LockCurrentState.SECURED);
-    }
+    // Update the lock service state.
+    this.updateDoorServiceState(true);
   }
 
   // Return the current state of the DPS on the hub.
@@ -2049,7 +2003,7 @@ export class AccessHub extends AccessDevice {
 
             this.controller.mqtt?.publish(this.id, "sidedoorlock", this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
 
-            if(this.hints.logSideDoorLock) {
+            if(this.hints.logLock) {
 
               this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
             }
@@ -2077,12 +2031,6 @@ export class AccessHub extends AccessDevice {
             if(this.hints.logDps) {
 
               this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-            }
-
-            // Update the side door GarageDoorOpener or Door service if configured.
-            if(this.sideDoorServiceType === "GarageDoorOpener") {
-
-              this.updateDoorServiceState(true);
             }
           }
         }
@@ -2272,7 +2220,7 @@ export class AccessHub extends AccessDevice {
 
                   this.controller.mqtt?.publish(this.id, "sidedoorlock", sideDoorLockValue);
 
-                  if(this.hints.logSideDoorLock) {
+                  if(this.hints.logLock) {
 
                     this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
                   }
@@ -2293,16 +2241,10 @@ export class AccessHub extends AccessDevice {
                   // Publish to MQTT.
                   this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
 
-                  // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-                  if(this.sideDoorServiceType === "GarageDoorOpener" || this.hints.logDps) {
+                  // Log DPS changes if logDps is enabled.
+                  if(this.hints.logDps) {
 
                     this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-                  }
-
-                  // Update side door GarageDoorOpener or Door service if configured.
-                  if(this.sideDoorServiceType === "GarageDoorOpener") {
-
-                    this.updateDoorServiceState(true);
                   }
                 }
               }
@@ -2408,7 +2350,7 @@ export class AccessHub extends AccessDevice {
 
               this.controller.mqtt?.publish(this.id, "sidedoorlock", sideDoorLockValue);
 
-              if(this.hints.logSideDoorLock) {
+              if(this.hints.logLock) {
 
                 this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
               }
@@ -2428,15 +2370,10 @@ export class AccessHub extends AccessDevice {
               // Publish to MQTT.
               this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
 
-              // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-              if(this.sideDoorServiceType === "GarageDoorOpener" || this.hints.logDps) {
+              // Log DPS changes if logDps is enabled.
+              if(this.hints.logDps) {
 
                 this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-              }
-
-              if(this.sideDoorServiceType === "GarageDoorOpener") {
-
-                this.updateDoorServiceState(true);
               }
             }
           }

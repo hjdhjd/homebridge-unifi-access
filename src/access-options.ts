@@ -86,8 +86,6 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: true, description: "Add a contact sensor accessory for the request to enter sensor.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Add a contact sensor accessory for the request to exit sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },
     { default: true, description: "Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices.", modelKey: ["UA Gate"], name: "SideDoor" },
-    { default: false, defaultValue: "Lock", description: "Set the HomeKit service type for the side door. Valid values are: Lock (default) or GarageDoorOpener.", modelKey: ["UA Gate"], name: "SideDoor.ServiceType" },
-    { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the side door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the side door lock relay will lock five seconds after unlocking.", modelKey: ["UA Gate"], name: "SideDoor.LockDelayInterval" },
     { default: false, description: "Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks.", modelKey: ["UA Gate"], name: "SideDoor.Lock.Trigger" }
   ],
 
@@ -99,8 +97,7 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: true, description: "Log door remote release events in Homebridge.", modelKey: ["UA Hub"], name: "REL" },
     { default: true, description: "Log door request to enter events in Homebridge.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Log door request to exit events in Homebridge.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },
-    { default: true, description: "Log lock events in Homebridge.", hasCapability: ["is_hub"], name: "Lock" },
-    { default: true, description: "Log side door lock events in Homebridge.", modelKey: ["UA Gate"], name: "SideDoorLock" }
+    { default: true, description: "Log lock events in Homebridge.", hasCapability: ["is_hub"], name: "Lock" }
   ]
 };
 /* eslint-enable @stylistic/max-len */
