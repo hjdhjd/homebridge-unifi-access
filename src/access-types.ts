@@ -12,6 +12,11 @@ export enum AccessReservedNames {
   CONTACT_REN = "ContactSensor.REN",
   CONTACT_REX = "ContactSensor.REX",
 
+  // Manage our door/lock types.
+  DOOR_MAIN = "Door.Main",
+  DOOR_SIDE = "Door.Side",
+  LOCK_SIDE_DOOR = "Lock.SideDoor",
+
   // Manage our switch types.
   SWITCH_ACCESSMETHOD_FACE = "AccessMethod.Face",
   SWITCH_ACCESSMETHOD_HAND = "AccessMethod.Hand",
@@ -21,6 +26,7 @@ export enum AccessReservedNames {
   SWITCH_ACCESSMETHOD_QR = "AccessMethod.QR",
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
   SWITCH_LOCK_TRIGGER = "LockTrigger",
+  SWITCH_SIDEDOOR_LOCK_TRIGGER = "SideDoorLockTrigger",
   SWITCH_MOTION_SENSOR = "MotionSensorSwitch",
   SWITCH_MOTION_TRIGGER = "MotionSensorTrigger"
 }

@@ -5,7 +5,7 @@
 import type { API, HAP, Service } from "homebridge";
 import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
 import { type HomebridgePluginLogging, sanitizeName } from "homebridge-plugin-utils";
-import type { AccessController} from "./access-controller.js";
+import type { AccessController } from "./access-controller.js";
 import type { AccessDevice } from "./access-device.js";
 import type { AccessPlatform } from "./access-platform.js";
 import { AccessReservedNames } from "./access-types.js";
@@ -23,7 +23,7 @@ export class AccessEvents extends EventEmitter {
   private platform: AccessPlatform;
   private udaApi: AccessApi;
   private udaDeviceState: { [index: string]: AccessDeviceConfig };
-  private udaUpdatesHandler:  ((packet: AccessEventPacket) => void) | null;
+  private udaUpdatesHandler: ((packet: AccessEventPacket) => void) | null;
   private unsupportedDevices: { [index: string]: boolean };
 
   // Initialize an instance of our Access events handler.
