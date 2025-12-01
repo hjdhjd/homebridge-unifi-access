@@ -118,6 +118,10 @@ type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 // Valid door service types.
 type DoorServiceType = "Lock" | "GarageDoorOpener";
 
+// Constants for timing.
+const AUTO_LOCK_DELAY_MS = 5000;
+const GATE_TRANSITION_COOLDOWN_MS = 5000;
+
 export class AccessHub extends AccessDevice {
 
   private _hkDpsState: CharacteristicValue;
@@ -212,6 +216,34 @@ export class AccessHub extends AccessDevice {
         // Other hubs default to Lock.
         return this.uda.device_type === "UGT" ? "GarageDoorOpener" : "Lock";
     }
+  }
+
+  // Convert lock string value to HomeKit LockCurrentState.
+  private toLockState(lockValue: "locked" | "unlocked" | "lock" | "unlock"): CharacteristicValue {
+
+    return (lockValue === "unlocked" || lockValue === "unlock") ?
+      this.hap.Characteristic.LockCurrentState.UNSECURED :
+      this.hap.Characteristic.LockCurrentState.SECURED;
+  }
+
+  // Convert DPS string value to HomeKit ContactSensorState.
+  private toDpsState(dpsValue: "open" | "close"): CharacteristicValue {
+
+    return dpsValue === "open" ?
+      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
+      this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
+  }
+
+  // Check if a lock state represents "locked".
+  private isLocked(state: CharacteristicValue): boolean {
+
+    return state === this.hap.Characteristic.LockCurrentState.SECURED;
+  }
+
+  // Check if a DPS state represents "closed" (contact detected).
+  private isClosed(state: CharacteristicValue): boolean {
+
+    return state === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
   }
 
   // Discover main and side door location IDs for UGT devices.
@@ -712,14 +744,12 @@ export class AccessHub extends AccessDevice {
 
       // Set a transition cooldown to prevent WebSocket events from immediately reverting the door state.
       // This gives the gate time to physically move before we accept DPS updates.
-      const transitionCooldownMs = 5000;
-
       if(isSideDoor) {
 
-        this.sideDoorGateTransitionUntil = Date.now() + transitionCooldownMs;
+        this.sideDoorGateTransitionUntil = Date.now() + GATE_TRANSITION_COOLDOWN_MS;
       } else {
 
-        this.gateTransitionUntil = Date.now() + transitionCooldownMs;
+        this.gateTransitionUntil = Date.now() + GATE_TRANSITION_COOLDOWN_MS;
       }
 
       // Immediately show transitional state (Opening/Closing) while the door moves.
@@ -1072,24 +1102,29 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Utility function to execute lock and unlock actions on a hub.
-  private async hubLockCommand(isLocking: boolean): Promise<boolean> {
+  // Unified utility function to execute lock and unlock actions on a hub door.
+  private async hubDoorLockCommand(isLocking: boolean, isSideDoor: boolean): Promise<boolean> {
 
     const action = isLocking ? "lock" : "unlock";
+    const doorName = isSideDoor ? "side door" : "main door";
+    const doorId = isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId;
 
     // Only allow relocking if we are able to do so.
-    // Exception: GarageDoorOpener and Door service types always allow relocking (closing).
-    if((this.lockDelayInterval === undefined) && isLocking && this.doorServiceType === "Lock") {
+    // Exception: GarageDoorOpener service type always allows relocking (closing) for main door.
+    if((this.lockDelayInterval === undefined) && isLocking) {
 
-      this.log.error("Unable to manually relock when the lock relay is configured to the default settings.");
+      if(isSideDoor || this.doorServiceType === "Lock") {
 
-      return false;
+        this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", doorName);
+
+        return false;
+      }
     }
 
     // If we're not online, we're done.
     if(!this.isOnline) {
 
-      this.log.error("Unable to %s. Device is offline.", action);
+      this.log.error("Unable to %s the %s. Device is offline.", action, doorName);
 
       return false;
     }
@@ -1097,15 +1132,15 @@ export class AccessHub extends AccessDevice {
     // For UA Gate (UGT), use the location-based unlock API since the device API is not supported.
     if(this.uda.device_type === "UGT") {
 
-      if(!this.mainDoorLocationId) {
+      if(!doorId) {
 
-        this.log.error("Unable to %s. Main door ID not discovered for UA Gate.", action);
+        this.log.error("Unable to %s. %s ID not discovered for UA Gate.", action, isSideDoor ? "Side door" : "Main door");
 
         return false;
       }
 
-      // Execute the action using the location endpoint (same as the library's unlock method).
-      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + this.mainDoorLocationId + "/unlock";
+      // Execute the action using the location endpoint.
+      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId + "/unlock";
 
       const response = await this.controller.udaApi.retrieve(endpoint, {
 
@@ -1115,29 +1150,50 @@ export class AccessHub extends AccessDevice {
 
       if(!this.controller.udaApi.responseOk(response?.statusCode)) {
 
-        this.log.error("Unable to %s.", action);
+        this.log.error("Unable to %s the %s.", action, doorName);
 
         return false;
       }
 
       // When unlocking from HomeKit, the controller doesn't emit events back via WebSocket.
-      // Manually update the state and schedule the auto-lock after 5 seconds.
+      // Manually update the state and schedule the auto-lock.
       if(!isLocking) {
 
-        this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+        if(isSideDoor) {
 
-        // The gate auto-locks after ~5 seconds (default Access behavior).
-        setTimeout(() => {
+          this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
 
-          this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-        }, 5000);
+          if(this.hints.logLock) {
+
+            this.log.info("Side door unlocked.");
+          }
+
+          setTimeout(() => {
+
+            this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+
+            if(this.hints.logLock) {
+
+              this.log.info("Side door locked.");
+            }
+          }, AUTO_LOCK_DELAY_MS);
+        } else {
+
+          this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+
+          setTimeout(() => {
+
+            this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+          }, AUTO_LOCK_DELAY_MS);
+        }
       }
 
       return true;
     }
 
-    // For other hub types, use the standard device unlock API.
-    // For GarageDoorOpener/Door, use 0 delay for immediate lock when closing.
+    // For other hub types (non-UGT), use the standard device unlock API.
+    // Side door is only available on UGT, so this path is only for main door.
+    // For GarageDoorOpener, use 0 delay for immediate lock when closing.
     const delayInterval = this.doorServiceType !== "Lock" ? 0 : this.lockDelayInterval;
 
     // Execute the action.
@@ -1151,75 +1207,16 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Utility function to execute side door lock and unlock actions on a UA Gate hub.
+  // Wrapper for main door lock command (for backwards compatibility).
+  private async hubLockCommand(isLocking: boolean): Promise<boolean> {
+
+    return this.hubDoorLockCommand(isLocking, false);
+  }
+
+  // Wrapper for side door lock command (for backwards compatibility).
   private async hubSideDoorLockCommand(isLocking: boolean): Promise<boolean> {
 
-    const action = isLocking ? "lock" : "unlock";
-
-    // Only allow relocking if we are able to do so.
-    if((this.lockDelayInterval === undefined) && isLocking) {
-
-      this.log.error("Unable to manually relock the side door when the lock relay is configured to the default settings.");
-
-      return false;
-    }
-
-    // If we're not online, we're done.
-    if(!this.isOnline) {
-
-      this.log.error("Unable to %s the side door. Device is offline.", action);
-
-      return false;
-    }
-
-    // Use the already-discovered side door location ID.
-    if(!this.sideDoorLocationId) {
-
-      this.log.error("Unable to %s the side door. Side door configuration not found.", action);
-
-      return false;
-    }
-
-    // Execute the action using the location endpoint.
-    const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + this.sideDoorLocationId + "/unlock";
-
-    const response = await this.controller.udaApi.retrieve(endpoint, {
-
-      body: JSON.stringify({}),
-      method: "PUT"
-    });
-
-    if(!this.controller.udaApi.responseOk(response?.statusCode)) {
-
-      this.log.error("Unable to %s the side door.", action);
-
-      return false;
-    }
-
-    // When unlocking from HomeKit, the controller doesn't emit events back via WebSocket.
-    // Manually update the state and schedule the auto-lock after 5 seconds.
-    if(!isLocking) {
-
-      this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-
-      if(this.hints.logLock) {
-
-        this.log.info("Side door unlocked.");
-      }
-
-      // The side door auto-locks after ~5 seconds (default Access behavior).
-      setTimeout(() => {
-
-        this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-
-        if(this.hints.logLock) {
-
-          this.log.info("Side door locked.");
-        }
-      }, 5000);
-    }
-
-    return true;
+    return this.hubDoorLockCommand(isLocking, true);
   }
 
   // Return the current HomeKit lock state that we are tracking for this hub.
@@ -1586,8 +1583,144 @@ export class AccessHub extends AccessDevice {
     return Array.isArray(capability) ? capability.some(c => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability);
   }
 
-  // Handle hub-related events.
-  private eventHandler(packet: AccessEventPacket): void {
+  // Update door state from location data (lock and DPS).
+  private updateDoorFromLocationState(
+    doorState: { lock: "locked" | "unlocked"; dps: "open" | "close" },
+    isSideDoor: boolean
+  ): void {
+
+    const newLockState = this.toLockState(doorState.lock);
+    const newDpsState = this.toDpsState(doorState.dps);
+    const doorName = isSideDoor ? "Side door" : "";
+
+    // Update lock state.
+    const currentLockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
+
+    if(newLockState !== currentLockState) {
+
+      if(isSideDoor) {
+
+        this.hkSideDoorLockState = newLockState;
+        this.controller.mqtt?.publish(this.id, "sidedoorlock", this.isLocked(newLockState) ? "true" : "false");
+
+        if(this.hints.logLock) {
+
+          this.log.info("%s %s.", doorName, this.isLocked(newLockState) ? "locked" : "unlocked");
+        }
+      } else {
+
+        this.hkLockState = newLockState;
+        this.controller.mqtt?.publish(this.id, "lock", this.isLocked(newLockState) ? "true" : "false");
+
+        if(this.hints.logLock) {
+
+          this.log.info(this.isLocked(newLockState) ? "Locked." : "Unlocked.");
+        }
+      }
+    }
+
+    // Update DPS state.
+    const currentDpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
+
+    if(newDpsState !== currentDpsState) {
+
+      const contactDetected = this.isClosed(newDpsState);
+
+      if(isSideDoor) {
+
+        this._hkSideDoorDpsState = newDpsState;
+        this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
+
+        if(this.hints.logDps) {
+
+          this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
+        }
+      } else {
+
+        this.hkDpsState = newDpsState;
+        this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
+
+        if(this.doorServiceType === "GarageDoorOpener" || this.hints.logDps) {
+
+          this.log.info("Door position sensor %s.", contactDetected ? "closed" : "open");
+        }
+
+        if(this.doorServiceType === "GarageDoorOpener") {
+
+          this.updateDoorServiceState(false);
+        }
+      }
+    }
+  }
+
+  // Handle remote unlock events.
+  private handleRemoteUnlock(packet: AccessEventPacket): void {
+
+    // For UGT devices, determine which door was unlocked based on the event_object_id.
+    if(this.uda.device_type === "UGT") {
+
+      const eventDoorId = packet.event_object_id;
+      const isSideDoor = this.sideDoorLocationId && eventDoorId === this.sideDoorLocationId;
+      const isMainDoor = this.mainDoorLocationId && eventDoorId === this.mainDoorLocationId;
+
+      if(!isSideDoor && !isMainDoor) {
+
+        return;
+      }
+
+      const doorName = isSideDoor ? "Side door" : "Main door";
+      const mqttTopic = isSideDoor ? "sidedoorlock" : "lock";
+
+      // Set unlocked state.
+      if(isSideDoor) {
+
+        this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+      } else {
+
+        this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+      }
+
+      this.controller.mqtt?.publish(this.id, mqttTopic, "false");
+
+      if(this.hints.logLock) {
+
+        this.log.info("%s unlocked via remote_unlock event.", doorName);
+      }
+
+      // Auto-lock after delay.
+      setTimeout(() => {
+
+        if(isSideDoor) {
+
+          this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+        } else {
+
+          this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+        }
+
+        this.controller.mqtt?.publish(this.id, mqttTopic, "true");
+
+        if(this.hints.logLock) {
+
+          this.log.info("%s auto-locked.", doorName);
+        }
+      }, AUTO_LOCK_DELAY_MS);
+
+    } else {
+
+      // Non-UGT devices: default behavior.
+      this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+      this.controller.mqtt?.publish(this.id, "lock", "false");
+
+      if(this.hints.logLock) {
+
+        this.log.info("Unlocked.");
+      }
+    }
+  }
+
+  // Handle device update events (v1 API).
+  private handleDeviceUpdate(packet: AccessEventPacket): void {
 
     const terminalInputs = [
 
@@ -1597,501 +1730,293 @@ export class AccessHub extends AccessDevice {
       { input: "Rex", label: "Request to exit sensor", topic: "rex" }
     ];
 
+    // Process a lock update event if our state has changed.
+    // Skip for UGT devices since we handle state manually (controller doesn't emit proper events).
+    if(this.uda.device_type !== "UGT" && this.hubLockState !== this.hkLockState) {
+
+      this.hkLockState = this.hubLockState;
+      this.controller.mqtt?.publish(this.id, "lock", this.isLocked(this.hkLockState) ? "true" : "false");
+
+      if(this.hints.logLock) {
+
+        this.log.info(this.isLocked(this.hkLockState) ? "Locked." : "Unlocked.");
+      }
+    }
+
+    // Process a side door lock update event if our state has changed (UA Gate only).
+    // Skip for UGT since polling handles state updates.
+    if(this.hints.hasSideDoor && this.uda.device_type !== "UGT") {
+
+      const currentHkState = this.hkSideDoorLockState;
+      const newHubState = this.hubSideDoorLockState;
+
+      if(newHubState !== currentHkState) {
+
+        this.hkSideDoorLockState = newHubState;
+        this.controller.mqtt?.publish(this.id, "sidedoorlock", this.isLocked(this.hkSideDoorLockState) ? "true" : "false");
+
+        if(this.hints.logLock) {
+
+          this.log.info("Side door %s.", this.isLocked(this.hkSideDoorLockState) ? "locked" : "unlocked");
+        }
+      }
+    }
+
+    // Process a side door DPS update event if our state has changed (UA Gate only).
+    // Skip for UGT since polling handles state updates.
+    if(this.hints.hasSideDoor && this.hints.hasWiringDps && this.uda.device_type !== "UGT") {
+
+      const newSideDoorDpsState = this.hubSideDoorDpsState;
+
+      if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
+
+        this._hkSideDoorDpsState = newSideDoorDpsState;
+        const contactDetected = this.isClosed(this._hkSideDoorDpsState);
+
+        this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
+
+        if(this.hints.logDps) {
+
+          this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
+        }
+      }
+    }
+
+    // Process any terminal input update events if our state has changed.
+    for(const { input, topic, label } of terminalInputs) {
+
+      const hasKey = ("hasWiring" + input) as HasWiringHintKey;
+      const hkKey = ("hk" + input + "State") as HkStateKey;
+      const hubKey = ("hub" + input + "State") as HubStateKey;
+      const logKey = ("log" + input) as LogHintKey;
+      const wiredKey = ("is" + input + "Wired") as WiredKey;
+
+      if(this.hints[hasKey] && this[hubKey] !== this[hkKey]) {
+
+        this[hkKey] = this[hubKey];
+
+        if(this[wiredKey]) {
+
+          const contactDetected = this.isClosed(this[hkKey]);
+
+          this.controller.mqtt?.publish(this.id, topic, contactDetected ? "false" : "true");
+
+          if(this.hints[logKey]) {
+
+            this.log.info("%s %s.", label, contactDetected ? "closed" : "open");
+          }
+        }
+
+        // When DPS state changes, update the GarageDoorOpener or Door service state for the main door only.
+        if(input === "Dps" && this.doorServiceType === "GarageDoorOpener") {
+
+          this.updateDoorServiceState(false);
+        }
+      }
+    }
+
+    // Process any changes to terminal input configuration.
+    if((packet.data as AccessDeviceConfig).extensions?.[0]?.target_config && (this.uda.display_model === "UA Ultra")) {
+
+      this.checkUltraInputs();
+      this.configureTerminalInputs();
+    }
+
+    // Process any changes to our online status.
+    if((packet.data as AccessDeviceConfig).is_online !== undefined) {
+
+      for(const sensor of Object.keys(AccessReservedNames).filter(key => key.startsWith("CONTACT_"))) {
+
+        this.accessory.getServiceById(this.hap.Service.ContactSensor, AccessReservedNames[sensor as keyof typeof AccessReservedNames])?.
+          updateCharacteristic(this.hap.Characteristic.StatusActive, !!(packet.data as AccessDeviceConfig).is_online);
+      }
+    }
+  }
+
+  // Handle device update v2 events.
+  private handleDeviceUpdateV2(packet: AccessEventPacket): void {
+
+    const data = packet.data as AccessEventDeviceUpdateV2;
+
+    // Process access method updates.
+    if(data.access_method) {
+
+      const accessMethodData = data.access_method as { [K in AccessMethodKey]?: "yes" | "no" };
+
+      for(const [ key, value ] of Object.entries(accessMethodData) as [AccessMethodKey, "yes" | "no"][]) {
+
+        const accessMethod = accessMethods.find(entry => entry.key === key);
+
+        if(accessMethod) {
+
+          this.accessory.getServiceById(this.hap.Service.Switch, accessMethod.subtype)?.updateCharacteristic(this.hap.Characteristic.On, value === "yes");
+        }
+      }
+    }
+
+    // Process location_states for UGT devices - this contains lock state per door.
+    if(data.location_states && this.uda.device_type === "UGT") {
+
+      const locationStates = data.location_states;
+
+      // Process main door state.
+      const mainDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port1");
+      const mainDoorId = mainDoorExtension?.target_value ?? this.mainDoorLocationId;
+
+      if(mainDoorId) {
+
+        const mainDoorState = locationStates.find(state => state.location_id === mainDoorId);
+
+        if(mainDoorState) {
+
+          this.updateDoorFromLocationState(mainDoorState, false);
+        }
+      }
+
+      // Process side door state.
+      if(this.hints.hasSideDoor) {
+
+        const sideDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port2");
+        const sideDoorId = sideDoorExtension?.target_value ?? this.sideDoorLocationId;
+
+        if(sideDoorId) {
+
+          const sideDoorState = locationStates.find(state => state.location_id === sideDoorId);
+
+          if(sideDoorState) {
+
+            this.updateDoorFromLocationState(sideDoorState, true);
+          }
+        }
+      }
+    }
+  }
+
+  // Handle location update events (v2 API).
+  private handleLocationUpdate(packet: AccessEventPacket): void {
+
+    // Only process for UGT devices.
+    if(this.uda.device_type !== "UGT") {
+
+      return;
+    }
+
+    const locationData = packet.data as {
+      id: string;
+      name: string;
+      state?: {
+        lock: "locked" | "unlocked";
+        dps: "open" | "close";
+        dps_connected?: boolean;
+        enable?: boolean;
+        is_unavailable?: boolean;
+      };
+    };
+
+    if(!locationData.state) {
+
+      return;
+    }
+
+    const locationId = locationData.id;
+    const isMainDoor = locationId === this.mainDoorLocationId;
+    const isSideDoor = locationId === this.sideDoorLocationId;
+
+    if(isMainDoor) {
+
+      this.updateDoorFromLocationState(locationData.state, false);
+    } else if(isSideDoor && this.hints.hasSideDoor) {
+
+      this.updateDoorFromLocationState(locationData.state, true);
+    }
+  }
+
+  // Handle doorbell ring events.
+  private handleDoorbellRing(packet: AccessEventPacket): void {
+
+    if(((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
+
+      return;
+    }
+
+    this.doorbellRingRequestId = (packet.data as AccessEventDoorbellRing).request_id;
+
+    // Trigger the doorbell event in HomeKit.
+    this.accessory.getService(this.hap.Service.Doorbell)?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
+      ?.sendEventNotification(this.hap.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS);
+
+    // Update our doorbell trigger, if needed.
+    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
+
+    // Publish to MQTT.
+    this.controller.mqtt?.publish(this.id, "doorbell", "true");
+
+    if(this.hints.logDoorbell) {
+
+      this.log.info("Doorbell ring detected.");
+    }
+  }
+
+  // Handle doorbell cancel events.
+  private handleDoorbellCancel(packet: AccessEventPacket): void {
+
+    if(this.doorbellRingRequestId !== (packet.data as AccessEventDoorbellCancel).remote_call_request_id) {
+
+      return;
+    }
+
+    this.doorbellRingRequestId = null;
+
+    // Update our doorbell trigger, if needed.
+    this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
+
+    // Publish to MQTT.
+    this.controller.mqtt?.publish(this.id, "doorbell", "false");
+
+    if(this.hints.logDoorbell) {
+
+      this.log.info("Doorbell ring cancelled.");
+    }
+  }
+
+  // Handle hub-related events.
+  private eventHandler(packet: AccessEventPacket): void {
+
     switch(packet.event) {
 
       case "access.data.device.remote_unlock":
 
-        // For UGT devices, determine which door was unlocked based on the event_object_id.
-        if(this.uda.device_type === "UGT") {
-
-          const eventDoorId = packet.event_object_id;
-
-          if(this.sideDoorLocationId && eventDoorId === this.sideDoorLocationId) {
-
-            // Side door unlock event.
-            this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-            this.controller.mqtt?.publish(this.id, "sidedoorlock", "false");
-
-            if(this.hints.logLock) {
-
-              this.log.info("Side door unlocked via remote_unlock event.");
-            }
-
-            // Auto-lock after 5 seconds.
-            setTimeout(() => {
-
-              this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-              this.controller.mqtt?.publish(this.id, "sidedoorlock", "true");
-
-              if(this.hints.logLock) {
-
-                this.log.info("Side door auto-locked.");
-              }
-            }, 5000);
-
-          } else if(this.mainDoorLocationId && eventDoorId === this.mainDoorLocationId) {
-
-            // Main door unlock event.
-            this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-            this.controller.mqtt?.publish(this.id, "lock", "false");
-
-            if(this.hints.logLock) {
-
-              this.log.info("Main door unlocked via remote_unlock event.");
-            }
-
-            // Auto-lock after 5 seconds.
-            setTimeout(() => {
-
-              this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-              this.controller.mqtt?.publish(this.id, "lock", "true");
-
-              if(this.hints.logLock) {
-
-                this.log.info("Main door auto-locked.");
-              }
-            }, 5000);
-
-          }
-
-        } else {
-
-          // Non-UGT devices: default behavior.
-          this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-          this.controller.mqtt?.publish(this.id, "lock", "false");
-
-          if(this.hints.logLock) {
-
-            this.log.info("Unlocked.");
-          }
-        }
+        this.handleRemoteUnlock(packet);
 
         break;
 
       case "access.data.device.update":
 
-        // Process a lock update event if our state has changed.
-        // Skip for UGT devices since we handle state manually (controller doesn't emit proper events).
-        if(this.uda.device_type !== "UGT" && this.hubLockState !== this.hkLockState) {
-
-          this.hkLockState = this.hubLockState;
-
-          this.controller.mqtt?.publish(this.id, "lock", this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
-
-          if(this.hints.logLock) {
-
-            this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
-          }
-        }
-
-        // Process a side door lock update event if our state has changed (UA Gate only).
-        // Skip for UGT since polling handles state updates.
-        if(this.hints.hasSideDoor && this.uda.device_type !== "UGT") {
-
-          const currentHkState = this.hkSideDoorLockState;
-          const newHubState = this.hubSideDoorLockState;
-
-          if(newHubState !== currentHkState) {
-
-            this.hkSideDoorLockState = newHubState;
-
-            this.controller.mqtt?.publish(this.id, "sidedoorlock", this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
-
-            if(this.hints.logLock) {
-
-              this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
-            }
-          }
-        }
-
-        // Process a side door DPS update event if our state has changed (UA Gate only).
-        // Skip for UGT since polling handles state updates.
-        if(this.hints.hasSideDoor && this.hints.hasWiringDps && this.uda.device_type !== "UGT") {
-
-          const newSideDoorDpsState = this.hubSideDoorDpsState;
-
-          if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
-
-            this._hkSideDoorDpsState = newSideDoorDpsState;
-
-            const contactDetected = this._hkSideDoorDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-            this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
-
-            if(this.hints.logDps) {
-
-              this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-            }
-          }
-        }
-
-        // Process any terminal input update events if our state has changed.
-        for(const { input, topic, label } of terminalInputs) {
-
-          const hasKey = ("hasWiring" + input) as HasWiringHintKey;
-          const hkKey = ("hk" + input + "State") as HkStateKey;
-          const hubKey = ("hub" + input + "State") as HubStateKey;
-          const logKey = ("log" + input) as LogHintKey;
-          const wiredKey = ("is" + input + "Wired") as WiredKey;
-
-          if(this.hints[hasKey] && this[hubKey] !== this[hkKey]) {
-
-            this[hkKey] = this[hubKey];
-
-            if(this[wiredKey]) {
-
-              const contactDetected = this[hkKey] === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-              this.controller.mqtt?.publish(this.id, topic, contactDetected ? "false" : "true");
-
-              if(this.hints[logKey]) {
-
-                this.log.info(label + " " + (contactDetected ? "closed" : "open") + ".");
-              }
-            }
-
-            // When DPS state changes, update the GarageDoorOpener or Door service state for the main door only.
-            // Note: Side door has its own DPS (input_ped_dps) which is not tracked in terminalInputs.
-            if(input === "Dps") {
-
-              if(this.doorServiceType === "GarageDoorOpener") {
-
-                this.updateDoorServiceState(false);
-              }
-            }
-          }
-        }
-
-        // Process any changes to terminal input configuration.
-        if((packet.data as AccessDeviceConfig).extensions?.[0]?.target_config && (this.uda.display_model === "UA Ultra")) {
-
-          // Ensure we sync our state with HomeKit.
-          this.checkUltraInputs();
-          this.configureTerminalInputs();
-        }
-
-        // Process any changes to our online status.
-        if((packet.data as AccessDeviceConfig).is_online !== undefined) {
-
-          for(const sensor of Object.keys(AccessReservedNames).filter(key => key.startsWith("CONTACT_"))) {
-
-            this.accessory.getServiceById(this.hap.Service.ContactSensor, AccessReservedNames[sensor as keyof typeof AccessReservedNames])?.
-              updateCharacteristic(this.hap.Characteristic.StatusActive, !!(packet.data as AccessDeviceConfig).is_online);
-          }
-        }
+        this.handleDeviceUpdate(packet);
 
         break;
 
       case "access.data.v2.device.update":
 
-        if((packet.data as AccessEventDeviceUpdateV2).access_method) {
-
-          const accessMethodData = (packet.data as AccessEventDeviceUpdateV2).access_method as { [K in AccessMethodKey]?: "yes" | "no" };
-
-          // Process access method updates.
-          for(const [ key, value ] of Object.entries(accessMethodData) as [AccessMethodKey, "yes" | "no"][]) {
-
-            const accessMethod = accessMethods.find(entry => entry.key === key);
-
-            if(!accessMethod) {
-
-              continue;
-            }
-
-            // Update any access method switches we have enabled with the current value.
-            this.accessory.getServiceById(this.hap.Service.Switch, accessMethod.subtype)?.updateCharacteristic(this.hap.Characteristic.On, value === "yes");
-          }
-        }
-
-        // Process location_states for UGT devices - this contains lock state per door.
-        if((packet.data as AccessEventDeviceUpdateV2).location_states && this.uda.device_type === "UGT") {
-
-          const locationStates = (packet.data as AccessEventDeviceUpdateV2).location_states;
-
-          // Find the main door location state.
-          // Try port1 extension first, then fall back to discovered main door ID.
-          const mainDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port1");
-          const mainDoorId = mainDoorExtension?.target_value ?? this.mainDoorLocationId;
-
-          if(mainDoorId) {
-
-            const mainDoorState = locationStates?.find(state => state.location_id === mainDoorId);
-
-            if(mainDoorState) {
-
-              const newLockState = mainDoorState.lock === "unlocked" ?
-                this.hap.Characteristic.LockCurrentState.UNSECURED :
-                this.hap.Characteristic.LockCurrentState.SECURED;
-
-              if(newLockState !== this.hkLockState) {
-
-                this.hkLockState = newLockState;
-                this.controller.mqtt?.publish(this.id, "lock", this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
-
-                if(this.hints.logLock) {
-
-                  this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
-                }
-              }
-
-              // Also update DPS state.
-              // For UGT devices, location_states provides DPS from the gate controller itself,
-              // so we can update GarageDoorOpener/Door services even without hasWiringDps.
-              const newDpsState = mainDoorState.dps === "open" ?
-                this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-                this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-              if(newDpsState !== this.hkDpsState) {
-
-                this.hkDpsState = newDpsState;
-
-                const contactDetected = this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-                // Publish to MQTT.
-                this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
-
-                // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-                if(this.doorServiceType === "GarageDoorOpener" || this.hints.logDps) {
-
-                  this.log.info("Door position sensor %s.", contactDetected ? "closed" : "open");
-                }
-
-                // Update GarageDoorOpener or Door service if configured.
-                if(this.doorServiceType === "GarageDoorOpener") {
-
-                  this.updateDoorServiceState(false);
-                }
-              }
-            }
-          }
-
-          // Find the side door location state.
-          // Try port2 extension first, then fall back to discovered side door ID.
-          if(this.hints.hasSideDoor) {
-
-            const sideDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port2");
-            const sideDoorId = sideDoorExtension?.target_value ?? this.sideDoorLocationId;
-
-            if(sideDoorId) {
-
-              const sideDoorState = locationStates?.find(state => state.location_id === sideDoorId);
-
-              if(sideDoorState) {
-
-                const newSideDoorLockState = sideDoorState.lock === "unlocked" ?
-                  this.hap.Characteristic.LockCurrentState.UNSECURED :
-                  this.hap.Characteristic.LockCurrentState.SECURED;
-
-                if(newSideDoorLockState !== this.hkSideDoorLockState) {
-
-                  this.hkSideDoorLockState = newSideDoorLockState;
-                  const sideDoorLockValue = this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false";
-
-                  this.controller.mqtt?.publish(this.id, "sidedoorlock", sideDoorLockValue);
-
-                  if(this.hints.logLock) {
-
-                    this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
-                  }
-                }
-
-                // Also update side door DPS state.
-                // For UGT devices, location_states provides DPS from the gate controller itself.
-                const newSideDoorDpsState = sideDoorState.dps === "open" ?
-                  this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-                  this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-                if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
-
-                  this._hkSideDoorDpsState = newSideDoorDpsState;
-
-                  const contactDetected = this._hkSideDoorDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-                  // Publish to MQTT.
-                  this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
-
-                  // Log DPS changes if logDps is enabled.
-                  if(this.hints.logDps) {
-
-                    this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-                  }
-                }
-              }
-            }
-          }
-        }
+        this.handleDeviceUpdateV2(packet);
 
         break;
 
       case "access.data.v2.location.update":
 
-        // Process location update events for UGT devices.
-        // These events contain the state for a single door location.
-        if(this.uda.device_type === "UGT") {
-
-          const locationData = packet.data as {
-            id: string;
-            name: string;
-            state?: {
-              lock: "locked" | "unlocked";
-              dps: "open" | "close";
-              dps_connected?: boolean;
-              enable?: boolean;
-              is_unavailable?: boolean;
-            };
-          };
-
-          if(!locationData.state) {
-
-            break;
-          }
-
-          const locationId = locationData.id;
-          const isMainDoor = locationId === this.mainDoorLocationId;
-          const isSideDoor = locationId === this.sideDoorLocationId;
-
-          if(!isMainDoor && !isSideDoor) {
-
-            break;
-          }
-
-          if(isMainDoor) {
-
-            // Update main door lock state.
-            const newLockState = locationData.state.lock === "unlocked" ?
-              this.hap.Characteristic.LockCurrentState.UNSECURED :
-              this.hap.Characteristic.LockCurrentState.SECURED;
-
-            if(newLockState !== this.hkLockState) {
-
-              this.hkLockState = newLockState;
-              this.controller.mqtt?.publish(this.id, "lock", this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false");
-
-              if(this.hints.logLock) {
-
-                this.log.info(this.hkLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "Locked." : "Unlocked.");
-              }
-            }
-
-            // Update main door DPS state.
-            const newDpsState = locationData.state.dps === "open" ?
-              this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-              this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-            if(newDpsState !== this.hkDpsState) {
-
-              this.hkDpsState = newDpsState;
-
-              const contactDetected = this.hkDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-              // Publish to MQTT.
-              this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
-
-              // Log DPS changes for GarageDoorOpener/Door or if logDps is enabled.
-              if(this.doorServiceType === "GarageDoorOpener" || this.hints.logDps) {
-
-                this.log.info("Door position sensor " + (contactDetected ? "closed" : "open") + ".");
-              }
-
-              if(this.doorServiceType === "GarageDoorOpener") {
-
-                this.updateDoorServiceState(false);
-              }
-            }
-          }
-
-          if(isSideDoor && this.hints.hasSideDoor) {
-
-            // Update side door lock state.
-            const newSideDoorLockState = locationData.state.lock === "unlocked" ?
-              this.hap.Characteristic.LockCurrentState.UNSECURED :
-              this.hap.Characteristic.LockCurrentState.SECURED;
-
-            if(newSideDoorLockState !== this.hkSideDoorLockState) {
-
-              this.hkSideDoorLockState = newSideDoorLockState;
-              const sideDoorLockValue = this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "true" : "false";
-
-              this.controller.mqtt?.publish(this.id, "sidedoorlock", sideDoorLockValue);
-
-              if(this.hints.logLock) {
-
-                this.log.info("Side door " + (this.hkSideDoorLockState === this.hap.Characteristic.LockCurrentState.SECURED ? "locked." : "unlocked."));
-              }
-            }
-
-            // Update side door DPS state.
-            const newSideDoorDpsState = locationData.state.dps === "open" ?
-              this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-              this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-            if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
-
-              this._hkSideDoorDpsState = newSideDoorDpsState;
-
-              const contactDetected = this._hkSideDoorDpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-              // Publish to MQTT.
-              this.controller.mqtt?.publish(this.id, "sidedoordps", contactDetected ? "false" : "true");
-
-              // Log DPS changes if logDps is enabled.
-              if(this.hints.logDps) {
-
-                this.log.info("Side door position sensor " + (contactDetected ? "closed" : "open") + ".");
-              }
-            }
-          }
-        }
+        this.handleLocationUpdate(packet);
 
         break;
 
       case "access.remote_view":
 
-        // Process an Access ring event if we're the intended target.
-        if(((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
-
-          break;
-        }
-
-        this.doorbellRingRequestId = (packet.data as AccessEventDoorbellRing).request_id;
-
-        // Trigger the doorbell event in HomeKit.
-        this.accessory.getService(this.hap.Service.Doorbell)?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
-          ?.sendEventNotification(this.hap.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS);
-
-        // Update our doorbell trigger, if needed.
-        this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
-
-        // Publish to MQTT, if configured to do so.
-        this.controller.mqtt?.publish(this.id, "doorbell", "true");
-
-        if(this.hints.logDoorbell) {
-
-          this.log.info("Doorbell ring detected.");
-        }
+        this.handleDoorbellRing(packet);
 
         break;
 
       case "access.remote_view.change":
 
-        // Process the cancellation of an Access ring event if we're the intended target.
-        if(this.doorbellRingRequestId !== (packet.data as AccessEventDoorbellCancel).remote_call_request_id) {
-
-          break;
-        }
-
-        this.doorbellRingRequestId = null;
-
-        // Update our doorbell trigger, if needed.
-        this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
-
-        // Publish to MQTT, if configured to do so.
-        this.controller.mqtt?.publish(this.id, "doorbell", "false");
-
-        if(this.hints.logDoorbell) {
-
-          this.log.info("Doorbell ring cancelled.");
-        }
+        this.handleDoorbellCancel(packet);
 
         break;
 
