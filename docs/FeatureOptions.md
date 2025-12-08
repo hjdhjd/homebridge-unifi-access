@@ -86,6 +86,9 @@ These option(s) apply to: all Access device types.
 | `Hub.REL`                                        | Add a contact sensor accessory for the remote release. **(default: enabled)**.
 | `Hub.REN`                                        | Add a contact sensor accessory for the request to enter sensor. **(default: enabled)**.
 | `Hub.REX`                                        | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**.
+| `Hub.SideDoor`                                   | Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices. **(default: enabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
+| `Hub.SideDoor.LockDelayInterval<I>.Value</I>`    | Delay, in minutes, before locking the side door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the side door lock relay will lock five seconds after unlocking. **(default: 0)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
+| `Hub.SideDoor.Lock.Trigger`                      | Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks. **(default: disabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
 
 #### <A NAME="accessmethod"></A>Access method feature options.
 
@@ -112,4 +115,4 @@ These option(s) apply to: all Access device types.
 | `Log.REN`                                        | Log door request to enter events in Homebridge. **(default: enabled)**.
 | `Log.REX`                                        | Log door request to exit events in Homebridge. **(default: enabled)**.
 | `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
-
+| `Log.SideDoorLock`                               | Log side door lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*

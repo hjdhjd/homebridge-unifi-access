@@ -2,7 +2,7 @@
  *
  * access-device.ts: Base class for all UniFi Access devices.
  */
-import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION} from "./settings.js";
+import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION } from "./settings.js";
 import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
 import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
 import { type HomebridgePluginLogging, type Nullable, sanitizeName } from "homebridge-plugin-utils";
@@ -22,6 +22,7 @@ export interface AccessHints {
   hasMethodPin: boolean;
   hasMethodQr: boolean;
   hasMethodTwoStep: boolean;
+  hasSideDoor: boolean;
   hasWiringDps: boolean;
   hasWiringRel: boolean;
   hasWiringRen: boolean;
