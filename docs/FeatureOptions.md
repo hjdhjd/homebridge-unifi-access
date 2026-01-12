@@ -58,61 +58,63 @@ Feature options provide a rich mechanism for tailoring your `homebridge-unifi-ac
 
 These option(s) apply to: all Access device types.
 
-| Option                                           | Description
-|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Device`                                         | Make this device available in HomeKit. **(default: enabled)**.
-| `Device.SyncName`                                | Synchronize the UniFi Access name of this device with HomeKit. Synchronization is one-way only, syncing the device name from UniFi Access to HomeKit. **(default: disabled)**.
+| Option                                                                              | Description
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+| <A NAME="Device"></A>`Device`                                                       | Make this device available in HomeKit. **(default: enabled)**.
+| <A NAME="Device.SyncName"></A>`Device.SyncName`                                     | Synchronize the UniFi Access name of this device with HomeKit. Synchronization is one-way only, syncing the device name from UniFi Access to HomeKit. **(default: disabled)**.
 
 #### <A NAME="controller"></A>Controller feature options.
 
 These option(s) apply to: Access controllers.
 
-| Option                                           | Description
-|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Controller.DelayDeviceRemoval<I>.Value</I>`     | Delay, in seconds, before removing devices that are no longer detected on the Access controller. By default, devices are added and removed in realtime. **(default: 60)**.
-| `Controller.Publish.Telemetry`                   | Publish all the realtime telemetry received from the Access controller to MQTT. **(default: disabled)**.
+| Option                                                                              | Description
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+| <A NAME="Controller.DelayDeviceRemoval"></A><CODE>Controller.DelayDeviceRemoval<I>.Value</I></CODE>  | Delay, in seconds, before removing devices that are no longer detected on the Access controller. By default, devices are added and removed in realtime. **(default: 60)**.
+| <A NAME="Controller.Publish.Telemetry"></A>`Controller.Publish.Telemetry`           | Publish all the realtime telemetry received from the Access controller to MQTT. **(default: disabled)**.
 
 #### <A NAME="hub"></A>Hub feature options.
 
 These option(s) apply to: all Access device types.
 
-| Option                                           | Description
-|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Hub.LockDelayInterval<I>.Value</I>`             | Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking. **(default: 0)**.
-| `Hub.Lock.Trigger`                               | Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs. **(default: disabled)**.
-| `Hub.Doorbell`                                   | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| `Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| `Hub.DPS`                                        | Add a contact sensor accessory for the door position sensor. **(default: enabled)**.
-| `Hub.REL`                                        | Add a contact sensor accessory for the remote release. **(default: enabled)**.
-| `Hub.REN`                                        | Add a contact sensor accessory for the request to enter sensor. **(default: enabled)**.
-| `Hub.REX`                                        | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**.
-| `Hub.SideDoor`                                   | Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices. **(default: enabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
-| `Hub.SideDoor.LockDelayInterval<I>.Value</I>`    | Delay, in minutes, before locking the side door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the side door lock relay will lock five seconds after unlocking. **(default: 0)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
-| `Hub.SideDoor.Lock.Trigger`                      | Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks. **(default: disabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
+| Option                                                                              | Description
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+| <A NAME="Hub.Door.UseLock"></A>`Hub.Door.UseLock`                                   | Use a lock accessory instead of a garage door opener accessory for the gate. **(default: disabled)**. <BR>*Supported on UniFi Access Gate.*
+| <A NAME="Hub.Door.UseGarageOpener"></A>`Hub.Door.UseGarageOpener`                   | Use a garage door opener accessory instead of a lock accessory. This is a visual preference only within HomeKit; the underlying lock behavior and feature options remain the same. **(default: disabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Hub.LockDelayInterval"></A><CODE>Hub.LockDelayInterval<I>.Value</I></CODE>  | Delay, in minutes, before locking the door lock relay once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. This applies regardless of whether you use a lock or garage door opener accessory. By default, the door lock relay will lock five seconds after unlocking. **(default: 0)**.
+| <A NAME="Hub.Lock.Trigger"></A>`Hub.Lock.Trigger`                                   | Add a switch accessory to control the door lock relay. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions and trigger events when a lock or unlock event occurs. This works with both lock and garage door opener accessories. **(default: disabled)**.
+| <A NAME="Hub.Doorbell"></A>`Hub.Doorbell`                                           | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| <A NAME="Hub.Doorbell.Trigger"></A>`Hub.Doorbell.Trigger`                           | Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell. **(default: disabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| <A NAME="Hub.DPS"></A>`Hub.DPS`                                                     | Add a contact sensor accessory for the door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Hub.REL"></A>`Hub.REL`                                                     | Add a contact sensor accessory for the remote release. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
+| <A NAME="Hub.REN"></A>`Hub.REN`                                                     | Add a contact sensor accessory for the request to enter sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
+| <A NAME="Hub.REX"></A>`Hub.REX`                                                     | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Hub.SideDoor"></A>`Hub.SideDoor`                                           | Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices. **(default: enabled)**. <BR>*Supported on UniFi Access Gate.*
+| <A NAME="Hub.SideDoor.DPS"></A>`Hub.SideDoor.DPS`                                   | Add a contact sensor accessory for the side door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Gate.*
+| <A NAME="Hub.SideDoor.Lock.Trigger"></A>`Hub.SideDoor.Lock.Trigger`                 | Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks. **(default: disabled)**. <BR>*Supported on UniFi Access Gate.*
 
 #### <A NAME="accessmethod"></A>Access method feature options.
 
 These option(s) apply to: all Access device types.
 
-| Option                                           | Description
-|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `AccessMethod.Face`                              | Add a switch accessory to control the face unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support face unlock authentication.*
-| `AccessMethod.Hand`                              | Add a switch accessory to control the hand wave unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support hand wave authentication.*
-| `AccessMethod.Mobile`                            | Add a switch accessory to control the mobile unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support mobile authentication.*
-| `AccessMethod.NFC`                               | Add a switch accessory to control the NFC card access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support NFC authentication.*
-| `AccessMethod.PIN`                               | Add a switch accessory to control the PIN unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support PIN authentication.*
-| `AccessMethod.QR`                                | Add a switch accessory to control the QR unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support QR code authentication.*
+| Option                                                                              | Description
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+| <A NAME="AccessMethod.Face"></A>`AccessMethod.Face`                                 | Add a switch accessory to control the face unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support face unlock authentication.*
+| <A NAME="AccessMethod.Hand"></A>`AccessMethod.Hand`                                 | Add a switch accessory to control the hand wave unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support hand wave authentication.*
+| <A NAME="AccessMethod.Mobile"></A>`AccessMethod.Mobile`                             | Add a switch accessory to control the mobile unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support mobile authentication.*
+| <A NAME="AccessMethod.NFC"></A>`AccessMethod.NFC`                                   | Add a switch accessory to control the NFC card access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support NFC authentication.*
+| <A NAME="AccessMethod.PIN"></A>`AccessMethod.PIN`                                   | Add a switch accessory to control the PIN unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support PIN authentication.*
+| <A NAME="AccessMethod.QR"></A>`AccessMethod.QR`                                     | Add a switch accessory to control the QR unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support QR code authentication.*
 
 #### <A NAME="log"></A>Logging feature options.
 
 These option(s) apply to: all Access device types.
 
-| Option                                           | Description
-|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-| `Log.Doorbell`                                   | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| `Log.DPS`                                        | Log door position sensor events in Homebridge. **(default: enabled)**.
-| `Log.REL`                                        | Log door remote release events in Homebridge. **(default: enabled)**.
-| `Log.REN`                                        | Log door request to enter events in Homebridge. **(default: enabled)**.
-| `Log.REX`                                        | Log door request to exit events in Homebridge. **(default: enabled)**.
-| `Log.Lock`                                       | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
-| `Log.SideDoorLock`                               | Log side door lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Gate Hub devices only.*
+| Option                                                                              | Description
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------
+| <A NAME="Log.Doorbell"></A>`Log.Doorbell`                                           | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
+| <A NAME="Log.DPS"></A>`Log.DPS`                                                     | Log door position sensor events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Log.REL"></A>`Log.REL`                                                     | Log door remote release events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
+| <A NAME="Log.REN"></A>`Log.REN`                                                     | Log door request to enter events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
+| <A NAME="Log.REX"></A>`Log.REX`                                                     | Log door request to exit events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Log.Lock"></A>`Log.Lock`                                                   | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
+

@@ -1,4 +1,4 @@
-/* Copyright(C) 2020-2025, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2020-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-types.ts: Interface and type definitions for UniFi Access.
  */
@@ -8,14 +8,13 @@ export enum AccessReservedNames {
 
   // Manage our contact sensor types.
   CONTACT_DPS = "ContactSensor.DPS",
+  CONTACT_DPS_SIDE = "ContactSensor.DPS.Side",
   CONTACT_REL = "ContactSensor.REL",
   CONTACT_REN = "ContactSensor.REN",
   CONTACT_REX = "ContactSensor.REX",
 
   // Manage our door/lock types.
-  DOOR_MAIN = "Door.Main",
-  DOOR_SIDE = "Door.Side",
-  LOCK_SIDE_DOOR = "Lock.SideDoor",
+  LOCK_DOOR_SIDE = "Lock.Door.Side",
 
   // Manage our switch types.
   SWITCH_ACCESSMETHOD_FACE = "AccessMethod.Face",
@@ -25,8 +24,8 @@ export enum AccessReservedNames {
   SWITCH_ACCESSMETHOD_PIN = "AccessMethod.PIN",
   SWITCH_ACCESSMETHOD_QR = "AccessMethod.QR",
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
+  SWITCH_LOCK_DOOR_SIDE_TRIGGER = "Switch.Lock.Door.Side.Trigger",
   SWITCH_LOCK_TRIGGER = "LockTrigger",
-  SWITCH_SIDEDOOR_LOCK_TRIGGER = "SideDoorLockTrigger",
   SWITCH_MOTION_SENSOR = "MotionSensorSwitch",
   SWITCH_MOTION_TRIGGER = "MotionSensorTrigger"
 }

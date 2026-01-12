@@ -25,7 +25,12 @@ I've provided MQTT support for those that are interested - I'm genuinely curious
 `homebridge-unifi-access` will publish MQTT events if you've configured a broker in the controller-specific settings. The plugin supports a rich set of capabilities over MQTT. This includes:
 
   * Doorbell ring events.
-  * Lock events. Including triggering via MQTT.
+  * Lock events, including triggering locks via MQTT.
+  * Door position sensor (DPS) events.
+  * Terminal input events (REL, REN, REX).
+  * Motion detection events, including triggering motion via MQTT.
+  * Side door events for UA Gate devices.
+  * Raw telemetry publishing.
 
 ### How to configure and use this feature
 
@@ -43,32 +48,69 @@ To reemphasize the above: **mqttUrl** must be a valid URL. Simply entering in a 
 When events are published, by default, the topics look like:
 
 ```sh
-unifi/access/1234567890AB/motion
+unifi/access/1234567890AB/lock
 unifi/access/ABCDEF123456/doorbell
 ```
 
 In the above example, `1234567890AB` and `ABCDEF123456` are the MAC addresses of your Access hub or other devices. We use MAC addresses as an easy way to guarantee unique identifiers that won't change. `homebridge-unifi-access` provides you information about your devices and their respective MAC addresses in the homebridge log on startup. Additionally, you can use the UniFi Access app or webUI to lookup what the MAC addresses are of your devices, should you need to do so.
 
 ### <A NAME="publish"></A>Topics Published
+
 The topics and messages that `homebridge-unifi-access` publishes are:
 
-| Topic                 | Message Published
-|-----------------------|----------------------------------
-| `doorbell`            | `true` or `false` when a UniFi Access hub is ringing the doorbell.
-| `dps`                 | `true` or `false` when a UniFi Access hub has opened or closed the door position sensor. If the DPS wiring is not connected to the hub, will return `unknown`.
-| `lock`                | `true` or `false` when a UniFi Access hub has locked or unlocked the door lock relay.
+#### Door and Lock Topics
+
+| Topic                 | Message Published                | Device Scope
+|-----------------------|----------------------------------|----------------------------------
+| `doorbell`            | `true` when ringing, `false` when ring ends. | Hubs with doorbells.
+| `dps`                 | `true` when open, `false` when closed, `unknown` if not wired. | UA Ultra, UA Hub, UA Hub Door Mini, UA Gate.
+| `lock`                | `true` when locked, `false` when unlocked. | All hubs.
+| `rel`                 | `true` when open, `false` when closed. | UA Hub (remote release sensor).
+| `ren`                 | `true` when open, `false` when closed. | UA Hub (request to enter sensor).
+| `rex`                 | `true` when open, `false` when closed. | UA Ultra, UA Hub, UA Hub Door Mini (request to exit sensor).
+
+#### Side Door Topics (UA Gate Only)
+
+| Topic                 | Message Published                | Description
+|-----------------------|----------------------------------|----------------------------------
+| `sidedoor/dps`        | `true` when open, `false` when closed, `unknown` if not wired. | Side door (pedestrian gate) position sensor.
+| `sidedoor/lock`       | `true` when locked, `false` when unlocked. | Side door (pedestrian gate) lock state.
+
+#### Motion and Telemetry Topics
+
+| Topic                 | Message Published                | Description
+|-----------------------|----------------------------------|----------------------------------
+| `motion`              | `true` when motion detected, `false` when motion ends. | Motion detection events.
+| `telemetry`           | JSON payload of raw event data. | Published when `Controller.Publish.Telemetry` is enabled.
 
 Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, or when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to.
 
 ### <A NAME="subscribe"></A>Topics Subscribed
+
 The topics that `homebridge-unifi-access` subscribes to are:
 
-| Topic                   | Message Expected
-|-------------------------|----------------------------------
-| `doorbell/get`          | `true` will trigger a publish event of the current doorbell ring status for a UniFi Access hub.
-| `dps/get`               | `true` will trigger a publish event of the current door position sensor state for a UniFi Access hub.
-| `lock/get`              | `true` will trigger a publish event of the current door lock relay state for a UniFi Access hub.
-| `lock/set`              | `true` will unlock the door lock relay for a UniFi Access hub. `false` will unlock.
+#### Door and Lock Topics
+
+| Topic                   | Message Expected                 | Description
+|-------------------------|----------------------------------|----------------------------------
+| `doorbell/get`          | `true` | Triggers a publish of the current doorbell ring status.
+| `dps/get`               | `true` | Triggers a publish of the current door position sensor state.
+| `lock/get`              | `true` | Triggers a publish of the current lock state.
+| `lock/set`              | `true` to unlock momentarily (auto-relocks based on configured delay), `false` to unlock indefinitely. | Controls the door lock relay.
+
+#### Side Door Topics (UA Gate Only)
+
+| Topic                   | Message Expected                 | Description
+|-------------------------|----------------------------------|----------------------------------
+| `sidedoor/dps/get`      | `true` | Triggers a publish of the current side door position sensor state.
+| `sidedoor/lock/get`     | `true` | Triggers a publish of the current side door lock state.
+| `sidedoor/lock/set`     | `true` to lock, `false` to unlock. | Controls the side door lock relay.
+
+#### Motion Topics
+
+| Topic                   | Message Expected                 | Description
+|-------------------------|----------------------------------|----------------------------------
+| `motion/trigger`        | `true` | Triggers a motion event on the device.
 
 ### Some Fun Facts
   * MQTT support is disabled by default. It's enabled when an MQTT broker is specified in the configuration.

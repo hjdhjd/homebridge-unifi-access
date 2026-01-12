@@ -1,4 +1,4 @@
-/* Copyright(C) 2020-2025, HJD (https://github.com/hjdhjd). All rights reserved.
+/* Copyright(C) 2020-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-options.ts: Feature option and type definitions for UniFi Access.
  */
@@ -76,9 +76,10 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
   // Hub options.
   "Hub": [
 
-    { default: false, defaultValue: "Lock", description: "Set the HomeKit service type for the main door. Valid values are: Lock (default) or GarageDoorOpener.", hasCapability: ["is_hub"], name: "DoorServiceType" },
-    { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the door lock relay, once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. By default, the door lock relay will lock five seconds after unlocking.", name: "LockDelayInterval" },
-    { default: false, description: "Add a switch accessory to control the lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks and triggering events when a lock or unlock event occurs.", name: "Lock.Trigger" },
+    { default: false, description: "Use a lock accessory instead of a garage door opener accessory for the gate.", modelKey: ["UA Gate"], name: "Door.UseLock" },
+    { default: false, description: "Use a garage door opener accessory instead of a lock accessory. This is a visual preference only within HomeKit; the underlying lock behavior and feature options remain the same.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "Door.UseGarageOpener" },
+    { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the door lock relay once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. This applies regardless of whether you use a lock or garage door opener accessory. By default, the door lock relay will lock five seconds after unlocking.", name: "LockDelayInterval" },
+    { default: false, description: "Add a switch accessory to control the door lock relay. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions and trigger events when a lock or unlock event occurs. This works with both lock and garage door opener accessories.", name: "Lock.Trigger" },
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", hasCapability: ["door_bell"], name: "Doorbell" },
     { default: false, description: "Add a switch accessory for automation scenarios to reflect (but not trigger) doorbell ring events on an Access doorbell.", hasCapability: ["door_bell"], name: "Doorbell.Trigger" },
     { default: true, description: "Add a contact sensor accessory for the door position sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ], name: "DPS" },
@@ -86,7 +87,8 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
     { default: true, description: "Add a contact sensor accessory for the request to enter sensor.", modelKey: ["UA Hub"], name: "REN" },
     { default: true, description: "Add a contact sensor accessory for the request to exit sensor.", modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], name: "REX" },
     { default: true, description: "Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices.", modelKey: ["UA Gate"], name: "SideDoor" },
-    { default: false, description: "Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks.", modelKey: ["UA Gate"], name: "SideDoor.Lock.Trigger" }
+    { default: true, description: "Add a contact sensor accessory for the side door position sensor.", group: "SideDoor", modelKey: ["UA Gate"], name: "SideDoor.DPS" },
+    { default: false, description: "Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks.", group: "SideDoor", modelKey: ["UA Gate"], name: "SideDoor.Lock.Trigger" }
   ],
 
   // Logging options.
