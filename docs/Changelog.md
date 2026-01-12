@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file. This projec
 
 ## 1.11.0 (2026-01-11)
     * New feature: UniFi Access Gate support. HBUA now supports the UA Gate with full support for both the main gate and side door (pedestrian gate). The main gate defaults to a garage door opener service to match typical gate behavior, while the side door is exposed as a lock. Both doors have their own door position sensors exposed as contact sensors in HomeKit. As always, you can adjust these through the HBUA webUI. Thank you to @mickael-palma-wttj for the initial plumbing - I appreciate your contribution to the community! **Note: UA Gate support should be considered experimental as I don't have access to the hardware to fully test it. If you encounter issues, please reach out on the #unifi-access channel on the Homebridge Discord so we can troubleshoot together.**
+    * New feature: you can now choose whether to expose your door as a lock or garage door opener accessory in HomeKit. UA Gate defaults to garage door opener, while other hubs default to lock. This is purely a visual preference for how the accessory appears in HomeKit - the underlying behavior remains the same. Look for the door service type options in the Hub section of the HBUA webUI.
     * Housekeeping.
 
 ## 1.10.1 (2025-11-24)
