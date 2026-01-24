@@ -53,10 +53,11 @@ export const featureOptions: { [index: string]: AccessFeatureOption[] } = {
 
     { default: true, description: "Add a switch accessory to control the face unlock access method.", hasCapability: ["identity_face_unlock"], name: "Face" },
     { default: true, description: "Add a switch accessory to control the hand wave unlock access method.", hasCapability: ["hand_wave"], name: "Hand" },
-    { default: true, description: "Add a switch accessory to control the mobile unlock access method.", hasCapability: ["mobile_unlock_ver2"], name: "Mobile" },
+    { default: true, description: "Add a switch accessory to control the mobile unlock access method.", hasCapability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], name: "Mobile" },
     { default: true, description: "Add a switch accessory to control the NFC card access method.", hasCapability: ["nfc_card_easy_provision"], name: "NFC" },
     { default: true, description: "Add a switch accessory to control the PIN unlock access method.", hasCapability: ["pin_code"], name: "PIN" },
-    { default: true, description: "Add a switch accessory to control the QR unlock access method.", hasCapability: ["qr_code"], name: "QR" }
+    { default: true, description: "Add a switch accessory to control the QR unlock access method.", hasCapability: ["qr_code"], name: "QR" },
+    { default: true, description: "Add a switch accessory to control the Touch Pass access method.", hasCapability: ["support_apple_pass"], name: "TouchPass" }
   ],
 
   // Controller options.

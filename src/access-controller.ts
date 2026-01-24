@@ -477,13 +477,14 @@ export class AccessController {
   // Utility for checking feature options on the controller.
   public hasFeature(option: string, device?: AccessControllerConfig | AccessDeviceConfig): boolean {
 
-    return this.platform.featureOptions.test(option, ((device as AccessDeviceConfig | undefined)?.unique_id ?? this.id), this.id);
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    return this.platform.featureOptions.test(option, (device as AccessDeviceConfig | undefined)?.mac?.replace(/:/g, "").toUpperCase() ?? this.id, this.id);
   }
 
   // Return a unique identifier for an Access controller.
   public get id(): string | undefined {
 
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    return this.uda.host?.mac?.replace(/:/g, "");
+    return this.uda.host?.mac?.replace(/:/g, "").toUpperCase();
   }
 }

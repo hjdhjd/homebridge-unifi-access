@@ -1,6 +1,6 @@
 {
   "name": "homebridge-unifi-access",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "displayName": "UniFi Access",
   "description": "Homebridge UniFi Access plugin providing complete HomeKit integration for the UniFi Access ecosystem with full support for most features including autoconfiguration, motion detection, multiple controllers, and realtime updates.",
   "author": {
@@ -57,16 +57,16 @@
   "dependencies": {
     "@homebridge/plugin-ui-utils": "2.1.2",
     "homebridge-plugin-utils": "1.30.0",
-    "unifi-access": "1.5.1"
+    "unifi-access": "1.5.3"
   },
   "devDependencies": {
-    "@stylistic/eslint-plugin": "5.7.0",
-    "@types/node": "25.0.6",
+    "@stylistic/eslint-plugin": "5.7.1",
+    "@types/node": "25.0.10",
     "eslint": "9.39.2",
     "homebridge": "1.11.1",
-    "shx": "^0.4.0",
+    "shx": "0.4.0",
     "typescript": "5.9.3",
-    "typescript-eslint": "^8.52.0"
+    "typescript-eslint": "8.53.1"
   },
   "overrides": {
     "@types/readable-stream": "4.0.23"

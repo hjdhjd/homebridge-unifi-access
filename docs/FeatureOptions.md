@@ -104,6 +104,7 @@ These option(s) apply to: all Access device types.
 | <A NAME="AccessMethod.NFC"></A>`AccessMethod.NFC`                                   | Add a switch accessory to control the NFC card access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support NFC authentication.*
 | <A NAME="AccessMethod.PIN"></A>`AccessMethod.PIN`                                   | Add a switch accessory to control the PIN unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support PIN authentication.*
 | <A NAME="AccessMethod.QR"></A>`AccessMethod.QR`                                     | Add a switch accessory to control the QR unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support QR code authentication.*
+| <A NAME="AccessMethod.TouchPass"></A>`AccessMethod.TouchPass`                       | Add a switch accessory to control the Touch Pass access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers thaat support Touch Pass.*
 
 #### <A NAME="log"></A>Logging feature options.
 

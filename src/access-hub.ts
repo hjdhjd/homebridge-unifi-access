@@ -14,11 +14,16 @@ const accessMethods = [
 
   { capability: "identity_face_unlock", key: "face", name: "Face Unlock", option: "AccessMethod.Face", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_FACE },
   { capability: "hand_wave", key: "wave", name: "Hand Wave", option: "AccessMethod.Hand", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_HAND },
-  { capability: "mobile_unlock_ver2", key: "bt_button", name: "Mobile", option: "AccessMethod.Mobile", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
+  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], configsApiKeys: [ "bt", "bt_button", "bt_tap" ], key: "bt_button",
+    name: "Mobile", option: "AccessMethod.Mobile", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
   { capability: "nfc_card_easy_provision", key: "nfc", name: "NFC", option: "AccessMethod.NFC", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_NFC },
   { capability: "pin_code", key: "pin_code", name: "PIN", option: "AccessMethod.PIN", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_PIN },
-  { capability: "qr_code", key: "qr_code", name: "QR Code", option: "AccessMethod.QR", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_QR }
+  { capability: "qr_code", key: "qr_code", name: "QR Code", option: "AccessMethod.QR", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_QR },
+  { capability: "support_apple_pass", key: "apple_pass", name: "TouchPass", option: "AccessMethod.TouchPass", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS }
 ] as const;
+
+// Device types that use the /configs API endpoint instead of /settings for access method changes.
+const configsApiDeviceTypes = ["UVC G6 Entry"];
 
 // Extract the key property values from the access methods array to create a union type of all possible keys for our supported access methods.
 type AccessMethodKey = typeof accessMethods[number]["key"];
@@ -459,13 +464,18 @@ export class AccessHub extends AccessDevice {
       service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
         const entry = this.uda.configs?.find(entry => entry.key === accessMethod.key);
+        const isConfigsApi = configsApiDeviceTypes.includes(this.uda.device_type);
         let success;
 
         if(entry) {
 
-          const response = await this.controller.udaApi.retrieve(this.controller.udaApi.getApiEndpoint("device") + "/" + this.id + "/settings", {
+          const endpoint = isConfigsApi ? "/configs?is_camera=true" : "/settings";
+          const keys = (isConfigsApi && ("configsApiKeys" in accessMethod)) ? accessMethod.configsApiKeys : [entry.key];
+          const payload = keys.map(key => ({ key: key, tag: "open_door_mode", value: value ? "yes" : "no" }));
 
-            body: JSON.stringify([{ key: entry.key, tag: "open_door_mode", value: value ? "yes" : "no" }]),
+          const response = await this.controller.udaApi.retrieve(this.controller.udaApi.getApiEndpoint("device") + "/" + this.uda.unique_id + endpoint, {
+
+            body: JSON.stringify(payload),
             method: "PUT"
           });
 
@@ -1643,9 +1653,9 @@ export class AccessHub extends AccessDevice {
   }
 
   // Utility to validate hub capabilities.
-  private hasCapability(capability: string | string[]): boolean {
+  private hasCapability(capability: string | readonly string[]): boolean {
 
-    return Array.isArray(capability) ? capability.some(c => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability);
+    return Array.isArray(capability) ? capability.some(c => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability as string);
   }
 
   // Update door state from location data (lock and DPS).
@@ -1902,12 +1912,16 @@ export class AccessHub extends AccessDevice {
 
     const data = packet.data as AccessEventDeviceUpdateV2;
 
-    // Process access method updates.
+    // Process access method updates. We only process entries with explicit "yes" or "no" values, ignoring any malformed entries that contain other values (e.g., key
+    // names echoed back as values).
     if(data.access_method) {
 
-      const accessMethodData = data.access_method as { [K in AccessMethodKey]?: "yes" | "no" };
+      for(const [ key, value ] of Object.entries(data.access_method) as [AccessMethodKey, string][]) {
 
-      for(const [ key, value ] of Object.entries(accessMethodData) as [AccessMethodKey, "yes" | "no"][]) {
+        if((value !== "yes") && (value !== "no")) {
+
+          continue;
+        }
 
         const accessMethod = accessMethods.find(entry => entry.key === key);
 

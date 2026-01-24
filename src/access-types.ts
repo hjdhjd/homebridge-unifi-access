@@ -23,6 +23,7 @@ export enum AccessReservedNames {
   SWITCH_ACCESSMETHOD_NFC = "AccessMethod.NFC",
   SWITCH_ACCESSMETHOD_PIN = "AccessMethod.PIN",
   SWITCH_ACCESSMETHOD_QR = "AccessMethod.QR",
+  SWITCH_ACCESSMETHOD_TOUCHPASS = "AccessMethod.TouchPass",
   SWITCH_DOORBELL_TRIGGER = "DoorbellTrigger",
   SWITCH_LOCK_DOOR_SIDE_TRIGGER = "Switch.Lock.Door.Side.Trigger",
   SWITCH_LOCK_TRIGGER = "LockTrigger",
