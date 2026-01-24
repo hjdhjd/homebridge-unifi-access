@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
 
+## 1.12.1 (2026-01-23)
+  * Fix: address a potential issue where removed devices could cause an error during the device removal delay period.
+  * Housekeeping.
+
 ## 1.12.0 (2026-01-23)
   * New feature: G6 Entry reader support. HBUA now fully supports access method switches on G6 Entry camera-based readers, allowing you to toggle Face, Mobile, NFC, and TouchPass unlock methods directly from HomeKit.
   * New feature: TouchPass access method support for devices with Apple Pass capability.
