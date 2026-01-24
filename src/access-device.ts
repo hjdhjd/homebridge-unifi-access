@@ -79,20 +79,20 @@ export abstract class AccessBase {
     // Update the model information for this device.
     const deviceModel = device.display_model ?? device.model;
 
-    if(deviceModel.length) {
+    if(deviceModel) {
 
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, deviceModel);
     }
 
     // Update the serial number for this device.
-    if(device.mac.length) {
+    if(device.mac) {
 
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber,
         device.mac.replace(/:/g, "").toUpperCase());
     }
 
     // Update the firmware revision for this device.
-    if(device.firmware.length) {
+    if(device.firmware) {
 
       // Capture the version of the device firmware, ensuring we get major, minor, and patch levels if they exist.
       const versionRegex = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(.+))?$/;
