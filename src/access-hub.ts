@@ -2144,5 +2144,16 @@ export class AccessHub extends AccessDevice {
         }
       });
     }
+
+    // Define isDpsWired separately since the main loop skips "Dps" (only hkDpsState has a manual implementation that needs to be excluded from the loop).
+    Object.defineProperty(AccessHub.prototype, "isDpsWired", {
+
+      configurable: true,
+      enumerable: true,
+      get(this: AccessHub) {
+
+        return this.isWired("Dps");
+      }
+    });
   }
 }
