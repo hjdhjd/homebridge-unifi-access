@@ -739,8 +739,8 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // For UA Gate, we use unlock/trigger command for both open and close operations. The gate motor will move in the appropriate direction based on its current state.
-    // For non-UA Gate hubs, we use lock/unlock commands directly (locked = closed, unlocked = open).
+    // UA Gate uses the location unlock endpoint with an explicit close command when closing. Non-UA Gate hubs use lock/unlock commands directly (locked = closed,
+    // unlocked = open).
     const isUaGate = this.uda.device_type === "UGT";
 
     // Determine the current door state. For UA Gate, we use DPS (Door Position Sensor) state since it's a motorized gate with physical positions. For non-UA Gate hubs,
@@ -767,7 +767,7 @@ export class AccessHub extends AccessDevice {
 
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
 
-      // UA Gate uses a single trigger command that toggles the motorized gate. Non-UA Gate hubs use explicit lock/unlock commands.
+      // UA Gate uses the location unlock endpoint to control the motorized gate. Non-UA Gate hubs use explicit lock/unlock commands.
       if(isUaGate) {
 
         // Set a transition cooldown to prevent WebSocket events from immediately reverting the door state. This gives the gate time to physically move before we accept
@@ -784,8 +784,9 @@ export class AccessHub extends AccessDevice {
         service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, shouldClose ? this.hap.Characteristic.CurrentDoorState.CLOSING :
           this.hap.Characteristic.CurrentDoorState.OPENING);
 
-        // Trigger the gate - for motorized gates, the same trigger command handles both open and close.
-        const triggerGate = isSideDoor ? async (): Promise<boolean> => this.hubSideDoorLockCommand(false) : async (): Promise<boolean> => this.hubLockCommand(false);
+        // Trigger the gate in the requested direction.
+        const triggerGate = isSideDoor ? async (): Promise<boolean> => this.hubSideDoorLockCommand(shouldClose) :
+          async (): Promise<boolean> => this.hubLockCommand(shouldClose);
 
         if(!(await triggerGate())) {
 
@@ -1168,7 +1169,7 @@ export class AccessHub extends AccessDevice {
   // Unified utility function to execute lock and unlock actions on a hub door.
   private async hubDoorLockCommand(isLocking: boolean, isSideDoor = false): Promise<boolean> {
 
-    const action = isLocking ? "lock" : "unlock";
+    const action = (this.uda.device_type === "UGT") ? (isLocking ? "close" : "open") : (isLocking ? "lock" : "unlock");
     const doorName = isSideDoor ? "side door" : (this.uda.device_type === "UGT" ? "gate" : "door");
     const doorId = isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId;
 
@@ -1200,11 +1201,11 @@ export class AccessHub extends AccessDevice {
       }
 
       // Execute the action using the location endpoint.
-      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId + "/unlock";
+      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId + "/unlock" + (isLocking ? "?control_cmd=close" : "");
 
       const response = await this.controller.udaApi.retrieve(endpoint, {
 
-        body: JSON.stringify({}),
+        body: isLocking ? undefined : JSON.stringify({}),
         method: "PUT"
       });
 
