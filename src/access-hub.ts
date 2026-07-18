@@ -1203,8 +1203,6 @@ export class AccessHub extends AccessDevice {
       // Execute the action using the location endpoint.
       const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId + "/unlock" + (isLocking ? "?control_cmd=close" : "");
 
-      this.log.info("Sending UA Gate %s command to %s.", action, endpoint);
-
       const response = await this.controller.udaApi.retrieve(endpoint, {
 
         body: isLocking ? undefined : JSON.stringify({}),
