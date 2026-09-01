@@ -2,7 +2,8 @@
  *
  * access-hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { ACCESS_API_PATH_PREFIX, AccessClient } from "unifi-access";
+import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient } from "unifi-access";
+import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./access-device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
@@ -12,7 +13,6 @@ import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSetting
   dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "./access-policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "./access-events.ts";
-import { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import type { AccessAccessory } from "./access-types.ts";
 import type { AccessController } from "./access-controller.ts";
 import { AccessDevice } from "./access-device.ts";
@@ -1772,6 +1772,35 @@ export class AccessHub extends AccessDevice {
     return { doorId: isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId, doorName };
   }
 
+  /* Every unlock this plugin sends, naming itself as the actor behind it so the controller's activity history records the automation rather than the account the
+   * client authenticated with. Attribution is something only the published API can express, so a client holding no path to it refuses the attributed unlock at
+   * the library's own routing gate, before anything reaches the wire...that refusal is the library's statement that the attribution is unsayable here, and the
+   * answer to it is the same unlock without the actor. The retry carries the caller's options exactly as given, so the door it names is the door it named.
+   *
+   * The refusal is caught by its own type alone. Every other failure is about the unlock rather than about the attribution, so it travels on to the caller's own
+   * reporting untouched and is never retried behind the user's back.
+   *
+   * @param projection - The door control surface to dispatch on, resolved by the caller whose refusal names its own command.
+   * @param options - What the unlock carries beyond the actor, or nothing at all for hardware that drives a single door.
+   */
+  async #dispatchUnlock(projection: AccessHubProjection, options?: { doorId: string }): Promise<void> {
+
+    try {
+
+      await projection.unlock({ ...options, actor: ACCESS_UNLOCK_ACTOR });
+    } catch(error) {
+
+      if(!(error instanceof AccessCapabilityError)) {
+
+        throw error;
+      }
+
+      this.log.debug("The attributed unlock was refused, so it is being sent unattributed: %s.", formatErrorMessage(error));
+
+      await projection.unlock(options);
+    }
+  }
+
   /* Close a UA Gate's door through the library's own close command, the verb that hardware answers for the closing direction. The unlock this hub's opening
    * direction sends opens a two-button gate whichever direction it was asked for, so every surface that asks a gate to lock arrives here instead.
    *
@@ -1843,7 +1872,7 @@ export class AccessHub extends AccessDevice {
 
     try {
 
-      await this.hubProjection.unlock();
+      await this.#dispatchUnlock(this.hubProjection);
     } catch(error) {
 
       this.log.error("Unable to operate: %s.", formatErrorMessage(error));
@@ -1902,7 +1931,7 @@ export class AccessHub extends AccessDevice {
 
       try {
 
-        await this.hubProjection.unlock({ doorId: target.doorId });
+        await this.#dispatchUnlock(this.hubProjection, { doorId: target.doorId });
       } catch(error) {
 
         this.log.error("Unable to %s the %s: %s.", action, target.doorName, formatErrorMessage(error));
@@ -1936,7 +1965,7 @@ export class AccessHub extends AccessDevice {
 
       if(decision.kind === "unlock") {
 
-        await this.hubProjection.unlock();
+        await this.#dispatchUnlock(this.hubProjection);
       } else if(decision.kind === "rule") {
 
         await this.hubProjection.setLockRule(decision.rule);

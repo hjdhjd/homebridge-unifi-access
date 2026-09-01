@@ -2,7 +2,7 @@
  *
  * settings.ts: Settings and constants for homebridge-unifi-access.
  */
-import type { AccessOfficialWebhookEventName } from "unifi-access";
+import type { AccessOfficialDoorUnlockActor, AccessOfficialWebhookEventName } from "unifi-access";
 
 // The name of our plugin.
 export const PLUGIN_NAME = "homebridge-unifi-access";
@@ -30,6 +30,10 @@ export const ACCESS_GARAGE_TRANSITION_DURATION = 15;
 
 // Default MQTT topic to use when publishing events. This is in the form of: unifi/access/MAC/event
 export const ACCESS_MQTT_TOPIC = "unifi/access";
+
+// Who the controller's activity history names as the actor behind an unlock this plugin sent. An unlock naming no actor is recorded against whatever account the
+// client authenticated with, which reads as a person having opened the door rather than as the automation that actually did.
+export const ACCESS_UNLOCK_ACTOR = { id: "homebridge-unifi-access", name: "Homebridge" } as const satisfies AccessOfficialDoorUnlockActor;
 
 // The port the webhook listener binds to by default. One listener serves every controller configured in the plugin, routed by path.
 export const ACCESS_WEBHOOK_PORT = 10120;
