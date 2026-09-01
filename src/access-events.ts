@@ -2,47 +2,51 @@
  *
  * access-events.ts: Events class for UniFi Access.
  */
-import type { API, HAP, Service } from "homebridge";
-import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { type HomebridgePluginLogging, sanitizeName } from "homebridge-plugin-utils";
-import type { AccessController } from "./access-controller.js";
-import type { AccessDevice } from "./access-device.js";
-import type { AccessPlatform } from "./access-platform.js";
-import { AccessReservedNames } from "./access-types.js";
+import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import type { AccessController } from "./access-controller.ts";
+import type { AccessEventPacket } from "unifi-access";
+import type { AccessWebhookEvent } from "unifi-access";
 import { EventEmitter } from "node:events";
+import { mqttTopic } from "./access-mqtt.ts";
 
+/* The controller's device-update event name. It is stated here, once, because three consumers depend on it agreeing exactly: the raw-rail bridge excludes it, the
+ * per-device observe loop emits it, and the hub's event handler branches on it. A retyped literal at any one of those sites would silently sever the path, so they
+ * all read the same constant instead.
+ */
+export const ACCESS_DEVICE_UPDATE_EVENT = "access.data.device.update";
+
+/* The prefix every webhook delivery is emitted under.
+ *
+ * The two channels share names: `access.door.unlock` is a delivery this plugin consumes and a frame the notification socket also sends, and the two carry entirely
+ * different payloads. Emitting deliveries under a prefix keeps the two listener populations apart, so a socket handler can never be handed a delivery it would
+ * read as a packet.
+ */
+export const ACCESS_WEBHOOK_EVENT_PREFIX = "webhook:";
+
+// The listener parameter the emitter itself declares, stated once here so every registration path in the plugin agrees with the emitter rather than with a
+// hand-written signature that could drift from it.
+export type AccessListener = Parameters<EventEmitter["on"]>[1];
+
+/**
+ * The hub's compatibility bridge over the client's realtime rails. Device updates reach the hub through the per-device observe loops, which deliver a correctly
+ * merged record; everything else the controller says reaches it through the raw packet rail bridged here, keyed by the event vocabulary the hub already listens on.
+ */
 export class AccessEvents extends EventEmitter {
 
-  private api: API;
-  private controller: AccessController;
-  private eventsHandler: ((packet: AccessEventPacket) => void) | null;
-  private readonly eventTimers: { [index: string]: NodeJS.Timeout | undefined };
-  private hap: HAP;
-  private log: HomebridgePluginLogging;
-  private mqttPublishTelemetry: boolean;
-  private platform: AccessPlatform;
-  private udaApi: AccessApi;
-  private udaDeviceState: { [index: string]: AccessDeviceConfig };
-  private udaUpdatesHandler: ((packet: AccessEventPacket) => void) | null;
-  private unsupportedDevices: { [index: string]: boolean };
+  private readonly controller: AccessController;
+  private readonly log: HomebridgePluginLogging;
+  private readonly mqttPublishTelemetry: boolean;
+  #subscription: Nullable<Disposable>;
 
   // Initialize an instance of our Access events handler.
   constructor(controller: AccessController) {
 
     super();
 
-    this.api = controller.platform.api;
-    this.eventTimers = {};
-    this.hap = controller.platform.api.hap;
+    this.controller = controller;
     this.log = controller.log;
     this.mqttPublishTelemetry = controller.hasFeature("Controller.Publish.Telemetry");
-    this.controller = controller;
-    this.udaApi = controller.udaApi;
-    this.udaDeviceState = {};
-    this.platform = controller.platform;
-    this.unsupportedDevices = {};
-    this.eventsHandler = null;
-    this.udaUpdatesHandler = null;
+    this.#subscription = null;
 
     // If we've enabled telemetry from the controller inform the user.
     if(this.mqttPublishTelemetry) {
@@ -50,159 +54,84 @@ export class AccessEvents extends EventEmitter {
       this.log.info("Access controller telemetry enabled.");
     }
 
-    this.configureEvents();
+    this.#subscription = controller.client.on("rawPacket", (packet: AccessEventPacket) => this.handleRawPacket(packet));
   }
 
-  // Process Access API update events.
-  private udaUpdates(packet: AccessEventPacket): void {
+  /**
+   * Bridge one raw wire frame onto the plugin's event vocabulary. The wire-facing half of this class, and the one place the telemetry mirror lives.
+   *
+   * The mirror runs first and unconditionally, so every frame the controller sends is republished exactly once - which is the contract a telemetry subscriber has
+   * always been able to rely on. It deliberately does not live in the emission chokepoint below: that chokepoint serves the synthetic device updates as well, so a
+   * mirror there would publish a single wire frame twice.
+   *
+   * Device updates are then the one exclusion. The raw rail emits before the store folds the frame, so bridging a device update would race the read-through record
+   * the hub's handler reads, delivering it the state as it was rather than as the update left it; the per-device observe loops deliver those updates post-fold
+   * instead. The controller's newer device-update dialect still bridges here, because its handler reads the frame's own payload alongside topology facts that a
+   * device-update fold does not change, so the pre-fold hazard does not arise for it.
+   *
+   * @param packet - The raw frame as the controller sent it.
+   */
+  public handleRawPacket(packet: AccessEventPacket): void {
 
-    // Lookup the device.
-    const accessDevice = this.controller.deviceLookup(packet.event_object_id);
+    // If enabled, publish all the event traffic coming from the Access controller to MQTT.
+    if(this.mqttPublishTelemetry) {
 
-    // We have the device, let's check for device updates.
-    if(accessDevice) {
-
-      // Update our device configuration state.
-      accessDevice.uda = packet.data as AccessDeviceConfig;
-
-      // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
-      accessDevice.accessory.services.filter(x => x.testCharacteristic(this.hap.Characteristic.StatusActive))
-        .map(x => x.updateCharacteristic(this.hap.Characteristic.StatusActive, accessDevice.isOnline));
-
-      // Sync names, if configured to do so.
-      if(accessDevice.hints.syncName && accessDevice.uda.alias && (accessDevice.accessoryName !== sanitizeName(accessDevice.uda.alias))) {
-
-        accessDevice.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
-        accessDevice.configureInfo();
-      }
+      this.controller.mqttPublish(mqttTopic(this.controller.id ?? "", "telemetry"), JSON.stringify(packet));
     }
 
-    // Update the internal list we maintain.
-    this.udaDeviceState[packet.event_object_id] = packet.data as AccessDeviceConfig;
-  }
-
-  // Process device additions and removals from the Access events API.
-  private manageDevices(packet: AccessEventPacket): void {
-
-    // Lookup the device.
-    const accessDevice = this.controller.deviceLookup(packet.event_object_id);
-
-    // We're unadopting.
-    if(packet.event === "access.data.device.delete") {
-
-      // If it's already gone, we're done.
-      if(!accessDevice) {
-
-        return;
-      }
-
-      // Remove the device.
-      this.controller.removeHomeKitDevice(accessDevice.accessory);
-
-      return;
-    }
-  }
-
-  // Listen to the UniFi Access events API for updates we are interested in (e.g. unlock).
-  private configureEvents(): boolean {
-
-    // Only configure the event listener if it exists and it's not already configured.
-    if(this.eventsHandler && this.udaUpdatesHandler) {
-
-      return true;
-    }
-
-    // Ensure we update our UDA state before we process any other events.
-    this.prependListener("access.data.device.update", this.udaUpdatesHandler = this.udaUpdates.bind(this));
-
-    // Process remove events.
-    this.prependListener("access.data.device.delete", this.manageDevices.bind(this));
-
-    // Listen for any messages coming in from our listener. We route events to the appropriate handlers based on the type of event that comes across.
-    this.udaApi.on("message", this.eventsHandler = (packet: AccessEventPacket): void => {
-
-      // Emit messages based on the event type.
-      this.emit(packet.event, packet);
-
-      // Emit messages based on the specific device.
-      this.emit(packet.event_object_id, packet);
-
-      // For v2 device update events, we need to unpack the metadata to determine which device we're targeting.
-      if((packet.event === "access.data.v2.device.update") && (packet.meta?.object_type === "device")) {
-
-        this.emit(packet.meta.id, packet);
-      }
-
-      // Finally, emit messages based on the specific event and device combination.
-      this.emit(packet.event + "." + packet.event_object_id, packet);
-
-      // If enabled, publish all the event traffic coming from the Access controller to MQTT.
-      if(this.mqttPublishTelemetry) {
-
-        this.controller.mqtt?.publish(this.controller.id ?? "", "telemetry", JSON.stringify(packet));
-      }
-    });
-
-    return true;
-  }
-
-  // Motion event processing from UniFi Access.
-  public motionEventHandler(accessDevice: AccessDevice): void {
-
-    // Only notify the user if we have a motion sensor and it's active.
-    const motionService = accessDevice.accessory.getService(this.hap.Service.MotionSensor);
-
-    if(motionService) {
-
-      this.motionEventDelivery(accessDevice, motionService);
-    }
-  }
-
-  // Motion event delivery to HomeKit.
-  private motionEventDelivery(accessDevice: AccessDevice, motionService: Service): void {
-
-    // If we have disabled motion events, we're done here.
-    if(("detectMotion" in accessDevice.accessory.context) && !accessDevice.accessory.context.detectMotion) {
+    if(packet.event === ACCESS_DEVICE_UPDATE_EVENT) {
 
       return;
     }
 
-    // If we have an active motion event inflight, we're done.
-    if(this.eventTimers[accessDevice.id]) {
+    this.emitPacket(packet);
+  }
 
-      return;
+  /**
+   * Deliver one packet to the accessories listening for it. The single emission chokepoint, carrying every addressing pattern the device layer subscribes on: the
+   * event name, the object the event names, the device a newer-dialect update names in its metadata, and the event-and-object combination.
+   *
+   * Both the wire bridge and the per-device loops' post-fold synthetic updates come through here, so what a listener receives has one shape regardless of which rail
+   * produced it.
+   *
+   * @param packet - The packet to deliver.
+   */
+  public emitPacket(packet: AccessEventPacket): void {
+
+    // Emit messages based on the event type.
+    this.emit(packet.event, packet);
+
+    // Emit messages based on the specific device.
+    this.emit(packet.event_object_id, packet);
+
+    // For the newer device update dialect, we unpack the metadata to determine which device we're targeting.
+    if((packet.event === "access.data.v2.device.update") && (packet.meta?.object_type === "device")) {
+
+      this.emit(packet.meta.id, packet);
     }
 
-    // Trigger the motion event in HomeKit.
-    motionService.updateCharacteristic(this.hap.Characteristic.MotionDetected, true);
+    // Finally, emit messages based on the specific event and device combination.
+    this.emit(packet.event + "." + packet.event_object_id, packet);
+  }
 
-    // If we have a motion trigger switch configured, update it.
-    accessDevice.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
+  /**
+   * Deliver one verified webhook delivery to the accessories listening for it.
+   *
+   * Deliveries are deliberately not mirrored to the telemetry topic. That mirror is a republication of the controller's notification socket, and a subscriber has
+   * always been able to read it as exactly that...folding a second, differently-shaped channel into it would quietly change what the topic means.
+   *
+   * @param delivery - The delivery, already verified and admitted by the controller that received it.
+   */
+  public emitDelivery(delivery: AccessWebhookEvent): void {
 
-    // Publish the motion event to MQTT, if the user has configured it.
-    this.controller.mqtt?.publish(accessDevice.id, "motion", "true");
+    this.emit(ACCESS_WEBHOOK_EVENT_PREFIX + delivery.event, delivery);
+  }
 
-    // Log the event, if configured to do so.
-    if(accessDevice.hints.logMotion) {
+  // Detach from the wire and drop every listener. Called from the controller's teardown, so the bridge never outlives the client whose rail it observes.
+  public dispose(): void {
 
-      accessDevice.log.info("Motion detected.");
-    }
-
-    // Reset our motion event after motionDuration.
-    this.eventTimers[accessDevice.id] = setTimeout(() => {
-
-      motionService.updateCharacteristic(this.hap.Characteristic.MotionDetected, false);
-
-      // If we have a motion trigger switch configured, update it.
-      accessDevice.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
-
-      accessDevice.log.debug("Resetting motion event.");
-
-      // Publish to MQTT, if the user has configured it.
-      this.controller.mqtt?.publish(accessDevice.id, "motion", "false");
-
-      // Delete the timer from our motion event tracker.
-      delete this.eventTimers[accessDevice.id];
-    }, accessDevice.hints.motionDuration * 1000);
+    this.#subscription?.[Symbol.dispose]();
+    this.#subscription = null;
+    this.removeAllListeners();
   }
 }

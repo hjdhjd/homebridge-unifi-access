@@ -2,97 +2,50 @@
  *
  * eslint.config.mjs: Linting defaults for Homebridge plugins.
  */
-import eslintJs from "@eslint/js";
-import hbPluginUtils from "homebridge-plugin-utils/build/eslint-rules.mjs";
-import ts from "typescript-eslint";
-import tsParser from "@typescript-eslint/parser";
+import hbPluginUtils from "homebridge-plugin-utils/eslint";
 
-export default ts.config(
+export default hbPluginUtils({
 
-  eslintJs.configs.recommended,
+  // These are the JS and config files that sit outside the main TypeScript project, so the parser needs its default-project fallback to lint them at all.
+  allowDefaultProject: [ "eslint.config.mjs", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/*.@(js|mjs)" ],
+  // Test, fixture, and helper files are co-located with production code under src/. They follow the same modern style rules as production but legitimately
+  // use a few patterns that the strict production preset would flag:
+  //
+  // - `describe()` / `test()` from `node:test` return promises whose lifecycle the runner itself manages, so a top-level `test(...)` looks like a floating
+  //   promise to the linter even though it is the canonical test definition shape.
+  //
+  // - Tests routinely narrow `unknown` inputs through guards that, after narrowing, leave subsequent member access as "definitely defined" - the linter then
+  //   flags the safety-net optional chain as "unnecessary" even though it is the chain that *enabled* the narrowing.
+  //
+  // - Test helpers compose mocks with `mock.fn()` and other return values whose types are intentionally permissive; requiring explicit return-type annotations
+  //   on every inline test arrow function adds noise without catching real bugs.
+  //
+  // - Some test callbacks are declared with `Promise<T>` return signatures (because the helper they pass to is async-shaped) but have no meaningful body to
+  //   await internally. Enforcing `require-await` here would force a cosmetic `await Promise.resolve()` inside every such callback - we'd rather let the test
+  //   express the intent directly. The test code paths are exercised by the runner regardless of the keyword.
+  //
+  // We turn off the following rules for test infrastructure so the rest of the strict preset still applies. Mirrors the same admission unifi-protect uses
+  // so a single test idiom carries across both repos.
+  extraConfigs: [
+    // server.js runs in Node, so it needs console and fetch declared as readonly globals - the js preset applied to that file pattern does not supply them on its own.
+    { files: ["homebridge-ui/server.js"], languageOptions: { globals: { console: "readonly", fetch: "readonly" } } },
+    {
 
-  {
+      files: [ "**/*.test.ts", "**/*.fixtures.ts", "**/*.helpers.ts" ],
+      rules: {
 
-    files: ["src/**.ts"],
-    rules: {
-
-      ...hbPluginUtils.rules.ts
-    }
-  },
-
-  {
-
-    files: [ "homebridge-ui/public/**/*.@(js|mjs)", "homebridge-ui/server.js", "eslint.config.mjs" ],
-    rules: {
-
-      ...hbPluginUtils.rules.js
-    }
-  },
-
-  {
-
-    files: [ "src/**.ts", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/**/*.@(js|mjs)", "eslint.config.mjs" ],
-
-    ignores: ["dist"],
-
-    languageOptions: {
-
-      ecmaVersion: "latest",
-      parser: tsParser,
-      parserOptions: {
-
-        ecmaVersion: "latest",
-
-        projectService: {
-
-          allowDefaultProject: [ "eslint.config.mjs", "homebridge-ui/*.@(js|mjs)", "homebridge-ui/public/*.@(js|mjs)", "homebridge-ui/public/lib/*.@(js|mjs)" ],
-          defaultProject: "./tsconfig.json"
-        }
-      },
-
-      sourceType: "module"
-    },
-
-    linterOptions: {
-
-      reportUnusedDisableDirectives: "error"
-    },
-
-    plugins: {
-
-      ...hbPluginUtils.plugins
-    },
-
-    rules: {
-
-      ...hbPluginUtils.rules.common
-    }
-  },
-
-  {
-
-    files: [ "homebridge-ui/public/lib/webUi.mjs", "homebridge-ui/public/lib/webUi-featureoptions.mjs", "homebridge-ui/public/ui.mjs" ],
-
-    languageOptions: {
-
-      globals: {
-
-        ...hbPluginUtils.globals.ui
+        "@typescript-eslint/explicit-function-return-type": "off",
+        "@typescript-eslint/no-floating-promises": "off",
+        "@typescript-eslint/no-unnecessary-condition": "off",
+        "@typescript-eslint/require-await": "off"
       }
     }
-  },
+  ],
 
-  {
-
-    files: ["homebridge-ui/server.js"],
-
-    languageOptions: {
-
-      globals: {
-
-        console: "readonly",
-        fetch: "readonly"
-      }
-    }
-  }
-);
+  // The webUI library directory holds a build-time copy of the homebridge-plugin-utils webUI framework rather than anything authored here, so linting it would report
+  // findings against code this repository does not own. The ignore stops being needed once that framework is consumed as a versioned bundle rather than a flat copy.
+  ignores: ["homebridge-ui/public/lib/**"],
+  js: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs", "homebridge-ui/server.js", "eslint.config.mjs" ],
+  ts: ["src/**/*.ts"],
+  ui: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs" ]
+});

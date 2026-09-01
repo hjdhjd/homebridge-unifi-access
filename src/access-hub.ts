@@ -2,39 +2,47 @@
  *
  * access-hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { AccessDevice, type AccessHints } from "./access-device.js";
-import type { AccessDeviceConfig, AccessEventDoorbellCancel, AccessEventDoorbellRing, AccessEventPacket } from "unifi-access";
-import type { CharacteristicValue, PlatformAccessory } from "homebridge";
-import { acquireService, validService } from "homebridge-plugin-utils";
-import type { AccessController } from "./access-controller.js";
-import { AccessReservedNames } from "./access-types.js";
-
-// Access methods available to us for readers.
-const accessMethods = [
-
-  { capability: "identity_face_unlock", key: "face", name: "Face Unlock", option: "AccessMethod.Face", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_FACE },
-  { capability: "hand_wave", key: "wave", name: "Hand Wave", option: "AccessMethod.Hand", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_HAND },
-  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], configsApiKeys: [ "bt", "bt_button", "bt_tap" ], key: "bt_button",
-    name: "Mobile", option: "AccessMethod.Mobile", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
-  { capability: "nfc_card_easy_provision", key: "nfc", name: "NFC", option: "AccessMethod.NFC", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_NFC },
-  { capability: "pin_code", key: "pin_code", name: "PIN", option: "AccessMethod.PIN", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_PIN },
-  { capability: "qr_code", key: "qr_code", name: "QR Code", option: "AccessMethod.QR", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_QR },
-  { capability: "support_apple_pass", key: "apple_pass", name: "TouchPass", option: "AccessMethod.TouchPass", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS }
-] as const;
+import { ACCESS_API_PATH_PREFIX, AccessClient } from "unifi-access";
+import type { AccessConsumedWebhookDelivery, AccessHints } from "./access-device.ts";
+import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
+import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
+import type { CharacteristicValue, Service } from "homebridge";
+import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
+  composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
+  dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "./access-policy.ts";
+import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
+import { ACCESS_DEVICE_UPDATE_EVENT } from "./access-events.ts";
+import { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
+import type { AccessAccessory } from "./access-types.ts";
+import type { AccessController } from "./access-controller.ts";
+import { AccessDevice } from "./access-device.ts";
+import type { AccessMethodKey } from "./access-policy.ts";
+import { AccessReservedNames } from "./access-types.ts";
+import type { Nullable } from "homebridge-plugin-utils";
+import { mqttTopic } from "./access-mqtt.ts";
 
 // Device types that use the /configs API endpoint instead of /settings for access method changes.
 const configsApiDeviceTypes = ["UVC G6 Entry"];
 
-// Extract the key property values from the access methods array to create a union type of all possible keys for our supported access methods.
-type AccessMethodKey = typeof accessMethods[number]["key"];
+/* The access method state a reader's switches read, one model per device serving both client identities. The values map is keyed by the catalog's configs
+ * vocabulary and holds whether each method is enabled. Seeding is what gates switch existence: an unseeded device keeps whatever services it has and creates
+ * none, because absence of knowledge is not knowledge of absence, while a seeded device creates and retires switches from what the model actually holds.
+ */
+type AccessMethodState = { readonly phase: "seeding" } | { readonly phase: "seeded"; readonly values: Map<AccessMethodKey, boolean> } |
+  { readonly phase: "unseeded" };
 
-// Access v2 event data so that we can detect access method changes.
+// The one unseeded state every initialization and reset shares. A transition always replaces the whole field and no site mutates this object, so one instance
+// serves every device.
+const ACCESS_METHOD_UNSEEDED: AccessMethodState = { phase: "unseeded" };
+
+/* Access v2 event data so that we can detect access method changes. The library's dialect translation keeps access_method off the canonical record payload by
+ * design - the field has no bootstrap counterpart to reconcile against - so the raw packet rail is the designed consumption path and this local type is the honest
+ * read of it. The values are typed as plain strings because the wire carries more than the "yes"/"no" pair (key names echoed back as values, among others), and
+ * the handler's own explicit value filter is what makes the loose cast safe.
+ */
 interface AccessEventDeviceUpdateV2 {
 
-  access_method?: {
-
-    [K in AccessMethodKey]?: "yes" | "no";
-  };
+  access_method?: Partial<Record<AccessMethodKey, string>>;
 
   // Location states for UA Gate hubs which contain the lock state per door.
   location_states?: {
@@ -48,74 +56,70 @@ interface AccessEventDeviceUpdateV2 {
   }[];
 }
 
-// Define the dry contact inputs we're interested in for Access hubs.
-const sensorInputs = [ "Dps", "Rel", "Ren", "Rex" ] as const;
+/* The dry contact inputs that share one shape: a wiring-evidence gate, a generated state getter, and an MQTT tail of their own.
+ *
+ * The door position sensor is deliberately not one of them. All three of the things that shape a terminal input differ for it - where its eligibility comes from,
+ * where its state comes from, and how it reaches HomeKit - so it is configured and updated on its own rather than forced through a loop that would have to special
+ * case it at every step.
+ */
+const sensorInputs = [ "Rel", "Ren", "Rex" ] as const;
 
 // Create a union type based on our sensor inputs.
 type SensorInput = typeof sensorInputs[number];
 
-// Define the sensor wiring. It's a bit convoluted because there's a lot of inconsistency at the API level across device types in Access:
-//   - For UA-ULTRA, we look at rex_button_mode = proxyMode.
-//   - For other models, we look at per-device wiring keys.
-const sensorWiring: Record<SensorInput, { proxyMode?: "dps" | "rex"; wiring?: Record<string, string[]> }> = {
+/* Each input's HomeKit-facing name and its MQTT topic tail, in one table so that configuration and live updates cannot drift on either. The label is carried in the
+ * title case a service name wants; the log lines derive the other casings they need from it, so each input is spelled here exactly once.
+ */
+const terminalInputs: { input: SensorInput; label: string; topic: string }[] = [
 
-  Dps: {
+  { input: "Rel", label: "Remote Release", topic: "rel" },
+  { input: "Ren", label: "Request to Enter Sensor", topic: "ren" },
+  { input: "Rex", label: "Request to Exit Sensor", topic: "rex" }
+];
 
-    proxyMode: "dps",
-    wiring: {
+// The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
+const DPS_LABEL = "Door Position Sensor";
 
-      "UA-Hub-Door-Mini": [ "wiring_state_d1-dps-neg", "wiring_state_d1-dps-pos" ],
-      UAH: [ "wiring_state_dps-neg", "wiring_state_dps-pos" ],
-      UGT: [ "wiring_state_gate-dps-neg", "wiring_state_gate-dps-pos" ]
-    }
-  },
+// An input label as a sentence opens it: the first word's capital kept and the rest lowered. This is what lets one spelling in the table above serve a service name,
+// a mid-sentence mention, and a sentence-leading one.
+function sentenceCase(label: string): string {
+
+  return label.charAt(0) + label.slice(1).toLowerCase();
+}
+
+// Define the sensor wiring - the per-model wiring-key pairs whose live circuit detection says an input is actually connected. The per-device-type inconsistency is
+// the controller's own; a model naming no pair for an input simply offers no wiring evidence about it.
+const sensorWiring: Record<SensorInput, Record<string, string[]>> = {
+
   Rel: {
 
-    wiring: {
-
-      UAH: [ "wiring_state_rel-neg", "wiring_state_rel-pos" ]
-    }
+    UAH: [ "wiring_state_rel-neg", "wiring_state_rel-pos" ]
   },
   Ren: {
 
-    wiring: {
-
-      UAH: [ "wiring_state_ren-neg", "wiring_state_ren-pos" ]
-    }
+    UAH: [ "wiring_state_ren-neg", "wiring_state_ren-pos" ]
   },
   Rex: {
 
-    proxyMode: "rex",
-
-    wiring: {
-
-      "UA-Hub-Door-Mini": [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos" ],
-      UAH: [ "wiring_state_rex-neg", "wiring_state_rex-pos" ]
-    }
+    "UA-Hub-Door-Mini": [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos" ],
+    UAH: [ "wiring_state_rex-neg", "wiring_state_rex-pos" ]
   }
 };
 
-// Create a mapped type of our HomeKit terminal input state check. We exclude hkDpsState since we implement it with a manual getter/setter that provides fallback
-// behavior when the DPS contact sensor is disabled.
-export type AccessHubHKProps = {
-
-  [K in `hk${SensorInput}State` as K extends "hkDpsState" ? never : K]: CharacteristicValue;
-};
+// Create a mapped type of our HomeKit terminal input state check.
+export type AccessHubHKProps = Record<`hk${SensorInput}State`, CharacteristicValue>;
 
 // Create a mapped type of our wiring checks.
-export type AccessHubWiredProps = {
-
-  [P in `is${SensorInput}Wired`]: boolean;
-};
+export type AccessHubWiredProps = Record<`is${SensorInput}Wired`, boolean>;
 
 // Merge the declarations into the definition of the class, so TypeScript knows that these properties will exist.
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export interface AccessHub extends AccessHubHKProps, AccessHubWiredProps { }
 
 // Utility to assist us in constructing typing for the properties we will be using.
 type KeyOf<T, Prefix extends string, Suffix extends string = ""> = Extract<keyof T, `${Prefix}${SensorInput}${Suffix}`>;
 
 // Finally, define our key-unions types so we can satisfy our typing needs.
-type HasWiringHintKey = KeyOf<AccessHints, "hasWiring">;
 type HubStateKey = KeyOf<AccessHub, "hub", "State">;
 type HkStateKey = KeyOf<AccessHub, "hk", "State">;
 type LogHintKey = KeyOf<AccessHints, "log">;
@@ -124,40 +128,76 @@ type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 // Valid door service types.
 type DoorServiceType = "Lock" | "GarageDoorOpener";
 
+/* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
+ * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
+ */
+type DoorTravel = { phase: "opening" | "closing" } | { lastDirection: "opening" | "closing"; phase: "stopped" };
+
+// Where a garage door stands: still, or running one of the travels above.
+type DoorTransition = { phase: "idle" } | DoorTravel;
+
 // Constants for timing.
 const AUTO_LOCK_DELAY_MS = 5000;
-const GATE_TRANSITION_COOLDOWN_MS = 5000;
+// How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the controller
+// sees the correction as a fresh value rather than as a race against the write it just made.
+const CHARACTERISTIC_REVERT_DELAY_MS = 50;
+// How long a dispatched doorbell ring or cancel waits before settling the trigger switch back onto the mirrored ring state: long enough for the controller's own
+// ring notification to arrive and win, short enough that a ring the notification stream never confirms is corrected while the user is still looking at the switch.
+const DOORBELL_TRIGGER_RECONCILE_DELAY_MS = 5000;
+// How long a UA Gate is given to travel when no duration has been configured for it. A gate's motion is short and much the same from one installation to the next,
+// where a garage door's travel time varies with the door, so a default serves the one and not the other.
+const GATE_TRANSITION_DURATION_MS = 5000;
+// The key the main door's transition timer is tracked under. It is stated once so the arm, the re-arm, and the cancel can never name different timers.
+const DOOR_TRANSITION_TIMER_KEY = "door-transition";
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class AccessHub extends AccessDevice {
 
   private _hkDpsState: CharacteristicValue;
   private _hkLockState: CharacteristicValue;
   private _hkSideDoorDpsState: CharacteristicValue;
   private _hkSideDoorLockState: CharacteristicValue;
+  private readonly doorbellGuardFilter: readonly string[];
   private doorbellRingRequestId: string | null;
-  private gateTransitionUntil: number;
   private lockDelayInterval: number | undefined;
   private mainDoorLocationId: string | undefined;
   private sideDoorLocationId: string | undefined;
-  private sideDoorGateTransitionUntil: number;
-  public uda: AccessDeviceConfig;
+  // The tamper reading we last projected, or undefined until the record has told us anything. Holding it is what lets a genuine change be told from a first sighting.
+  private tamperVerdict: boolean | undefined;
+  // What we know about this device's access methods, and the gate every switch's existence and every switch's reading run through.
+  #accessMethodState: AccessMethodState;
+  // Whether a door-state delivery is still applying its readings, which is what holds the opener's own update until both of them have landed.
+  #doorStateApplying: boolean;
+  // Where the main door's travel stands. Only the main door has an opener, so only the main door runs a machine.
+  #doorTransition: DoorTransition;
+  // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
+  // rows we have already folded be told from one carrying news.
+  #foldedConfigValues: Map<AccessMethodKey, boolean> | undefined;
 
   // Create an instance.
-  constructor(controller: AccessController, device: AccessDeviceConfig, accessory: PlatformAccessory) {
+  constructor(controller: AccessController, projection: AccessDeviceProjection, accessory: AccessAccessory, admission: AccessStateDevice & { mac: string },
+    hubProjection?: AccessHubProjection) {
 
-    super(controller, accessory);
+    super(controller, projection, accessory, admission, hubProjection);
 
-    this.uda = device;
-    this._hkDpsState = this.hubDpsState;
+    // The neutral readings a door is assumed to hold before anything has been heard about it. configureDevice() settles them from what the controller has actually
+    // established, so the assumption never has to be restated anywhere else.
+    this._hkDpsState = this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
     this._hkLockState = this.hubLockState;
     this._hkSideDoorDpsState = this.hubSideDoorDpsState;
     this._hkSideDoorLockState = this.hubSideDoorLockState;
-    this.gateTransitionUntil = 0;
+    this.doorbellGuardFilter = parseDoorbellGuardFilter(this.getFeatureValue("Hub.Doorbell.DoorGuards"));
     this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
     this.mainDoorLocationId = undefined;
     this.sideDoorLocationId = undefined;
-    this.sideDoorGateTransitionUntil = 0;
     this.doorbellRingRequestId = null;
+    this.tamperVerdict = undefined;
+    // Nothing has been heard about this device's access methods yet, which configureDevice() settles below from whichever rail can answer for it.
+    this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
+    // A door we have not been asked to move is standing still, which is the only honest reading before anything has been commanded.
+    this.#doorStateApplying = false;
+    this.#doorTransition = { phase: "idle" };
+    this.#foldedConfigValues = undefined;
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
     if((this.lockDelayInterval !== undefined) && (this.lockDelayInterval < 0)) {
@@ -170,16 +210,12 @@ export class AccessHub extends AccessDevice {
   }
 
   // Configure device-specific settings for this device.
-  protected configureHints(): boolean {
+  protected override configureHints(): boolean {
 
     // Configure our parent's hints.
     super.configureHints();
 
     this.hints.hasSideDoor = (this.uda.device_type === "UGT") && this.hasFeature("Hub.SideDoor");
-    this.hints.hasWiringDps = [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.DPS");
-    this.hints.hasWiringRel = ["UA Hub"].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.REL");
-    this.hints.hasWiringRen = ["UA Hub"].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.REN");
-    this.hints.hasWiringRex = [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ].includes(this.uda.display_model ?? "") && this.hasFeature("Hub.REX");
     this.hints.hasWiringSideDoorDps = this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.DPS");
     this.hints.logDoorbell = this.hasFeature("Log.Doorbell");
     this.hints.logDps = this.hasFeature("Log.DPS");
@@ -187,13 +223,6 @@ export class AccessHub extends AccessDevice {
     this.hints.logRel = this.hasFeature("Log.REL");
     this.hints.logRen = this.hasFeature("Log.REN");
     this.hints.logRex = this.hasFeature("Log.REX");
-
-    // The Ultra has a single terminal input that's selectable between DPS and REX modes. We detect which mode it's operating in, and adjust accordingly. We've
-    // over-engineered this a bit for future-proofing.
-    if(this.uda.display_model === "UA Ultra") {
-
-      this.checkUltraInputs();
-    }
 
     return true;
   }
@@ -210,14 +239,15 @@ export class AccessHub extends AccessDevice {
     return this.hasFeature("Hub.Door.UseGarageOpener") ? "GarageDoorOpener" : "Lock";
   }
 
-  // Convert lock string value to HomeKit LockCurrentState.
-  private toLockState(lockValue: "locked" | "unlocked" | "lock" | "unlock"): CharacteristicValue {
+  // Convert lock string value to HomeKit LockCurrentState. The parameter is a plain string because the door state map's own vocabulary is deliberately open, and this
+  // is already total over anything it can carry: a value we don't recognize falls through to secured, which is the safe reading of an unknown lock.
+  private toLockState(lockValue: string): CharacteristicValue {
 
     return [ "unlock", "unlocked" ].includes(lockValue) ? this.hap.Characteristic.LockCurrentState.UNSECURED : this.hap.Characteristic.LockCurrentState.SECURED;
   }
 
-  // Convert DPS string value to HomeKit ContactSensorState.
-  private toDpsState(dpsValue: "open" | "close"): CharacteristicValue {
+  // Convert DPS string value to HomeKit ContactSensorState. Total over any vocabulary for the same reason toLockState is, falling through to contact detected.
+  private toDpsState(dpsValue: string): CharacteristicValue {
 
     return dpsValue === "open" ? this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED : this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
   }
@@ -234,10 +264,12 @@ export class AccessHub extends AccessDevice {
     return state === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
   }
 
-  // Discover main and side door location IDs for UA Gate hubs. This allows us to receive remote_unlock events for each door.
+  // Discover main and side door location IDs for UA Gate hubs. This allows us to receive remote_unlock events for each door. The heuristic itself is the policy
+  // module's shared statement; this method binds it to the live topology snapshot, gates the side arm on the user's side-door preference, and seeds the door
+  // states behind the result.
   private discoverDoorIds(): void {
 
-    const doors = this.controller.udaApi.doors ?? [];
+    const doors: AccessStateDoor[] = [...this.controller.client.state.snapshot().doors.values()];
 
     if(doors.length === 0) {
 
@@ -246,107 +278,52 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // Get the primary door ID from device config (may be undefined).
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    const primaryDoorId = this.uda.door?.unique_id;
+    const discovered = discoverDoorLocations({ device: this.uda, doors: doors, sideDoorEligible: this.hints.hasSideDoor });
 
-    // Strategy 1: Use the device's bound door as main door.
-    if(primaryDoorId) {
+    this.mainDoorLocationId = discovered.mainDoorLocationId;
+    this.sideDoorLocationId = discovered.sideDoorLocationId;
 
-      this.mainDoorLocationId = primaryDoorId;
-    } else if(doors.length >= 1) {
-
-      // Strategy 2: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
-      const mainDoor = doors.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) && !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name));
-
-      // Strategy 3: Use the first door as main door.
-      this.mainDoorLocationId = mainDoor?.unique_id ?? doors[0].unique_id;
-    }
-
-    // Find the side door (if enabled).
-    if(this.hints.hasSideDoor) {
-
-      // Strategy 1: Check extensions for oper2 port setting.
-      const sideDoorFromExt = this.uda.extensions?.find(ext => (ext.extension_name === "port_setting") && (ext.target_name === "oper2"))?.target_value;
-
-      if(sideDoorFromExt) {
-
-        this.sideDoorLocationId = sideDoorFromExt;
-      } else {
-
-        // Strategy 2: Look for a door named like "side", "portillon", "pedestrian".
-        const sideDoor = doors.find(door => (door.unique_id !== this.mainDoorLocationId) && /portillon|side|pedestrian|pieton|wicket|back|secondary/i.test(door.name));
-
-        if(sideDoor) {
-
-          this.sideDoorLocationId = sideDoor.unique_id;
-        } else if(doors.length === 2) {
-
-          // Strategy 3: If we have exactly 2 doors, the other one is the side door.
-          const otherDoor = doors.find(door => door.unique_id !== this.mainDoorLocationId);
-
-          this.sideDoorLocationId = otherDoor?.unique_id;
-        }
-      }
-    }
-
-    // Initialize door states from the already-loaded doors data.
-    this.initializeDoorsFromBootstrap(doors);
+    // Initialize door states from what the controller has already told us about each door.
+    this.initializeDoorStates();
   }
 
-  // Initialize door states from the doors data loaded during API bootstrap. This avoids making additional API calls which may fail.
-  private initializeDoorsFromBootstrap(doors: { unique_id: string; name: string; door_position_status?: string; door_lock_relay_status?: string }[]): void {
+  /* Seed our door states from the client's door state map, which every connect mode populates. The door topology records carry no status of their own - position and
+   * lock live in the door state map, keyed by the door's own identity - so this is where the answer is. A door the controller has said nothing about, or one whose
+   * entry is silent on a member, falls back to closed and secured, which is what we have always assumed before hearing otherwise.
+   *
+   * Every seed here reaches HomeKit rather than the backing field alone. This runs after the services are configured, and the relay rows they were built from can
+   * disagree with what the door state map says - so a characteristic left holding the record's reading would render a stale door until that door next moved. The
+   * locks ride their setters, whose early return on an agreeing reading makes the two sources agreeing cost nothing; the side door's position has no accessor pair,
+   * so it takes the file's own idiom for that field - the assignment followed by an explicit push. Adoption stays silent throughout, with no MQTT tail and no log
+   * line, because a reading we are seeing for the first time is not a transition anyone observed.
+   */
+  private initializeDoorStates(): void {
+
+    const doorStates = this.controller.client.doorStates;
 
     // Find and initialize main door state.
     if(this.mainDoorLocationId) {
 
-      const mainDoor = doors.find(d => d.unique_id === this.mainDoorLocationId);
+      const mainDoor = doorStates.get(this.mainDoorLocationId);
 
-      if(mainDoor) {
+      this.hkDpsState = this.toDpsState(mainDoor?.dps ?? "close");
+      this.hkLockState = this.toLockState(mainDoor?.lock ?? "lock");
 
-        const dpsStatus = mainDoor.door_position_status ?? "close";
-        const lockStatus = mainDoor.door_lock_relay_status ?? "lock";
+      // Update the door service.
+      if(this.doorServiceType === "GarageDoorOpener") {
 
-        // Set DPS state.
-        const newDpsState = dpsStatus === "open" ? this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-          this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-        this.hkDpsState = newDpsState;
-
-        // Set lock state.
-        const newLockState = lockStatus === "unlock" ? this.hap.Characteristic.LockCurrentState.UNSECURED : this.hap.Characteristic.LockCurrentState.SECURED;
-
-        this._hkLockState = newLockState;
-
-        // Update the door service.
-        if(this.doorServiceType === "GarageDoorOpener") {
-
-          this.updateDoorServiceState(false);
-        }
+        this.updateDoorServiceState(false);
       }
     }
 
     // Find and initialize side door state.
     if(this.sideDoorLocationId && this.hints.hasSideDoor) {
 
-      const sideDoor = doors.find(d => d.unique_id === this.sideDoorLocationId);
+      const sideDoor = doorStates.get(this.sideDoorLocationId);
 
-      if(sideDoor) {
-
-        const dpsStatus = sideDoor.door_position_status ?? "close";
-        const lockStatus = sideDoor.door_lock_relay_status ?? "lock";
-
-        // Set DPS state.
-        const newDpsState = dpsStatus === "open" ? this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
-          this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-
-        this._hkSideDoorDpsState = newDpsState;
-
-        // Set lock state.
-        const newLockState = lockStatus === "unlock" ? this.hap.Characteristic.LockCurrentState.UNSECURED : this.hap.Characteristic.LockCurrentState.SECURED;
-
-        this._hkSideDoorLockState = newLockState;
-      }
+      this._hkSideDoorDpsState = this.toDpsState(sideDoor?.dps ?? "close");
+      this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, this._hkSideDoorDpsState);
+      this.hkSideDoorLockState = this.toLockState(sideDoor?.lock ?? "lock");
     }
   }
 
@@ -357,14 +334,39 @@ export class AccessHub extends AccessDevice {
     this._hkSideDoorDpsState = this.hubSideDoorDpsState;
     this._hkSideDoorLockState = this.hubSideDoorLockState;
 
-    // Clean out the context object in case it's been polluted somehow.
-    this.accessory.context = {};
-    this.accessory.context.mac = this.uda.mac;
-    this.accessory.context.controller = this.controller.uda.host.mac;
+    /* Seed our door state from what the controller has established about the door we drive, before any service is configured against it. A door the controller has
+     * said nothing about, or one whose entry is silent on a member, falls back to closed and secured...what we have always assumed before hearing otherwise. This
+     * is the one place that assumption is spelled out for a single-door hub.
+     *
+     * A UA Gate seeds through initializeDoorStates instead, from each of the two doors it drives.
+     */
+    if(this.uda.device_type !== "UGT") {
 
+      const entry = this.#doorStateEntry;
+
+      this._hkDpsState = this.toDpsState(entry?.dps ?? "close");
+      this._hkLockState = this.toLockState(entry?.lock ?? "lock");
+    }
+
+    /* Adopt whatever tamper reading our record arrived with, once, before any sensor is configured against it. Adoption is silent: a reading we are seeing for the
+     * first time is not a transition anyone observed. This is deliberately the only place the record is consulted for a baseline - the configure blocks below read
+     * the field rather than the record, so their re-runs on each delivered update cannot re-seed it and mask a genuine change.
+     */
+    this.tamperVerdict = this.hasCapability("tamper_proofing") ? tamperState(this.uda) : undefined;
+
+    /* Clean out the context object in case it's been polluted somehow, then record what an accessory carries for the life of the pairing: the hardware it names,
+     * the controller that created it, and the device identity it was minted under - the last being what tells a startup sweep that this accessory is the
+     * identity's own rather than one created under an earlier form.
+     */
+    this.accessory.context = {};
+    this.accessory.context.controller = this.controller.ownershipKey;
+    this.accessory.context.id = this.id;
+    this.accessory.context.mac = this.mac;
+
+    // A door left on the default relock behavior is not a choice the user made, so it is said at debug level. A configured interval is a deviation, and says so.
     if(this.lockDelayInterval === undefined) {
 
-      this.log.info("The door lock relay will lock five seconds after unlocking in HomeKit.");
+      this.log.debug("The door lock relay will lock five seconds after unlocking in HomeKit.");
     } else {
 
       this.log.info("The door lock relay will remain unlocked %s after unlocking in HomeKit.",
@@ -375,7 +377,7 @@ export class AccessHub extends AccessDevice {
 
       if(this.lockDelayInterval === undefined) {
 
-        this.log.info("The side door lock relay will lock five seconds after unlocking in HomeKit.");
+        this.log.debug("The side door lock relay will lock five seconds after unlocking in HomeKit.");
       } else {
 
         this.log.info("The side door lock relay will remain unlocked %s after unlocking in HomeKit.",
@@ -410,9 +412,16 @@ export class AccessHub extends AccessDevice {
     this.configureMqtt();
 
     // Listen for events.
-    this.controller.events.on(this.uda.unique_id, this.listeners[this.uda.unique_id] = this.eventHandler.bind(this));
-    this.controller.events.on("access.remote_view", this.listeners["access.remote_view"] = this.eventHandler.bind(this));
-    this.controller.events.on("access.remote_view.change", this.listeners["access.remote_view.change"] = this.eventHandler.bind(this));
+    const handler = this.eventHandler.bind(this);
+
+    this.registerListener(this.uda.unique_id, handler);
+    this.registerListener("access.remote_view", handler);
+    this.registerListener("access.remote_view.change", handler);
+
+    // Listen for the two webhook deliveries this plugin consumes. They ride their own rail rather than the packet handler above, because a delivery and a socket
+    // frame of the same name carry entirely different payloads.
+    this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
+    this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
 
     // For UA Gate hubs, we discover door IDs and subscribe to their events. This is needed because remote_unlock events use the door's location_id as the
     // event_object_id, not the hub's device_id.
@@ -423,12 +432,12 @@ export class AccessHub extends AccessDevice {
       // Subscribe to events for both doors.
       if(this.mainDoorLocationId) {
 
-        this.controller.events.on(this.mainDoorLocationId, this.listeners[this.mainDoorLocationId] = this.eventHandler.bind(this));
+        this.registerListener(this.mainDoorLocationId, handler);
       }
 
       if(this.sideDoorLocationId) {
 
-        this.controller.events.on(this.sideDoorLocationId, this.listeners[this.sideDoorLocationId] = this.eventHandler.bind(this));
+        this.registerListener(this.sideDoorLocationId, handler);
       }
     }
 
@@ -437,6 +446,20 @@ export class AccessHub extends AccessDevice {
 
   // Configure the access method switches for HomeKit.
   private configureAccessMethodSwitches(): boolean {
+
+    /* Switches are created and retired from what we actually know about this device's access methods, and never from what we have yet to hear. A record carrying
+     * configuration rows answers synchronously, right here; a record carrying none is answered by the official settings read the dispatch below launches. Until one
+     * of them has landed, every service the accessory already carries is left exactly as it is and none is created - absence of knowledge is not knowledge of
+     * absence, and retiring a switch on a start where the read failed would take the automations behind it with it.
+     */
+    this.#foldConfigRows();
+
+    if(this.#accessMethodState.phase !== "seeded") {
+
+      this.#dispatchAccessMethodSeed();
+
+      return true;
+    }
 
     for(const accessMethod of accessMethods) {
 
@@ -458,43 +481,311 @@ export class AccessHub extends AccessDevice {
       }
 
       // Retrieve the state when requested.
-      service.getCharacteristic(this.hap.Characteristic.On).onGet(() => Boolean(this.uda.configs?.find(entry => entry.key === accessMethod.key)?.value === "yes"));
+      service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.#accessMethodEnabled(accessMethod.key));
 
-      // Set the state when requested.
+      // Set the state when requested. Writes route official-first with a read-back for certainty; reads answer from the access method state model, which the
+      // record's configuration rows, the official settings read, and the v2 access method events each feed.
       service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
-        const entry = this.uda.configs?.find(entry => entry.key === accessMethod.key);
-        const isConfigsApi = configsApiDeviceTypes.includes(this.uda.device_type);
-        let success;
+        const enabled = value === true;
+        const official = this.controller.client.official;
 
-        if(entry) {
+        // This gate is what narrows the nullable reference for the parameter pass below...a narrowing cannot cross a method boundary, so the method takes it
+        // already narrowed.
+        if(official) {
 
-          const endpoint = isConfigsApi ? "/configs?is_camera=true" : "/settings";
-          const keys = (isConfigsApi && ("configsApiKeys" in accessMethod)) ? accessMethod.configsApiKeys : [entry.key];
-          const payload = keys.map(key => ({ key: key, tag: "open_door_mode", value: value ? "yes" : "no" }));
+          const verdict = await this.#writeAccessMethodOfficial(official, accessMethod, enabled);
 
-          const response = await this.controller.udaApi.retrieve(this.controller.udaApi.getApiEndpoint("device") + "/" + this.uda.unique_id + endpoint, {
+          switch(accessMethodWriteFollowup({ transport: this.controller.client.transport !== null, verdict })) {
 
-            body: JSON.stringify(payload),
-            method: "PUT"
-          });
+            case "complete":
 
-          success = this.controller.udaApi.responseOk(response?.statusCode);
+              /* The switch already carries the value HomeKit wrote, and the model takes it too: a confirmed write is the freshest thing anyone knows about the
+               * method, so a read arriving before the controller's own echo answers what the controller confirmed rather than the rows it has yet to restate. The
+               * v2 access method events and the record rail keep the model current from there.
+               */
+              this.#foldMethodValue(accessMethod.key, enabled);
+
+              return;
+
+            case "decline":
+
+              // The controller answered success while leaving the setting unchanged, which only the read-back can reveal. It answered and refused, so the raw
+              // endpoint is not asked to second-guess it, and the switch reverts to the truth the read-back showed.
+              this.log.error("The controller declined the %s access method change.", accessMethod.name);
+              this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
+
+              return;
+
+            case "fallback":
+
+              // A thrown official error keeps controllers without the official settings surface working, and an absent verdict covers a method the official map
+              // cannot see on this device while the raw endpoint still can.
+              if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
+
+                this.#foldMethodValue(accessMethod.key, enabled);
+
+                return;
+              }
+
+              break;
+
+            case "revert":
+
+              // No path can carry the write, so the generic tail below surfaces the failure and puts the switch back.
+              break;
+          }
+        } else if(this.controller.client.transport) {
+
+          // Without an official path, the raw credential write carries the change on its own.
+          if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
+
+            this.#foldMethodValue(accessMethod.key, enabled);
+
+            return;
+          }
+        } else {
+
+          // This arm is type-totality rather than a served population: a connected client holds the official surface, a credential transport, or both. Both
+          // getters are nullable by type, and the flow must be total over them.
+          this.log.error("Changing an access method requires the official Access API or UniFi Access controller credentials.");
+          this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
+
+          return;
         }
 
-        // If we didn't find the configuration entry or we didn't succeed in setting the value, revert our switch state.
-        if(!success) {
-
-          this.log.error("Unable to %s the %s access method.", value ? "activate" : "deactivate", accessMethod.name);
-          setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
-        }
+        // Nothing carried the write, so we surface the failure and revert our switch state.
+        this.log.error("Unable to %s the %s access method.", enabled ? "activate" : "deactivate", accessMethod.name);
+        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
       });
 
-      // Initialize the switch.
-      service.updateCharacteristic(this.hap.Characteristic.On, Boolean(this.uda.configs?.find(entry => entry.key === accessMethod.key)?.value === "yes"));
+      // Initialize the switch from the same model its reads answer from, so what HomeKit is handed and what the handler would answer agree from the first pass.
+      service.updateCharacteristic(this.hap.Characteristic.On, this.#accessMethodEnabled(accessMethod.key));
     }
 
     return true;
+  }
+
+  // Whether a method reads on. A model nothing has seeded answers off for every method, which is the same answer a seeded model gives for a method it holds no
+  // entry for - a capability-gated method the device's own configuration never mentioned.
+  #accessMethodEnabled(key: AccessMethodKey): boolean {
+
+    const state = this.#accessMethodState;
+
+    return (state.phase === "seeded") && (state.values.get(key) === true);
+  }
+
+  /* Fold the record's own configuration rows into the model, replacing it wholesale rather than merging it: a row the record has dropped must leave no entry
+   * standing, exactly as the live row read this replaces would have answered off for it.
+   *
+   * The memo is what makes two writers of one model safe. A delivery whose rows translate to what the last applied fold already produced carries no access method
+   * news, so it changes nothing, and the fresher knowledge the packet and write folds have put in the model survives it. The comparison is by value rather than by
+   * array identity because the record's configs array offers no identity worth trusting: the periodic bootstrap refresh mints a fresh array on every tick an
+   * unrelated field moved, and a websocket delta replaces it atomically whenever a terminal input row changes, since the access method rows share the one flat
+   * array with them. What the memo holds is a copy rather than the model's own map, because the packet and write folds write into that map...a memo pointing at it
+   * would absorb their writes and then read the next stale restatement as news, reverting the very value the memo exists to protect.
+   */
+  #foldConfigRows(): void {
+
+    const rows = this.uda.configs;
+
+    if(rows === undefined) {
+
+      return;
+    }
+
+    const values = accessMethodValuesFromConfigRows({ methods: accessMethods, rows });
+
+    if(this.#configRowsRestated(values)) {
+
+      return;
+    }
+
+    this.#accessMethodState = { phase: "seeded", values };
+    this.#foldedConfigValues = new Map(values);
+  }
+
+  // Whether a fresh translation of the configuration rows says anything the last applied fold did not. Equal is the same size and every entry matching, and it is
+  // the size half that makes a row the record has dropped read as news rather than as a match.
+  #configRowsRestated(values: ReadonlyMap<AccessMethodKey, boolean>): boolean {
+
+    const memo = this.#foldedConfigValues;
+
+    if(memo?.size !== values.size) {
+
+      return false;
+    }
+
+    for(const [ key, value ] of values) {
+
+      if(memo.get(key) !== value) {
+
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // Fold one method's value into the model. A model nothing has seeded is left alone: one reading is not the whole truth, and the settings read its caller
+  // triggers instead answers with all of it.
+  #foldMethodValue(key: AccessMethodKey, enabled: boolean): void {
+
+    const state = this.#accessMethodState;
+
+    if(state.phase !== "seeded") {
+
+      return;
+    }
+
+    state.values.set(key, enabled);
+  }
+
+  /* Launch the official settings read that seeds a device the record rail says nothing about, and launch it exactly once. Only an unseeded phase dispatches, and
+   * the transition into seeding happens here, synchronously, ahead of any async work - so a burst of access method packets arriving while the read is in flight
+   * finds a model that is already seeding and asks for nothing more. Only readers carry switches, so a plain hub never fetches settings it would project nowhere,
+   * nor warns about them. Every caller folds the record's rows first, so an unseeded phase at this refusal already means a record that carried none.
+   */
+  #dispatchAccessMethodSeed(): void {
+
+    const official = this.controller.client.official;
+
+    if((this.#accessMethodState.phase !== "unseeded") || !official || !this.hasCapability("is_reader")) {
+
+      return;
+    }
+
+    this.#accessMethodState = { phase: "seeding" };
+
+    guardedDispatch({ handler: async (): Promise<void> => this.#seedAccessMethodState(), label: "access method seeding", log: this.log });
+  }
+
+  /* Read this device's access methods from the official settings surface and seed the model with them, which is what gives a reader on a token-only controller its
+   * switches: no configuration rows reach us for it, and this read is the only other place that truth lives.
+   *
+   * Every write to the model is made only while the phase is still the seeding this dispatch started, because a faster path may have seeded it meanwhile - a record
+   * that gained its rows mid-read is the device's own authority on them - so a slower answer never overwrites it and a failure never knocks it back to unseeded.
+   * A failure creates nothing and retires nothing: we create on data and remove on data, and a controller that did not answer is neither.
+   */
+  async #seedAccessMethodState(): Promise<void> {
+
+    try {
+
+      /* A device torn down between the dispatch and this run has nothing to read settings for, and asking the signal to throw is what puts that case and a read the
+       * teardown interrupts on the same exit: both land in the catch below, which restores the model and passes in silence.
+       */
+      this.signal.throwIfAborted();
+
+      const official = this.controller.client.official;
+
+      // The official surface is read afresh here rather than carried in, which is what keeps this method total on its own: a client that lost it between the
+      // dispatch and this point simply has nothing to read, and the model goes back to unseeded for the next trigger to try again.
+      if(!official) {
+
+        this.#unseedOwnedSeeding();
+
+        return;
+      }
+
+      const settings = await official.devices.fetchSettings(this.uda.unique_id, { signal: this.signal });
+
+      if(this.#accessMethodState.phase === "seeding") {
+
+        this.#accessMethodState = { phase: "seeded",
+          values: accessMethodValuesFromOfficialSettings({ methods: accessMethods, settings: settings.access_methods }) };
+      }
+    } catch(error) {
+
+      this.#unseedOwnedSeeding();
+
+      // A device on its way out has nothing to say about settings it will never project, so teardown passes in silence.
+      if(this.signal.aborted) {
+
+        return;
+      }
+
+      this.log.warn("Unable to read the access method settings from the controller. Access method switches will be configured once the controller answers.");
+      this.log.debug("The access method settings read was refused: %s.", formatErrorMessage(error));
+    }
+
+    /* Materialize the switches the seed just made knowable, and run the sweep beside them. This sits outside the try deliberately: a failure inside the configure
+     * pass must not un-seed a model the read legitimately established, and the guarded dispatch this runs under is that call's own backstop. A model some faster
+     * path seeded while the read failed is materialized here too, which is the honest reading of a model that holds the truth however it arrived.
+     */
+    if((this.#accessMethodState.phase === "seeded") && !this.signal.aborted) {
+
+      this.configureAccessMethodSwitches();
+    }
+  }
+
+  // Put the model back to unseeded, but only where this seed still owns the transition it started. A faster path that seeded the model meanwhile holds the truth,
+  // and a read that failed or was torn down has nothing to say against it.
+  #unseedOwnedSeeding(): void {
+
+    if(this.#accessMethodState.phase === "seeding") {
+
+      this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
+    }
+  }
+
+  /* Write an access method's state through the official Access API and read the settings back for certainty, because a method whose prerequisites the controller
+   * lacks answers success with the setting unchanged and only a read-back can tell. The narrowed official reference arrives as a parameter: the caller's null check
+   * cannot cross the method boundary, and a fresh getter read in here would be possibly null again. The fetched settings never leave this method...the verdict is
+   * their only consumer.
+   */
+  async #writeAccessMethodOfficial(official: OfficialApi, accessMethod: typeof accessMethods[number],
+    enabled: boolean): Promise<"absent" | "confirmed" | "declined" | "failed"> {
+
+    try {
+
+      await official.devices.updateSettings(this.uda.unique_id, composeAccessMethodUpdate({ enabled, keys: accessMethod.officialKeys }));
+
+      const settings = await official.devices.fetchSettings(this.uda.unique_id);
+
+      // The verdict is judged on the primary key, which is what the switch's own reads use.
+      return accessMethodWriteVerdict({ enabled: enabled ? "yes" : "no", primaryKey: accessMethod.officialKeys[0], readBack: settings.access_methods });
+    } catch(error) {
+
+      this.log.debug("The access method write was refused: %s.", formatErrorMessage(error));
+
+      return "failed";
+    }
+  }
+
+  /* Write an access method's state through the Access application's own endpoints, which are credential surface: a client holding only an API token cannot reach
+   * them at all. The G6 device class takes its writes on the configs endpoint under its own key set; every other class writes the settings endpoint under the
+   * record's own key.
+   */
+  async #writeAccessMethodRaw(accessMethod: typeof accessMethods[number], enabled: boolean): Promise<boolean> {
+
+    const entry = this.uda.configs?.find(entry => entry.key === accessMethod.key);
+    const isConfigsApi = configsApiDeviceTypes.includes(this.uda.device_type);
+    const transport = this.controller.client.transport;
+
+    if(!entry || !transport) {
+
+      return false;
+    }
+
+    const endpoint = isConfigsApi ? "/configs?is_camera=true" : "/settings";
+    const keys = (isConfigsApi && ("configsApiKeys" in accessMethod)) ? accessMethod.configsApiKeys : [entry.key];
+    const payload = keys.map(key => ({ key: key, tag: "open_door_mode", value: enabled ? "yes" : "no" }));
+
+    try {
+
+      await transport.request("https://" + this.controller.config.address + ACCESS_API_PATH_PREFIX + "/device/" + this.uda.unique_id + endpoint, {
+
+        body: JSON.stringify(payload),
+        method: "PUT"
+      });
+
+      return true;
+    } catch(error) {
+
+      this.log.debug("The access method write was refused: %s.", formatErrorMessage(error));
+
+      return false;
+    }
   }
 
   // Configure the doorbell service for HomeKit.
@@ -507,7 +798,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // Acquire the service.
-    const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => this.log.info("Enabling the doorbell."));
+    const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => { this.log.info("Enabling the doorbell."); });
 
     if(!service) {
 
@@ -521,32 +812,33 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure our contact sensors for HomeKit. Availability is determined by a combination of hub model, what's been configured on the hub, and feature options.
+  /* Configure our contact sensors for HomeKit. Eligibility is what the hardware reports as wired, taken together with the user's feature option, so a sensor is
+   * created on positive evidence and one already present survives a window in which the hardware reports none. Turning the option off always removes it.
+   *
+   * Re-running this is how a wiring change reaches HomeKit mid-run, so it is written to be silent on repeat: validService speaks only when a present service is
+   * being removed, acquireService's callback only when one is created, and the initial writes below re-state the current reading rather than a fresh one.
+   */
   private configureTerminalInputs(): boolean {
 
-    const terminalInputs = [
-
-      { input: "Dps", label: "Door Position Sensor" },
-      { input: "Rel", label: "Remote Release" },
-      { input: "Ren", label: "Request to Enter Sensor" },
-      { input: "Rex", label: "Request to Exit Sensor" }
-    ];
+    this.configureDpsSensor();
 
     for(const { input, label } of terminalInputs) {
 
-      const hint = ("hasWiring" + input) as HasWiringHintKey;
       const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
       const state = ("hub" + input + "State") as HubStateKey;
+      const gate = capabilityGate({ capability: this[("is" + input + "Wired") as WiredKey], toggle: this.hasFeature("Hub." + input.toUpperCase()) });
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
 
-        if(!this.hints[hint] && hasService) {
+        const isValid = gate(hasService);
+
+        if(!isValid && hasService) {
 
           this.log.info("Disabling the " + label.toLowerCase() + ".");
         }
 
-        return this.hints[hint];
+        return isValid;
       }, reservedId)) {
 
         continue;
@@ -554,7 +846,7 @@ export class AccessHub extends AccessDevice {
 
       // Acquire the service.
       const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, reservedId,
-        () => this.log.info("Enabling the " + label.toLowerCase() + "."));
+        () => { this.log.info("Enabling the " + label.toLowerCase() + "."); });
 
       if(!service) {
 
@@ -565,20 +857,79 @@ export class AccessHub extends AccessDevice {
 
       // Initialize the sensor state.
       service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this[state]);
-      service.updateCharacteristic(this.hap.Characteristic.StatusActive, !!this.uda.is_online);
-
-      // If the hub has tamper indicator capabilities, let's reflect that in HomeKit.
-      if(this.hasCapability("tamper_proofing")) {
-
-        const tamperedEntry = this.uda.configs?.find(entry => entry.key === "tamper_event");
-
-        if(tamperedEntry) {
-
-          service.updateCharacteristic(this.hap.Characteristic.StatusTampered, (tamperedEntry.value === "true") ? this.hap.Characteristic.StatusTampered.TAMPERED :
-            this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
-        }
-      }
+      service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+      this.dressTamperState(service);
     }
+
+    return true;
+  }
+
+  /* Dress a sensor service we have just acquired with the tamper reading we currently hold.
+   *
+   * This is what puts the characteristic on the service at all: HomeKit carries an optional characteristic only once something has written it, so a sensor created
+   * here - including one the mid-run re-gate creates - would otherwise be invisible to the sweep that keeps the reading current.
+   *
+   * It states the tracked verdict and never the record, so the per-update re-runs of the blocks that call it cannot move the baseline a genuine change is measured
+   * against. Announcing a change is the update handler's job alone.
+   */
+  private dressTamperState(service: Service): void {
+
+    if(!this.hasCapability("tamper_proofing") || (this.tamperVerdict === undefined)) {
+
+      return;
+    }
+
+    service.updateCharacteristic(this.hap.Characteristic.StatusTampered, this.tamperVerdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
+      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
+  }
+
+  /* Configure the door position sensor. It stands apart from the loop above because its eligibility comes from the door-state model rather than a wiring-key pair,
+   * its state is maintained by the door-state delivery rather than read off the record, and it reaches HomeKit through a manual getter that keeps its reading
+   * available to a garage door service even when the sensor itself is disabled.
+   *
+   * The door-state delivery calls this too, so a change in wiring evidence re-gates the sensor on that rail as well rather than waiting for a device update. Like
+   * the loop above, it is a no-op on repeat by construction.
+   */
+  private configureDpsSensor(): boolean {
+
+    /* A UA Gate offers the sensor on the strength of the hardware being a gate, exactly as it always has: that hardware drives two doors, and the library derives
+     * no topology facts for a device it cannot tell the doors of apart, so there is no evidence here to gate on and its own handlers own the state behind it.
+     * Every other family answers from the evidence read.
+     */
+    const capability = (this.uda.device_type === "UGT") || this.dpsEvidence;
+    const gate = capabilityGate({ capability, toggle: this.hasFeature("Hub.DPS") });
+
+    // Validate whether we should have this service enabled.
+    if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
+
+      const isValid = gate(hasService);
+
+      if(!isValid && hasService) {
+
+        this.log.info("Disabling the " + DPS_LABEL.toLowerCase() + ".");
+      }
+
+      return isValid;
+    }, AccessReservedNames.CONTACT_DPS)) {
+
+      return false;
+    }
+
+    // Acquire the service.
+    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + DPS_LABEL, AccessReservedNames.CONTACT_DPS,
+      () => { this.log.info("Enabling the " + DPS_LABEL.toLowerCase() + "."); });
+
+    if(!service) {
+
+      this.log.error("Unable to add the " + DPS_LABEL.toLowerCase() + ".");
+
+      return false;
+    }
+
+    // Initialize the sensor state from the projection the delivery path maintains, so a repeat call writes the reading we already hold rather than a fresh one.
+    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkDpsState);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+    this.dressTamperState(service);
 
     return true;
   }
@@ -608,7 +959,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Side Door Position Sensor",
-      AccessReservedNames.CONTACT_DPS_SIDE, () => this.log.info("Enabling the side door position sensor."));
+      AccessReservedNames.CONTACT_DPS_SIDE, () => { this.log.info("Enabling the side door position sensor."); });
 
     if(!service) {
 
@@ -619,19 +970,8 @@ export class AccessHub extends AccessDevice {
 
     // Initialize the sensor state from the current side door DPS state.
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkSideDoorDpsState);
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, !!this.uda.is_online);
-
-    // If the hub has tamper indicator capabilities, reflect that in HomeKit.
-    if(this.hasCapability("tamper_proofing")) {
-
-      const tamperedEntry = this.uda.configs?.find(entry => entry.key === "tamper_event");
-
-      if(tamperedEntry) {
-
-        service.updateCharacteristic(this.hap.Characteristic.StatusTampered, (tamperedEntry.value === "true") ? this.hap.Characteristic.StatusTampered.TAMPERED :
-          this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
-      }
-    }
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+    this.dressTamperState(service);
 
     return true;
   }
@@ -664,7 +1004,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined,
-      () => this.log.info("Configuring door as %s service.", this.doorServiceType));
+      () => { this.log.info("Configuring door as %s service.", this.doorServiceType); });
 
     if(!service) {
 
@@ -676,17 +1016,20 @@ export class AccessHub extends AccessDevice {
     // Configure based on service type.
     if(this.doorServiceType === "GarageDoorOpener") {
 
-      this.configureGarageDoorService(service, false);
+      this.configureGarageDoorService(service);
     } else {
 
       this.configureLockService(service, false);
     }
 
-    // Initialize the state.
+    // Initialize the state from the reading we already hold. Putting the backing value somewhere no reading can equal is what makes the setter below run its service
+    // updates even when the state it is being given is the state we were already in.
+    const lockState = this._hkLockState;
+
     this._hkLockState = -1;
     service.displayName = this.accessoryName;
     service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
-    this.hkLockState = this.hubLockState;
+    this.hkLockState = lockState;
 
     service.setPrimaryService(true);
 
@@ -723,8 +1066,8 @@ export class AccessHub extends AccessDevice {
 
       if(!(await lockCommand(targetLocked))) {
 
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState,
-          currentlyLocked ? this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED), 50);
+        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.LockTargetState,
+          currentlyLocked ? this.hap.Characteristic.LockTargetState.SECURED : this.hap.Characteristic.LockTargetState.UNSECURED), CHARACTERISTIC_REVERT_DELAY_MS);
       }
 
       service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, lockStateGetter());
@@ -732,98 +1075,93 @@ export class AccessHub extends AccessDevice {
   }
 
   // Configure a GarageDoorOpener service.
-  private configureGarageDoorService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
+  private configureGarageDoorService(service: ReturnType<typeof acquireService>): void {
 
     if(!service) {
 
       return;
     }
 
-    // For UA Gate, we use unlock/trigger command for both open and close operations. The gate motor will move in the appropriate direction based on its current state.
-    // For non-UA Gate hubs, we use lock/unlock commands directly (locked = closed, unlocked = open).
-    const isUaGate = this.uda.device_type === "UGT";
+    /* A service re-acquire registers the handlers below afresh, so any travel the machine was rendering belonged to a presentation of the door that no longer
+     * exists. The door starts standing here, which also drains whatever timer that travel had armed.
+     */
+    this.#enterDoorTransition({ phase: "idle" });
 
-    // Determine the current door state. For UA Gate, we use DPS (Door Position Sensor) state since it's a motorized gate with physical positions. For non-UA Gate hubs,
-    // we derive state from the lock relay (locked = closed, unlocked = open) since GarageDoorOpener is just a visual convenience for the same underlying lock behavior.
+    /* What the opener answers when HomeKit asks. A door mid-travel answers with the travel rather than with the evidence: the evidence lags the door, so answering
+     * it here would put a controller's own read straight over the transitional state the write in front of it displayed.
+     */
     const getDoorState = (): CharacteristicValue => {
 
-      if(isUaGate) {
+      const travelling = this.#doorTransition;
 
-        const dpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
-
-        return dpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED ? this.hap.Characteristic.CurrentDoorState.CLOSED :
-          this.hap.Characteristic.CurrentDoorState.OPEN;
-      }
-
-      // Non-UA Gate hubs: derive from lock relay state.
-      const lockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
-
-      return this.isLocked(lockState) ? this.hap.Characteristic.CurrentDoorState.CLOSED : this.hap.Characteristic.CurrentDoorState.OPEN;
+      return (travelling.phase === "idle") ? this.#doorStateFromEvidence().current : this.#renderedTransition(travelling);
     };
 
     service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(getDoorState);
 
     service.getCharacteristic(this.hap.Characteristic.TargetDoorState).onSet(async (value: CharacteristicValue) => {
 
+      const isUaGate = this.uda.device_type === "UGT";
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
+      const duration = this.doorTransitionDuration;
+      const standing = this.#doorTransition;
+      /* A door already travelling is halted by a write whichever direction that write named, because operating a door mid-travel is what stops it. A door standing
+       * still - never moved, or halted and waiting - takes the direction the machine derives for it.
+       */
+      const halting = (standing.phase === "opening") || (standing.phase === "closing");
+      const next: DoorTravel = halting ? { lastDirection: standing.phase, phase: "stopped" } : { phase: this.#resumedDoorDirection(shouldClose) };
 
-      // UA Gate uses a single trigger command that toggles the motorized gate. Non-UA Gate hubs use explicit lock/unlock commands.
-      if(isUaGate) {
+      /* What HomeKit shows goes up as soon as the write lands, ahead of the command behind it, which is the responsiveness a door tile is expected to have. The
+       * phase behind it takes only once that command comes back, so a command the controller refuses leaves the machine exactly where it stood.
+       */
+      if(duration > 0) {
 
-        // Set a transition cooldown to prevent WebSocket events from immediately reverting the door state. This gives the gate time to physically move before we accept
-        // DPS updates.
-        if(isSideDoor) {
+        service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.#renderedTransition(next));
+      }
 
-          this.sideDoorGateTransitionUntil = Date.now() + GATE_TRANSITION_COOLDOWN_MS;
+      /* Halting a gate is a command of its own, and the library scopes it to the hardware that has one. A client holding no path to carry it says so at debug and
+       * the machine proceeds identically: the gate stands where its travel left it either way, and there is no second verb to reach for.
+       */
+      if(halting && isUaGate) {
+
+        if(!this.hubProjection) {
+
+          this.log.debug("Unable to halt the gate. This device has no door control surface.");
         } else {
 
-          this.gateTransitionUntil = Date.now() + GATE_TRANSITION_COOLDOWN_MS;
-        }
+          try {
 
-        // Immediately show transitional state (Opening/Closing) while the door moves.
-        service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, shouldClose ? this.hap.Characteristic.CurrentDoorState.CLOSING :
-          this.hap.Characteristic.CurrentDoorState.OPENING);
+            await this.hubProjection.stop({ doorId: this.mainDoorLocationId });
+          } catch(error) {
 
-        // Trigger the gate - for motorized gates, the same trigger command handles both open and close.
-        const triggerGate = isSideDoor ? async (): Promise<boolean> => this.hubSideDoorLockCommand(false) : async (): Promise<boolean> => this.hubLockCommand(false);
-
-        if(!(await triggerGate())) {
-
-          // Clear the transition cooldown on failure.
-          if(isSideDoor) {
-
-            this.sideDoorGateTransitionUntil = 0;
-          } else {
-
-            this.gateTransitionUntil = 0;
+            this.log.debug("Unable to halt the gate: %s.", formatErrorMessage(error));
           }
-
-          // Revert target state on failure.
-          setTimeout(() => {
-
-            service.updateCharacteristic(this.hap.Characteristic.TargetDoorState,
-              shouldClose ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED);
-            service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, getDoorState());
-          }, 50);
         }
 
-        // The DPS sensor event will update the CurrentDoorState when the gate finishes moving.
+        this.#enterDoorTransition(next);
+
         return;
       }
 
-      // Non-UA Gate hubs: use lock/unlock commands directly (close = lock, open = unlock). The lock state change will drive the door state update via hkLockState setter.
-      const lockCommand = isSideDoor ? async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
-        async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
-
-      if(!(await lockCommand(shouldClose))) {
+      // The command this write maps to on this hardware: a gate opens on its trigger and closes on the close command, both of which the shared lock command routes,
+      // and a door hub's opener pulses its relay whichever direction was asked for.
+      if(!(await (isUaGate ? this.hubLockCommand(shouldClose) : this.hubDoorPulseCommand()))) {
 
         // Revert target state on failure.
-        setTimeout(() => {
+        this.timers.schedule(() => {
 
           service.updateCharacteristic(this.hap.Characteristic.TargetDoorState,
             shouldClose ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED);
           service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, getDoorState());
-        }, 50);
+        }, CHARACTERISTIC_REVERT_DELAY_MS);
+
+        return;
+      }
+
+      // The door is moving, so the machine moves with it. A door with no travel time to model runs no machine at all and renders from the evidence instead.
+      if(duration > 0) {
+
+        this.#enterDoorTransition(next);
       }
     });
 
@@ -843,7 +1181,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Doorbell Trigger",
-      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => this.log.info("Enabling the doorbell automation trigger."));
+      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => { this.log.info("Enabling the doorbell automation trigger."); });
 
     if(!service) {
 
@@ -852,13 +1190,71 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Trigger the doorbell.
+    // The switch mirrors ring truth: on while the doorbell is ringing, off while it is quiet.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorbellRingRequestId !== null);
 
-    // The state isn't really user-triggerable. We have no way, currently, to trigger a ring event on the hub.
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(() => {
+    // The manual direction: with an official path the switch rings and cancels the doorbell, and without one it only reflects ring events. Whatever the outcome,
+    // every write schedules exactly one wake that re-reads ring truth at fire time and settles the switch back onto the mirror...the controller's own ring and
+    // cancel events stay the single owner of ring state, and the wake is a read of that state, never a second writer.
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
-      setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, this.doorbellRingRequestId !== null), 50);
+      const official = this.controller.client.official;
+      const action = doorbellTriggerAction({ officialAvailable: official !== null, ringing: this.doorbellRingRequestId !== null, value: value === true });
+
+      // The default wake converges HomeKit's optimistic cache back onto the mirror almost immediately; a dispatched ring or cancel earns the longer reconcile
+      // window instead, so the controller's own notification can arrive and win first.
+      let revertDelay = CHARACTERISTIC_REVERT_DELAY_MS;
+
+      switch(action) {
+
+        case "unavailable":
+
+          this.log.error("Ringing the doorbell requires the official Access API, which needs an API token configured.");
+
+          break;
+
+        case "ring":
+        case "cancel":
+
+          // The decision already encodes that these arms exist only with an official path; this gate restates that precondition for the compiler, which cannot
+          // correlate the decision's result with the getter's nullability across the function boundary.
+          if(official) {
+
+            // The controller's doorbell endpoint addresses the reader that carries the call surface, not the hub the trigger switch projects from.
+            const readerId = doorbellReaderId({ devices: this.controller.client.state.snapshot().devices.values(), hubId: this.uda.unique_id });
+
+            if(readerId === null) {
+
+              this.log.error("Unable to %s the doorbell: no doorbell-capable reader is connected to this hub.", action);
+
+              break;
+            }
+
+            try {
+
+              if(action === "ring") {
+
+                await official.devices.triggerDoorbell(readerId);
+              } else {
+
+                await official.devices.triggerDoorbell(readerId, { cancel: true });
+              }
+
+              revertDelay = DOORBELL_TRIGGER_RECONCILE_DELAY_MS;
+            } catch(error) {
+
+              this.log.error("Unable to %s the doorbell: %s.", action, formatErrorMessage(error));
+            }
+          }
+
+          break;
+
+        case "none":
+
+          break;
+      }
+
+      this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, this.doorbellRingRequestId !== null), revertDelay);
     });
 
     // Initialize the switch.
@@ -880,7 +1276,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => this.log.info("Enabling the lock automation trigger."));
+      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => { this.log.info("Enabling the lock automation trigger."); });
 
     if(!service) {
 
@@ -889,17 +1285,17 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Trigger the doorbell.
+    // The trigger mirrors the lock: on while anything but secured, off while secured.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
 
-    // The state isn't really user-triggerable. We have no way, currently, to trigger a lock or unlock event on the hub.
+    // The switch drives the lock through the hub lock command, and a refused command puts the switch back.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
       // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
       if(!(await this.hubLockCommand(!value))) {
 
         // Revert our state.
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), CHARACTERISTIC_REVERT_DELAY_MS);
       }
     });
 
@@ -921,7 +1317,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_DOOR_SIDE,
-      () => this.log.info("Configuring side door lock."));
+      () => { this.log.info("Configuring side door lock."); });
 
     if(!service) {
 
@@ -954,7 +1350,7 @@ export class AccessHub extends AccessDevice {
 
     // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Side Door Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => this.log.info("Enabling the side door lock automation trigger."));
+      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => { this.log.info("Enabling the side door lock automation trigger."); });
 
     if(!service) {
 
@@ -966,14 +1362,14 @@ export class AccessHub extends AccessDevice {
     // Trigger the lock state.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
 
-    // The state isn't really user-triggerable. We have no way, currently, to trigger a lock or unlock event on the hub.
+    // The switch drives the side door lock through the side door lock command, and a refused command puts the switch back.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
       // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
       if(!(await this.hubSideDoorLockCommand(!value))) {
 
         // Revert our state.
-        setTimeout(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), 50);
+        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), CHARACTERISTIC_REVERT_DELAY_MS);
       }
     });
 
@@ -987,23 +1383,28 @@ export class AccessHub extends AccessDevice {
   // Configure MQTT capabilities of this light.
   private configureMqtt(): boolean {
 
-    const lockService = this.accessory.getService(this.hap.Service.LockMechanism);
+    // MQTT doorbell status.
+    if(this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell")) {
 
-    if(!lockService) {
+      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, "doorbell"), "Doorbell ring", () => {
 
-      return false;
+        return this.doorbellRingRequestId !== null ? "true" : "false";
+      });
     }
 
-    // MQTT doorbell status.
-    this.controller.mqtt?.subscribeGet(this.id, "doorbell", "Doorbell ring", () => {
+    // The remaining MQTT subscriptions are hub-specific (lock, DPS, side door).
+    if(!this.hasCapability("is_hub")) {
 
-      return this.doorbellRingRequestId !== null ? "true" : "false";
-    });
+      return true;
+    }
 
     // MQTT DPS status.
-    this.controller.mqtt?.subscribeGet(this.id, "dps", "Door position sensor", () => {
+    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, "dps"), "Door position sensor", () => {
 
-      if(!this.isDpsWired) {
+      /* A UA Gate's door position rides the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence predicate
+       * answers false for that hardware by design, and letting it speak here would report a gate whose position we know as unknown.
+       */
+      if((this.uda.device_type !== "UGT") && !this.dpsEvidence) {
 
         return "unknown";
       }
@@ -1026,7 +1427,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeGet(this.id, "lock", "Lock", () => {
+    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, "lock"), "Lock", () => {
 
       switch(this.hkLockState) {
 
@@ -1045,19 +1446,19 @@ export class AccessHub extends AccessDevice {
     });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeSet(this.id, "lock", "Lock", (value: string) => {
+    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, "lock"), "Lock", (value: string) => {
 
       switch(value) {
 
         case "true":
 
-          void this.controller.udaApi.unlock(this.uda, 0);
+          void this.hubLockCommand(true);
 
           break;
 
         case "false":
 
-          void this.controller.udaApi.unlock(this.uda, Infinity);
+          void this.hubLockCommand(false);
 
           break;
 
@@ -1072,7 +1473,7 @@ export class AccessHub extends AccessDevice {
     // MQTT side door lock status (UA Gate only).
     if(this.hints.hasSideDoor) {
 
-      this.controller.mqtt?.subscribeGet(this.id, "sidedoor/lock", "Side Door Lock", () => {
+      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, "sidedoor/lock"), "Side Door Lock", () => {
 
         switch(this.hkSideDoorLockState) {
 
@@ -1090,7 +1491,7 @@ export class AccessHub extends AccessDevice {
         }
       });
 
-      this.controller.mqtt?.subscribeSet(this.id, "sidedoor/lock", "Side Door Lock", (value: string) => {
+      this.controller.mqtt?.subscribeSet(mqttTopic(this.id, "sidedoor/lock"), "Side Door Lock", (value: string) => {
 
         switch(value) {
 
@@ -1115,7 +1516,7 @@ export class AccessHub extends AccessDevice {
       });
 
       // MQTT side door DPS status (UA Gate only).
-      this.controller.mqtt?.subscribeGet(this.id, "sidedoor/dps", "Side door position sensor", () => {
+      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, "sidedoor/dps"), "Side door position sensor", () => {
 
         if(!this.isSideDoorDpsWired) {
 
@@ -1142,119 +1543,407 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Check and validate Ultra inputs with what the user has configured in HomeKit.
-  private checkUltraInputs(): void {
+  /* This hub's own door-state entry, or `undefined` when nothing about its door has been established.
+   *
+   * The one guarded home for the read, so no later call site can drop the guard. The library's handle raises a ReferenceError when the device has left controller
+   * state, which is the ordinary shape of a removal window rather than a fault; anything else it raises is a real fault and must surface rather than disappear into
+   * that disguise. Hardware that drives no door at all - a reader alongside a hub - has no handle here and short-circuits with no throw involved.
+   */
+  get #doorStateEntry(): AccessDoorStateEntry | undefined {
 
-    for(const input of [ "Dps", "Rex" ] as const) {
+    try {
 
-      const hint = ("hasWiring" + input) as HasWiringHintKey;
-      const mode = input.toLowerCase();
+      return this.hubProjection?.doorState;
+    } catch(error) {
 
-      // Is the mode enabled on the hub?
-      const isEnabled = this.uda.extensions?.[0]?.target_config?.some(entry => (entry.config_key === "rex_button_mode") && (entry.config_value === mode));
+      if(error instanceof ReferenceError) {
 
-      if(this.hints[hint] && !isEnabled) {
-
-        // The hub has disabled this input.
-        this.hints[hint] = false;
-      } else if(!this.hints[hint] && isEnabled && this.hasFeature("Hub." + input.toUpperCase())) {
-
-        // The hub has the input enabled, and we want it enabled in HomeKit.
-        this.hints[hint] = true;
+        return undefined;
       }
+
+      throw error;
     }
   }
 
-  // Unified utility function to execute lock and unlock actions on a hub door.
-  private async hubDoorLockCommand(isLocking: boolean, isSideDoor = false): Promise<boolean> {
+  // The identity of the door this hub drives, read through the same removal-window guard the door-state read uses and for the same reason: the library's handle
+  // raises a ReferenceError once the device has left controller state, which is the ordinary shape of a removal rather than a fault.
+  get #doorId(): string | undefined {
 
-    const action = isLocking ? "lock" : "unlock";
-    const doorName = isSideDoor ? "side door" : (this.uda.device_type === "UGT" ? "gate" : "door");
-    const doorId = isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId;
+    try {
 
-    // Only allow relocking if we are able to do so. UA Gate is exempt since it's a motorized gate that needs to close. For non-UA Gate hubs, the same restriction
-    // applies to both Lock and GarageDoorOpener service types since GarageDoorOpener is just a visual convenience for the same underlying lock behavior.
-    if((this.lockDelayInterval === undefined) && isLocking && (this.uda.device_type !== "UGT")) {
+      return this.hubProjection?.doorId;
+    } catch(error) {
 
-      this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", doorName);
+      if(error instanceof ReferenceError) {
 
-      return false;
+        return undefined;
+      }
+
+      throw error;
     }
+  }
+
+  /* Which of this hub's doors a location identifies, or null when it identifies none of them.
+   *
+   * A UA Gate answers from the two doors it discovered for itself, because the library derives no per-door facts for hardware whose doors it cannot tell apart.
+   * Every other hub answers from the library's own published door resolution. A hub inside its removal grace answers null rather than throwing, which matters
+   * because every hub on a controller sees every delivery and one hub's throw would otherwise cost its siblings theirs.
+   */
+  #ownedDoor(locationId: string): Nullable<"main" | "side"> {
+
+    if(this.uda.device_type === "UGT") {
+
+      if(locationId === this.mainDoorLocationId) {
+
+        return "main";
+      }
+
+      return (locationId === this.sideDoorLocationId) ? "side" : null;
+    }
+
+    return (locationId === this.#doorId) ? "main" : null;
+  }
+
+  /* Whether this hub has positive evidence of a wired door position sensor - the one predicate every consumer of that question reads. The family-by-family answer
+   * is the policy module's shared eligibility statement; this getter binds it to the live record and the guarded door-state read.
+   *
+   * The Ultra's answer is eligibility - what the input is configured for - and never position. The position it reports is the stream's, so a window between a
+   * just-flipped mode and the next door-state report closes on that report, with the sensor's conservative keep bridging it.
+   */
+  private get dpsEvidence(): boolean {
+
+    return dpsSensorEligible({ device: this.uda, entry: this.#doorStateEntry });
+  }
+
+  /* Project this hub's live door state into HomeKit. The controller's door-state loop calls this once from what it finds on arrival, and again on every change the
+   * client's model records.
+   *
+   * A UA Gate returns immediately. It drives two doors, and the library's read resolves the one door a hub drives, so there is no answer here for that hardware -
+   * its own handlers carry its state instead.
+   *
+   * The entry we read updates live from the notification stream: the wiring keys behind it are live circuit detection, and the stream reports a wiring transition
+   * as it happens. A refresh only ever seeds a door it has never seen, so the stream is the sole corrector of an established entry once we are running.
+   */
+  public refreshDoorState(): void {
+
+    if(this.uda.device_type === "UGT") {
+
+      return;
+    }
+
+    const entry = this.#doorStateEntry;
+
+    // Nothing established is nothing to project.
+    if(!entry) {
+
+      return;
+    }
+
+    // Re-gate the sensor before applying state, so a change in wiring evidence reaches HomeKit on this rail too rather than waiting on a device update.
+    this.configureDpsSensor();
+    this.applyDoorState({ dps: entry.dps, lock: entry.lock }, false);
+  }
+
+  /* The registry key a door's pending auto-relock is tracked under. One door, one relock intent: a HomeKit unlock and a remote unlock arrive under the same key, so
+   * the newest relock replaces whatever was pending rather than stacking beside it. The formula lives here alone so that an opening window and the close that ends
+   * it can never name different timers, and so a typo collapsing the pair into a single key cannot let a side door's unlock cancel the main door's pending relock.
+   */
+  #relockTimerKey(isSideDoor: boolean): string {
+
+    return isSideDoor ? "relock-side" : "relock-main";
+  }
+
+  /* How a gate's door announces itself: the name its own lines render it under, and the tail its lock topic hangs off. The window helpers below read their pair
+   * from here, so the name a user hears and the topic a subscriber reads can never disagree about which door they are describing.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the door being announced.
+   *
+   * @returns The door's rendered name and the tail of its lock topic.
+   */
+  #doorAnnounceIdentity(isSideDoor: boolean): { doorName: string; topicTail: string } {
+
+    const doorName = this.#doorCommandName(isSideDoor);
+
+    return { doorName: doorName.charAt(0).toUpperCase() + doorName.slice(1), topicTail: isSideDoor ? "sidedoor/lock" : "lock" };
+  }
+
+  /* Open a gate door's unlock window: the unlocked state, the announcement of it, and the relock that will end it.
+   *
+   * The controller reports nothing back over the event stream for a location command of ours, and a remote unlock is that same hardware window begun on the
+   * controller's side instead, so each arrives here. That is what lets the lock topic and the log tell one story about the door whichever side opened it.
+   *
+   * Opening is deliberately unconditional on the state we hold. Each unlock act is its own announcement and arms the window afresh, so a door unlocked again while
+   * its window stands extends that window rather than being swallowed by the state it is already in.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the door unlocked.
+   */
+  #openGateLockWindow(isSideDoor: boolean): void {
+
+    const { doorName, topicTail } = this.#doorAnnounceIdentity(isSideDoor);
+
+    if(isSideDoor) {
+
+      this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+    } else {
+
+      this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+    }
+
+    this.controller.mqttPublish(mqttTopic(this.id, topicTail), "false");
+
+    if(this.hints.logLock) {
+
+      this.log.info("%s unlocked.", doorName);
+    }
+
+    this.timers.setTimeout(this.#relockTimerKey(isSideDoor), () => this.#closeGateLockWindow(isSideDoor), AUTO_LOCK_DELAY_MS);
+  }
+
+  /* End a gate door's unlock window: retire the relock, and settle and announce the door when a window was genuinely standing open.
+   *
+   * A window ends exactly once, whether the relock expires, a close command of ours lands, or the controller reports the door secured, so the announcement is
+   * gated on the door actually standing unlocked. Whichever arrival settles the door speaks, and every later one finds it settled and stays silent. Clearing the
+   * key first is safe from the relock's own callback, because a fired one-shot has already left the registry.
+   *
+   * The gate reads for UNSECURED rather than against SECURED because the lock services are reconfigured through a sentinel value that no reading equals, and a
+   * "not secured" test would announce on that sentinel. Nothing is awaited between the read and the writes, so no other arrival can settle the door in between.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the door whose window is ending.
+   */
+  #closeGateLockWindow(isSideDoor: boolean): void {
+
+    this.timers.clear(this.#relockTimerKey(isSideDoor));
+
+    if((isSideDoor ? this.hkSideDoorLockState : this.hkLockState) !== this.hap.Characteristic.LockCurrentState.UNSECURED) {
+
+      return;
+    }
+
+    const { doorName, topicTail } = this.#doorAnnounceIdentity(isSideDoor);
+
+    if(isSideDoor) {
+
+      this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+    } else {
+
+      this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
+    }
+
+    this.controller.mqttPublish(mqttTopic(this.id, topicTail), "true");
+
+    if(this.hints.logLock) {
+
+      this.log.info("%s locked.", doorName);
+    }
+  }
+
+  /* The name a door goes by mid-sentence in the lines its commands write. It is stated on its own rather than inside the shared preamble below because a command
+   * carrying a refusal of its own names the door before that preamble runs, which is what keeps each command's refusals in the order it has always reported them.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the target.
+   *
+   * @returns The door's name.
+   */
+  #doorCommandName(isSideDoor: boolean): string {
+
+    return isSideDoor ? "side door" : ((this.uda.device_type === "UGT") ? "gate" : "door");
+  }
+
+  /* The preamble every door command shares: name the door, resolve the location identity a UA Gate's commands address it by, and refuse outright when the device
+   * is not reachable.
+   *
+   * @param options - The verb a refusal names, and whether the side door of a UA Gate is the target.
+   *
+   * @returns The resolved door, or `null` when the hub is offline and the caller has nothing left to do.
+   */
+  #resolveDoorCommand(options: { action: string; isSideDoor: boolean }): { doorId: string | undefined; doorName: string } | null {
+
+    const { action, isSideDoor } = options;
+    const doorName = this.#doorCommandName(isSideDoor);
 
     // If we're not online, we're done.
     if(!this.isOnline) {
 
       this.log.error("Unable to %s the %s. Device is offline.", action, doorName);
 
+      return null;
+    }
+
+    return { doorId: isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId, doorName };
+  }
+
+  /* Close a UA Gate's door through the library's own close command, the verb that hardware answers for the closing direction. The unlock this hub's opening
+   * direction sends opens a two-button gate whichever direction it was asked for, so every surface that asks a gate to lock arrives here instead.
+   *
+   * The door is always named explicitly. A gate drives two doors and the handle's own resolution answers with the first port binding the controller happened to
+   * deliver, so the side door would otherwise be closed by asking about whichever door that ordering put first.
+   *
+   * The controller reports nothing back over the event stream for a command of ours, so an accepted close hands the door to the window helper below rather than
+   * waiting on an event that never arrives: without that, the write that asked for the close would push the door's stale unlocked state straight back at HomeKit.
+   *
+   * @param isSideDoor - Whether the side door is the door to close.
+   *
+   * @returns `true` when the controller accepted the close.
+   */
+  private async hubDoorCloseCommand(isSideDoor = false): Promise<boolean> {
+
+    const target = this.#resolveDoorCommand({ action: "close", isSideDoor });
+
+    if(!target) {
+
       return false;
     }
 
-    // For UA Gate hubs, use the location-based unlock API since the device API is not supported.
+    if(!this.hubProjection || !target.doorId) {
+
+      this.log.error("Unable to close the %s. Door not found.", target.doorName);
+
+      return false;
+    }
+
+    try {
+
+      await this.hubProjection.close({ doorId: target.doorId });
+    } catch(error) {
+
+      this.log.error("Unable to close the %s: %s.", target.doorName, formatErrorMessage(error));
+
+      return false;
+    }
+
+    this.#closeGateLockWindow(isSideDoor);
+
+    return true;
+  }
+
+  /* Pulse the relay a garage door opener hangs off on a door hub: a momentary unlock, which is the only motion that wiring has. Such an opener takes a single
+   * input and answers every pulse of it the same way - it opens a closed door, closes an open one, halts one mid-travel, and reverses one that was halted - so
+   * both directions of a HomeKit write dispatch this same pulse. No lock rule of any kind is involved: the configured lock delay governs the lock accessory, and
+   * a rule that held the relay open would leave the door open rather than move it.
+   *
+   * No door is named. A door hub drives one door and its handle resolves that door for itself.
+   *
+   * @returns `true` when the controller accepted the pulse.
+   */
+  private async hubDoorPulseCommand(): Promise<boolean> {
+
+    const target = this.#resolveDoorCommand({ action: "operate", isSideDoor: false });
+
+    if(!target) {
+
+      return false;
+    }
+
+    if(!this.hubProjection) {
+
+      this.log.error("Unable to operate. This device has no door control surface.");
+
+      return false;
+    }
+
+    try {
+
+      await this.hubProjection.unlock();
+    } catch(error) {
+
+      this.log.error("Unable to operate: %s.", formatErrorMessage(error));
+
+      return false;
+    }
+
+    return true;
+  }
+
+  // Unified utility function to execute lock and unlock actions on a hub door.
+  private async hubDoorLockCommand(isLocking: boolean, isSideDoor = false): Promise<boolean> {
+
+    /* A UA Gate answers the locking direction with a close. Routing it here rather than at each surface that asks for it means the lock accessory, the automation
+     * triggers, the MQTT topics, and the garage door opener all reach that verb through the one path they already share.
+     */
+    if(isLocking && (this.uda.device_type === "UGT")) {
+
+      return this.hubDoorCloseCommand(isSideDoor);
+    }
+
+    const action = isLocking ? "lock" : "unlock";
+    // What this command should carry. A UA Gate never consults it: that hardware is unlocked outright and relocks on a timer of our own.
+    const decision = lockCommandRule({ delayInterval: this.lockDelayInterval, isLocking });
+
+    // Only allow relocking if we are able to do so. A UA Gate is exempt because its locking direction is the close command above, and a garage door opener never
+    // arrives here at all because its writes are the momentary pulse...so this is the lock accessory's own refusal to make.
+    if((this.uda.device_type !== "UGT") && (decision.kind === "refuse")) {
+
+      this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", this.#doorCommandName(isSideDoor));
+
+      return false;
+    }
+
+    const target = this.#resolveDoorCommand({ action, isSideDoor });
+
+    if(!target) {
+
+      return false;
+    }
+
+    /* A UA Gate is opened through the library's own unlock, which chooses the rail the client's identity can carry it on and absorbs the wire shape on our behalf.
+     * Only the unlock direction reaches here, the close command above having taken the other one.
+     *
+     * The door is always named explicitly, for the same reason the close command names it: a gate drives two doors, and the handle's own resolution answers with
+     * whichever port binding the controller happened to deliver first.
+     */
     if(this.uda.device_type === "UGT") {
 
-      if(!doorId) {
+      if(!this.hubProjection || !target.doorId) {
 
-        this.log.error("Unable to %s the %s. Door not found.", action, isSideDoor ? "side door" : "gate");
-
-        return false;
-      }
-
-      // Execute the action using the location endpoint.
-      const endpoint = this.controller.udaApi.getApiEndpoint("location") + "/" + doorId + "/unlock";
-
-      const response = await this.controller.udaApi.retrieve(endpoint, {
-
-        body: JSON.stringify({}),
-        method: "PUT"
-      });
-
-      if(!this.controller.udaApi.responseOk(response?.statusCode)) {
-
-        this.log.error("Unable to %s the %s.", action, doorName);
+        this.log.error("Unable to %s the %s. Door not found.", action, target.doorName);
 
         return false;
       }
 
-      // When unlocking from HomeKit, the controller doesn't send the events to the events API. Manually update the state and schedule the auto-lock.
-      if(!isLocking) {
+      try {
 
-        if(isSideDoor) {
+        await this.hubProjection.unlock({ doorId: target.doorId });
+      } catch(error) {
 
-          this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
+        this.log.error("Unable to %s the %s: %s.", action, target.doorName, formatErrorMessage(error));
 
-          if(this.hints.logLock) {
-
-            this.log.info("Side door unlocked.");
-          }
-
-          setTimeout(() => {
-
-            this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-
-            if(this.hints.logLock) {
-
-              this.log.info("Side door locked.");
-            }
-          }, AUTO_LOCK_DELAY_MS);
-        } else {
-
-          this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-
-          setTimeout(() => this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED, AUTO_LOCK_DELAY_MS);
-        }
+        return false;
       }
+
+      this.#openGateLockWindow(isSideDoor);
 
       return true;
     }
 
-    // For hub types other than UA Gate, we use the standard device unlock API. GarageDoorOpener uses the same lock delay interval as Lock service since it's just a
-    // visual convenience for the same underlying lock behavior.
-    const delayInterval = this.lockDelayInterval;
+    // For hub types other than UA Gate, we use the standard device unlock API. This is the lock accessory's own path: a garage door opener on this hardware is the
+    // momentary pulse instead.
 
-    // Execute the action.
-    if(!(await this.controller.udaApi.unlock(this.uda, (delayInterval === undefined) ? undefined : (isLocking ? 0 : Infinity)))) {
+    /* The commands are only reachable through the hub view of this device. An absent one cannot happen through the adoption path, which resolves the hub view first
+     * and falls back to the plain device view only for hardware carrying no hub capability - the same capability this class's lock service is gated on - but the
+     * handle is optional at construction, so this is the honest boundary rather than dead code.
+     */
+    if(!this.hubProjection) {
 
-      this.log.error("Unable to %s.", action);
+      this.log.error("Unable to %s. This device has no door control surface.", action);
+
+      return false;
+    }
+
+    /* Execute the action the policy decided on. A refusal cannot arrive here: the guard above returned on one, and a UA Gate - the only hardware exempt from that
+     * guard - has already returned through the location path. An unconfigured delay issues the plain momentary unlock; anything else goes as a lock rule.
+     */
+    try {
+
+      if(decision.kind === "unlock") {
+
+        await this.hubProjection.unlock();
+      } else if(decision.kind === "rule") {
+
+        await this.hubProjection.setLockRule(decision.rule);
+      }
+    } catch(error) {
+
+      this.log.error("Unable to %s: %s.", action, formatErrorMessage(error));
 
       return false;
     }
@@ -1326,6 +2015,151 @@ export class AccessHub extends AccessDevice {
     }
   }
 
+  /* How long this door's travel is modeled as taking, in milliseconds, or zero for a door whose travel is not modeled at all. It is read afresh at every write, so
+   * a duration the user changes applies from the next transition; a transition already running keeps the timer it armed.
+   *
+   * A UA Gate with nothing configured falls back to the window that hardware is given, because its motion is short and much the same everywhere. Every other
+   * family renders instantly until a duration has been configured for it, which is the setting's whole purpose.
+   */
+  private get doorTransitionDuration(): number {
+
+    const configured = this.getFeatureNumber("Hub.Door.TransitionDuration") ?? undefined;
+
+    if((configured !== undefined) && (configured > 0)) {
+
+      return configured * 1000;
+    }
+
+    return (this.uda.device_type === "UGT") ? GATE_TRANSITION_DURATION_MS : 0;
+  }
+
+  /* Where the main door stands, as the pair of characteristics that describe it: the position HomeKit is shown and the target that agrees with it. Deriving both
+   * from a single read is what keeps them from disagreeing, which two independent derivations eventually would.
+   *
+   * A UA Gate reads its position from the location rail, which is where that hardware reports it. Every other family reads the door position sensor wherever the
+   * evidence says one is wired, and the lock relay otherwise, which is all a door with no sensor has to say about where it is.
+   *
+   * @returns The door state to show, and the target that matches it.
+   */
+  #doorStateFromEvidence(): { current: CharacteristicValue; target: CharacteristicValue } {
+
+    const fromPosition = (this.uda.device_type === "UGT") || this.dpsEvidence;
+    const closed = fromPosition ? this.isClosed(this.hkDpsState) : this.isLocked(this.hkLockState);
+
+    return { current: closed ? this.hap.Characteristic.CurrentDoorState.CLOSED : this.hap.Characteristic.CurrentDoorState.OPEN,
+      target: closed ? this.hap.Characteristic.TargetDoorState.CLOSED : this.hap.Characteristic.TargetDoorState.OPEN };
+  }
+
+  /* What a travel looks like on the characteristic. Only a running travel has a rendering of its own...a door standing still shows where the evidence puts it.
+   *
+   * @param travel - The travel being rendered.
+   *
+   * @returns The door state HomeKit is shown while that travel runs.
+   */
+  #renderedTransition(travel: DoorTravel): CharacteristicValue {
+
+    switch(travel.phase) {
+
+      case "closing":
+
+        return this.hap.Characteristic.CurrentDoorState.CLOSING;
+
+      case "opening":
+
+        return this.hap.Characteristic.CurrentDoorState.OPENING;
+
+      default:
+
+        return this.hap.Characteristic.CurrentDoorState.STOPPED;
+    }
+  }
+
+  /* Which way a write moves the door, from where the machine stands, for both hardware families in one place so the direction shown can never disagree with the
+   * verb dispatched.
+   *
+   * A gate answers to two distinct verbs - the trigger opens it and the close command closes it - so it travels the way the write named, from a halt exactly as
+   * from a standstill. A momentary operator answers to one input that carries no direction at all, so a pulse against a halted door reverses whatever travel the
+   * halt interrupted, whichever direction HomeKit asked for.
+   *
+   * @param shouldClose - Whether the write asked for the closed position.
+   *
+   * @returns The travel the door now runs.
+   */
+  #resumedDoorDirection(shouldClose: boolean): "opening" | "closing" {
+
+    if((this.#doorTransition.phase === "stopped") && (this.uda.device_type !== "UGT")) {
+
+      return (this.#doorTransition.lastDirection === "closing") ? "opening" : "closing";
+    }
+
+    return shouldClose ? "closing" : "opening";
+  }
+
+  /* The one place the transition phase changes: the phase and the timer that ends it move together here, so a phase can never outlive its own expiry nor an expiry
+   * outlive the phase that armed it. Registering under the key replaces whatever was armed there, which is what makes the newest travel's expiry the only live one
+   * when writes overlap.
+   *
+   * The expiry is the guaranteed way out of every travel. A reading that agrees settles one sooner, and a door nobody hears from again still comes to rest.
+   *
+   * @param next - The phase to enter.
+   */
+  #enterDoorTransition(next: DoorTransition): void {
+
+    this.#doorTransition = next;
+
+    if(next.phase === "idle") {
+
+      this.timers.clear(DOOR_TRANSITION_TIMER_KEY);
+
+      return;
+    }
+
+    this.timers.setTimeout(DOOR_TRANSITION_TIMER_KEY, () => {
+
+      this.#enterDoorTransition({ phase: "idle" });
+      this.#updateGarageDoorState();
+    }, this.doorTransitionDuration);
+  }
+
+  /* Put the door's own state on the opener, which is the one place that service is written outside a HomeKit write of its own.
+   *
+   * A door standing still shows the evidence. A door mid-travel meets each reading against the travel it is running: a closed reading settles every travel, because
+   * a door reporting itself closed has arrived wherever it was going; an open reading settles only an opening, because a gate's position sensor reads open while
+   * the gate is still closing and a door halted mid-travel reads open until it moves again. A reading that settles nothing leaves the phase and the characteristic
+   * exactly as they were, and the travel's own expiry remains its way out.
+   */
+  #updateGarageDoorState(): void {
+
+    // Held while a delivery applies its readings, so the opener renders once from the finished pair rather than once per reading.
+    if(this.#doorStateApplying) {
+
+      return;
+    }
+
+    const service = this.accessory.getService(this.hap.Service.GarageDoorOpener);
+
+    if(!service) {
+
+      return;
+    }
+
+    const evidence = this.#doorStateFromEvidence();
+    const travelling = this.#doorTransition;
+
+    if(travelling.phase !== "idle") {
+
+      if((evidence.current !== this.hap.Characteristic.CurrentDoorState.CLOSED) && (travelling.phase !== "opening")) {
+
+        return;
+      }
+
+      this.#enterDoorTransition({ phase: "idle" });
+    }
+
+    service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, evidence.target);
+    service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, evidence.current);
+  }
+
   // Update door service state based on configured service type.
   private updateDoorServiceState(isSideDoor: boolean): void {
 
@@ -1333,45 +2167,11 @@ export class AccessHub extends AccessDevice {
     const lockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
     const triggerSubtype = isSideDoor ? AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER : AccessReservedNames.SWITCH_LOCK_TRIGGER;
 
-    // Check if we're in a transition cooldown period - skip updates to preserve the Opening/Closing state.
-    const transitionUntil = isSideDoor ? this.sideDoorGateTransitionUntil : this.gateTransitionUntil;
-
     if(serviceType === "GarageDoorOpener") {
 
-      // GarageDoorOpener is only used for the primary door, which has no subtype.
-      const service = this.accessory.getService(this.hap.Service.GarageDoorOpener);
-
-      if(service) {
-
-        // UA Gate uses DPS state since it's a motorized gate with physical positions. Non-UA Gate hubs derive state from lock relay (locked = closed, unlocked = open)
-        // since GarageDoorOpener is just a visual convenience for the same underlying lock behavior.
-        if(this.uda.device_type === "UGT") {
-
-          const dpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
-          const doorState = dpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED ? this.hap.Characteristic.CurrentDoorState.CLOSED :
-            this.hap.Characteristic.CurrentDoorState.OPEN;
-          const targetState = dpsState === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED ?
-            this.hap.Characteristic.TargetDoorState.CLOSED : this.hap.Characteristic.TargetDoorState.OPEN;
-
-          // If in transition cooldown, ignore all DPS updates to let the gate stabilize. The gate sensor often bounces between open/closed during movement. We'll accept
-          // the final state once the cooldown expires.
-          if(Date.now() < transitionUntil) {
-
-            return;
-          }
-
-          service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, targetState);
-          service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, doorState);
-        } else {
-
-          // Non-UA Gate hubs: derive from lock relay state.
-          const doorState = this.isLocked(lockState) ? this.hap.Characteristic.CurrentDoorState.CLOSED : this.hap.Characteristic.CurrentDoorState.OPEN;
-          const targetState = this.isLocked(lockState) ? this.hap.Characteristic.TargetDoorState.CLOSED : this.hap.Characteristic.TargetDoorState.OPEN;
-
-          service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, targetState);
-          service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, doorState);
-        }
-      }
+      // The opener renders from the door position sensor as well as the relay, and from the travel it may be running, so it has an update of its own rather than
+      // one this reading composes.
+      this.#updateGarageDoorState();
     } else {
 
       // The primary door has no subtype. The side door (UA Gate only) uses a subtype to distinguish it.
@@ -1413,44 +2213,6 @@ export class AccessHub extends AccessDevice {
     this.updateDoorServiceState(true);
   }
 
-  // Return the current state of the DPS on the hub.
-  private get hubDpsState(): CharacteristicValue {
-
-    // If we don't have the wiring connected for the DPS, we report our default closed state.
-    if(!this.isDpsWired) {
-
-      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    let relayType;
-
-    switch(this.uda.device_type) {
-
-      case "UA-Hub-Door-Mini":
-      case "UA-ULTRA":
-
-        relayType = "input_d1_dps";
-
-        break;
-
-      case "UGT":
-
-        relayType = "input_gate_dps";
-
-        break;
-
-      default:
-
-        relayType = "input_state_dps";
-
-        break;
-    }
-
-    // Return our DPS state. If it's anything other than on, we assume it's open.
-    return (this.uda.configs?.find(entry => entry.key === relayType)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
-      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
-  }
-
   // Return the current state of the side door DPS on the UA Gate hub.
   private get hubSideDoorDpsState(): CharacteristicValue {
 
@@ -1465,34 +2227,17 @@ export class AccessHub extends AccessDevice {
       this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
   }
 
-  // Return the current state of the relay lock on the hub.
+  /* Return the state of the main gate's lock relay on a UA Gate hub. Only that hardware answers from its record here: every other family's lock reading comes from
+   * the door-state model, and answering secured for them is the same safe reading an unrecognized lock value gets.
+   */
   private get hubLockState(): CharacteristicValue {
 
-    let relayType;
+    if(this.uda.device_type !== "UGT") {
 
-    switch(this.uda.device_type) {
-
-      case "UA-Hub-Door-Mini":
-      case "UA-ULTRA":
-
-        relayType = "output_d1_lock_relay";
-
-        break;
-
-      case "UGT":
-
-        relayType = "output_oper1_relay";
-
-        break;
-
-      default:
-
-        relayType = "input_state_rly-lock_dry";
-
-        break;
+      return this.hap.Characteristic.LockCurrentState.SECURED;
     }
 
-    const lockRelay = this.uda.configs?.find(entry => entry.key === relayType);
+    const lockRelay = this.uda.configs?.find(entry => entry.key === "output_oper1_relay");
 
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
   }
@@ -1614,29 +2359,34 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Check if the side door DPS is wired (wiring_state_door-dps-neg and wiring_state_door-dps-pos).
-    return [ "wiring_state_door-dps-neg", "wiring_state_door-dps-pos" ].every(wire => this.uda.configs?.some(e => (e.key === wire) && (e.value === "on")));
+    return this.isPairLive([ "wiring_state_door-dps-neg", "wiring_state_door-dps-pos" ]);
+  }
+
+  // Whether both halves of a wiring pair report a live circuit. Both must read on for the pair to mean anything: a single connected terminal is a half-wired sensor,
+  // which is not a sensor. The one statement of that reading, so the two callers cannot come to differ on what counts as wired.
+  private isPairLive(wires: string[]): boolean {
+
+    return wires.every(wire => this.uda.configs?.some(e => (e.key === wire) && (e.value === "on")));
   }
 
   // Utility to check the wiring state of a given terminal input.
   private isWired(input: SensorInput): boolean {
 
-    // UA-ULTRA proxies via button mode.
-    if((this.uda.device_type === "UA-ULTRA") && sensorWiring[input].proxyMode) {
+    // The Ultra multiplexes its one terminal input and carries no wiring pair at all, so what that input is configured for is the only evidence its record offers.
+    if(this.uda.device_type === "UA-ULTRA") {
 
-      return this.uda.extensions?.[0]?.target_config?.some(e => (e.config_key === "rex_button_mode") && (e.config_value === sensorWiring[input].proxyMode)) ?? false;
+      return (input === "Rex") && (ultraInputMode(this.uda) === "rex");
     }
 
     // Find the wiring keys for this model.
-    const wires = sensorWiring[input].wiring?.[this.uda.device_type];
+    const wires = sensorWiring[input][this.uda.device_type];
 
     if(!wires) {
 
       return false;
     }
 
-    // All wires must be on for us to return true.
-    return wires.every(wire => this.uda.configs?.some(e => (e.key === wire) && (e.value === "on")));
+    return this.isPairLive(wires);
   }
 
   // Utility to retrieve a contact sensor state.
@@ -1655,77 +2405,114 @@ export class AccessHub extends AccessDevice {
   // Utility to validate hub capabilities.
   private hasCapability(capability: string | readonly string[]): boolean {
 
-    return Array.isArray(capability) ? capability.some(c => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability as string);
+    return Array.isArray(capability) ? capability.some((c: string) => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability as string);
   }
 
-  // Update door state from location data (lock and DPS).
-  private updateDoorFromLocationState(
-    doorState: { lock: "locked" | "unlocked"; dps: "open" | "close" },
-    isSideDoor: boolean
-  ): void {
+  /* Apply a door's reported state to HomeKit: the one place a door's position and lock reach their services, their MQTT tails, and their log lines.
+   *
+   * Both members are optional because the callers know different amounts. A UA Gate's location handlers carry a complete report every time; the door-state delivery
+   * carries whatever the client's model has established. An ABSENT member updates nothing at all - not established is not a state, and writing a default for it
+   * would manufacture a reading the controller never made.
+   */
+  private applyDoorState(doorState: { dps?: string; lock?: string }, isSideDoor: boolean): void {
 
-    const newLockState = this.toLockState(doorState.lock);
-    const newDpsState = this.toDpsState(doorState.dps);
     const doorName = isSideDoor ? "Side door" : "";
+    // Whether this delivery moved anything at all, which is what the opener's own update below rides.
+    let changed = false;
 
     // Update lock state.
-    const currentLockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
+    if(doorState.lock !== undefined) {
 
-    if(newLockState !== currentLockState) {
+      const newLockState = this.toLockState(doorState.lock);
+      const currentLockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
 
-      if(isSideDoor) {
+      if(newLockState !== currentLockState) {
 
-        this.hkSideDoorLockState = newLockState;
-        this.controller.mqtt?.publish(this.id, "sidedoor/lock", this.isLocked(newLockState) ? "true" : "false");
+        changed = true;
 
-        if(this.hints.logLock) {
+        /* A door the controller reports locked has nothing left for a pending relock of ours to do. Letting one survive would announce a close of our own over the
+         * controller's fresher reading, so the rail's report of a closing retires the window the same way our own close command does.
+         */
+        if(this.isLocked(newLockState)) {
 
-          this.log.info("%s %s.", doorName, this.isLocked(newLockState) ? "locked" : "unlocked");
+          this.timers.clear(this.#relockTimerKey(isSideDoor));
         }
-      } else {
 
-        this.hkLockState = newLockState;
-        this.controller.mqtt?.publish(this.id, "lock", this.isLocked(newLockState) ? "true" : "false");
+        if(isSideDoor) {
 
-        if(this.hints.logLock) {
+          this.hkSideDoorLockState = newLockState;
+          this.controller.mqttPublish(mqttTopic(this.id, "sidedoor/lock"), this.isLocked(newLockState) ? "true" : "false");
 
-          this.log.info(this.isLocked(newLockState) ? "Locked." : "Unlocked.");
+          if(this.hints.logLock) {
+
+            this.log.info("%s %s.", doorName, this.isLocked(newLockState) ? "locked" : "unlocked");
+          }
+        } else {
+
+          /* The opener renders from the position sensor and the relay together, so this delivery holds its update until the position reading below has landed as
+           * well. Rendering from a half-applied pair would announce a state the door was never in, and would settle a running travel on the stale half of it.
+           */
+          this.#doorStateApplying = true;
+
+          try {
+
+            this.hkLockState = newLockState;
+          } finally {
+
+            this.#doorStateApplying = false;
+          }
+
+          this.controller.mqttPublish(mqttTopic(this.id, "lock"), this.isLocked(newLockState) ? "true" : "false");
+
+          if(this.hints.logLock) {
+
+            this.log.info(this.isLocked(newLockState) ? "Locked." : "Unlocked.");
+          }
         }
       }
     }
 
     // Update DPS state.
-    const currentDpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
+    if(doorState.dps !== undefined) {
 
-    if(newDpsState !== currentDpsState) {
+      const newDpsState = this.toDpsState(doorState.dps);
+      const currentDpsState = isSideDoor ? this._hkSideDoorDpsState : this.hkDpsState;
 
-      const contactDetected = this.isClosed(newDpsState);
+      if(newDpsState !== currentDpsState) {
 
-      if(isSideDoor) {
+        changed = true;
 
-        this._hkSideDoorDpsState = newDpsState;
-        this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, newDpsState);
-        this.controller.mqtt?.publish(this.id, "sidedoor/dps", contactDetected ? "false" : "true");
+        const contactDetected = this.isClosed(newDpsState);
 
-        if(this.hints.logDps) {
+        if(isSideDoor) {
 
-          this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
-        }
-      } else {
+          this._hkSideDoorDpsState = newDpsState;
+          this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, newDpsState);
+          this.controller.mqttPublish(mqttTopic(this.id, "sidedoor/dps"), contactDetected ? "false" : "true");
 
-        this.hkDpsState = newDpsState;
-        this.controller.mqtt?.publish(this.id, "dps", contactDetected ? "false" : "true");
+          if(this.hints.logDps) {
 
-        if((this.doorServiceType === "GarageDoorOpener") || this.hints.logDps) {
+            this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
+          }
+        } else {
 
-          this.log.info("Door position sensor %s.", contactDetected ? "closed" : "open");
-        }
+          this.hkDpsState = newDpsState;
+          this.controller.mqttPublish(mqttTopic(this.id, "dps"), contactDetected ? "false" : "true");
 
-        if(this.doorServiceType === "GarageDoorOpener") {
+          if((this.doorServiceType === "GarageDoorOpener") || this.hints.logDps) {
 
-          this.updateDoorServiceState(false);
+            this.log.info("%s %s.", sentenceCase(DPS_LABEL), contactDetected ? "closed" : "open");
+          }
         }
       }
+    }
+
+    /* One opener update per delivery, made now that both readings have landed. The opener belongs to the main door alone, and a delivery that told us nothing new
+     * has nothing to tell it either: a travel settles on a reading that moved, or on its own expiry.
+     */
+    if(changed && !isSideDoor) {
+
+      this.#updateGarageDoorState();
     }
   }
 
@@ -1735,58 +2522,20 @@ export class AccessHub extends AccessDevice {
     // For UA Gate hubs, determine which door was unlocked based on the event_object_id.
     if(this.uda.device_type === "UGT") {
 
-      const eventDoorId = packet.event_object_id;
-      const isSideDoor = this.sideDoorLocationId && (eventDoorId === this.sideDoorLocationId);
-      const isMainDoor = this.mainDoorLocationId && (eventDoorId === this.mainDoorLocationId);
+      const door = this.#ownedDoor(packet.event_object_id);
 
-      if(!isSideDoor && !isMainDoor) {
+      if(door === null) {
 
         return;
       }
 
-      const doorName = isSideDoor ? "Side door" : "Gate";
-      const mqttTopic = isSideDoor ? "sidedoor/lock" : "lock";
-
-      // Set unlocked state.
-      if(isSideDoor) {
-
-        this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-      } else {
-
-        this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-      }
-
-      this.controller.mqtt?.publish(this.id, mqttTopic, "false");
-
-      if(this.hints.logLock) {
-
-        this.log.info("%s unlocked.", doorName);
-      }
-
-      // Auto-lock after delay.
-      setTimeout(() => {
-
-        if(isSideDoor) {
-
-          this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-        } else {
-
-          this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
-        }
-
-        this.controller.mqtt?.publish(this.id, mqttTopic, "true");
-
-        if(this.hints.logLock) {
-
-          this.log.info("%s locked.", doorName);
-        }
-      }, AUTO_LOCK_DELAY_MS);
-
+      // The same hardware window a command of ours opens, begun on the controller's side instead, so it is settled and announced through the same helper.
+      this.#openGateLockWindow(door === "side");
     } else {
 
       // Non-UA Gate hubs: default behavior.
       this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-      this.controller.mqtt?.publish(this.id, "lock", "false");
+      this.controller.mqttPublish(mqttTopic(this.id, "lock"), "false");
 
       if(this.hints.logLock) {
 
@@ -1795,116 +2544,96 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Handle device update events (v1 API).
-  private handleDeviceUpdate(packet: AccessEventPacket): void {
+  /* Handle a device update, delivered once our own record has folded.
+   *
+   * Availability is deliberately absent from here: the spine's observe loop writes it from the same delivery, to every service that reports the characteristic, so
+   * an arm here would be a second updater of one reading. Lock and door position are absent for the same reason - the door-state model carries both, and its
+   * delivery owns them. The access method model is a reading this handler does own, under that same doctrine: the record restates its configuration rows on every
+   * delivery, so this is where they reach the model, and the switches read the model rather than the rows.
+   */
+  private handleDeviceUpdate(): void {
 
-    const terminalInputs = [
+    // A refresh restates the configuration rows, and folding them here is what keeps the model current when a bootstrap refresh moved a method with no v2 access
+    // method event to announce it.
+    this.#foldConfigRows();
 
-      { input: "Dps", label: "Door position sensor", topic: "dps" },
-      { input: "Rel", label: "Remote release", topic: "rel" },
-      { input: "Ren", label: "Request to enter sensor", topic: "ren" },
-      { input: "Rex", label: "Request to exit sensor", topic: "rex" }
-    ];
+    // Process any terminal input update events if our state has changed. Keying off whether the sensor exists is what replaces a cached eligibility reading: an
+    // input with no service contributes nothing, and one created mid-run is picked up on the very next update.
+    for(const { input, label, topic } of terminalInputs) {
 
-    // Process a lock update event if our state has changed. Skip for UA Gate hubs since we handle state manually because Access doesn't send those events out.
-    if((this.uda.device_type !== "UGT") && (this.hubLockState !== this.hkLockState)) {
+      const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
 
-      this.hkLockState = this.hubLockState;
-      this.controller.mqtt?.publish(this.id, "lock", this.isLocked(this.hkLockState) ? "true" : "false");
+      if(!this.accessory.getServiceById(this.hap.Service.ContactSensor, reservedId)) {
 
-      if(this.hints.logLock) {
-
-        this.log.info(this.isLocked(this.hkLockState) ? "Locked." : "Unlocked.");
+        continue;
       }
-    }
 
-    // Process a side door lock update event if our state has changed (UA Gate only). We skip this for UGT since polling handles state updates.
-    if(this.hints.hasSideDoor && (this.uda.device_type !== "UGT")) {
-
-      const currentHkState = this.hkSideDoorLockState;
-      const newHubState = this.hubSideDoorLockState;
-
-      if(newHubState !== currentHkState) {
-
-        this.hkSideDoorLockState = newHubState;
-        this.controller.mqtt?.publish(this.id, "sidedoor/lock", this.isLocked(this.hkSideDoorLockState) ? "true" : "false");
-
-        if(this.hints.logLock) {
-
-          this.log.info("Side door %s.", this.isLocked(this.hkSideDoorLockState) ? "locked" : "unlocked");
-        }
-      }
-    }
-
-    // Process a side door DPS update event if our state has changed (UA Gate only). We skip this for UGT since polling handles state updates.
-    if(this.hints.hasSideDoor && this.hints.hasWiringDps && (this.uda.device_type !== "UGT")) {
-
-      const newSideDoorDpsState = this.hubSideDoorDpsState;
-
-      if(newSideDoorDpsState !== this._hkSideDoorDpsState) {
-
-        this._hkSideDoorDpsState = newSideDoorDpsState;
-        const contactDetected = this.isClosed(this._hkSideDoorDpsState);
-
-        this.controller.mqtt?.publish(this.id, "sidedoor/dps", contactDetected ? "false" : "true");
-
-        if(this.hints.logDps) {
-
-          this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
-        }
-      }
-    }
-
-    // Process any terminal input update events if our state has changed.
-    for(const { input, topic, label } of terminalInputs) {
-
-      const hasKey = ("hasWiring" + input) as HasWiringHintKey;
       const hkKey = ("hk" + input + "State") as HkStateKey;
       const hubKey = ("hub" + input + "State") as HubStateKey;
       const logKey = ("log" + input) as LogHintKey;
       const wiredKey = ("is" + input + "Wired") as WiredKey;
 
-      if(this.hints[hasKey] && (this[hubKey] !== this[hkKey])) {
+      if(this[hubKey] === this[hkKey]) {
 
-        this[hkKey] = this[hubKey];
+        continue;
+      }
 
-        if(this[wiredKey]) {
+      this[hkKey] = this[hubKey];
 
-          const contactDetected = this.isClosed(this[hkKey]);
+      if(this[wiredKey]) {
 
-          this.controller.mqtt?.publish(this.id, topic, contactDetected ? "false" : "true");
+        const contactDetected = this.isClosed(this[hkKey]);
 
-          if(this.hints[logKey]) {
+        this.controller.mqttPublish(mqttTopic(this.id, topic), contactDetected ? "false" : "true");
 
-            this.log.info("%s %s.", label, contactDetected ? "closed" : "open");
-          }
-        }
+        if(this.hints[logKey]) {
 
-        // When DPS state changes on UA Gate, update the GarageDoorOpener service state. Non-UA Gate hubs with GarageDoorOpener derive state from lock relay changes
-        // instead, so DPS updates don't affect the door service.
-        if((input === "Dps") && (this.doorServiceType === "GarageDoorOpener") && (this.uda.device_type === "UGT")) {
-
-          this.updateDoorServiceState(false);
+          this.log.info("%s %s.", sentenceCase(label), contactDetected ? "closed" : "open");
         }
       }
     }
 
-    // Process any changes to terminal input configuration.
-    if((packet.data as AccessDeviceConfig).extensions?.[0]?.target_config && (this.uda.display_model === "UA Ultra")) {
+    /* Re-derive every input's eligibility from the evidence this update brought with it. Running it unconditionally is what lets a wiring change or a multiplex flip
+     * re-gate its services mid-run on any hub family rather than only on the one that happened to be checked for it, and the call is cheap and silent on repeat by
+     * construction.
+     */
+    this.configureTerminalInputs();
 
-      this.checkUltraInputs();
-      this.configureTerminalInputs();
+    /* Project tampering. This is the only live writer of the characteristic - the configure path above adopts a baseline and never touches it again - so a change
+     * seen here is a real one, and it also dresses a sensor the re-gate above may have just created.
+     *
+     * A reading arriving over one we never had is adopted in silence rather than announced as a transition nobody observed. A raise and clear that both fall inside
+     * a connectivity gap is undetectable on any rail, since the controller keeps no tamper history and the notification frames name no device...so what we project
+     * after a gap is simply where the hardware stands now.
+     */
+    if(!this.hasCapability("tamper_proofing")) {
+
+      return;
     }
 
-    // Process any changes to our online status.
-    if((packet.data as AccessDeviceConfig).is_online !== undefined) {
+    const verdict = tamperState(this.uda);
 
-      for(const sensor of Object.keys(AccessReservedNames).filter(key => key.startsWith("CONTACT_"))) {
+    if(verdict === undefined) {
 
-        this.accessory.getServiceById(this.hap.Service.ContactSensor, AccessReservedNames[sensor as keyof typeof AccessReservedNames])?.
-          updateCharacteristic(this.hap.Characteristic.StatusActive, !!(packet.data as AccessDeviceConfig).is_online);
+      return;
+    }
+
+    this.updateServices(this.hap.Characteristic.StatusTampered, verdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
+      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
+
+    if((this.tamperVerdict !== undefined) && (this.tamperVerdict !== verdict)) {
+
+      // A security condition is worth a warning; its clearing is worth a note.
+      if(verdict) {
+
+        this.log.warn("Tampering detected.");
+      } else {
+
+        this.log.info("Tampering no longer detected.");
       }
     }
+
+    this.tamperVerdict = verdict;
   }
 
   // Handle device update v2 events.
@@ -1916,7 +2645,7 @@ export class AccessHub extends AccessDevice {
     // names echoed back as values).
     if(data.access_method) {
 
-      for(const [ key, value ] of Object.entries(data.access_method) as [AccessMethodKey, string][]) {
+      for(const [ key, value ] of Object.entries(data.access_method)) {
 
         if((value !== "yes") && (value !== "no")) {
 
@@ -1927,8 +2656,21 @@ export class AccessHub extends AccessDevice {
 
         if(accessMethod) {
 
+          // The model takes the change before the switch is handed it, so what a switch reads and what it was pushed can never disagree. The catalog entry's own
+          // key is the model's vocabulary, where the loop's is whatever the wire spelled.
+          this.#foldMethodValue(accessMethod.key, value === "yes");
           this.accessory.getServiceById(this.hap.Service.Switch, accessMethod.subtype)?.updateCharacteristic(this.hap.Characteristic.On, value === "yes");
         }
+      }
+
+      /* An access method event on a device we know nothing about is the controller telling us it is answering, which makes a settings read worth another attempt.
+       * The record's rows are folded first, in case a refresh has since brought them, and the dispatch owns every other condition on the launch. This packet's own
+       * entries are deliberately not what seeds the model: the read answers for every method, where a packet speaks only for the ones that moved.
+       */
+      if(this.#accessMethodState.phase !== "seeded") {
+
+        this.#foldConfigRows();
+        this.#dispatchAccessMethodSeed();
       }
     }
 
@@ -1947,7 +2689,7 @@ export class AccessHub extends AccessDevice {
 
         if(mainDoorState) {
 
-          this.updateDoorFromLocationState(mainDoorState, false);
+          this.applyDoorState(mainDoorState, false);
         }
       }
 
@@ -1963,7 +2705,7 @@ export class AccessHub extends AccessDevice {
 
           if(sideDoorState) {
 
-            this.updateDoorFromLocationState(sideDoorState, true);
+            this.applyDoorState(sideDoorState, true);
           }
         }
       }
@@ -1996,28 +2738,52 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    const locationId = locationData.id;
-    const isMainDoor = locationId === this.mainDoorLocationId;
-    const isSideDoor = locationId === this.sideDoorLocationId;
+    const door = this.#ownedDoor(locationData.id);
 
-    if(isMainDoor) {
+    if(door === "main") {
 
-      this.updateDoorFromLocationState(locationData.state, false);
-    } else if(isSideDoor && this.hints.hasSideDoor) {
+      this.applyDoorState(locationData.state, false);
+    } else if((door === "side") && this.hints.hasSideDoor) {
 
-      this.updateDoorFromLocationState(locationData.state, true);
+      this.applyDoorState(locationData.state, true);
     }
   }
 
   // Handle doorbell ring events.
   private handleDoorbellRing(packet: AccessEventPacket): void {
 
-    if(((packet.data as AccessEventDoorbellRing).connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
+    // Classify once at the head and read the typed payload from there. The classifier is pure and total, so a packet that isn't a ring simply doesn't match.
+    const event = AccessClient.classifyPacket(packet);
+
+    if(event?.kind !== "doorbellRing") {
 
       return;
     }
 
-    this.doorbellRingRequestId = (packet.data as AccessEventDoorbellRing).request_id;
+    if((event.payload.connected_uah_id !== this.uda.unique_id) || !this.hasCapability("door_bell")) {
+
+      return;
+    }
+
+    /* The ring type declares door_guard_ids required because every capture carries it, but the library's runtime validator admits a ring on channel and device_id
+     * alone, so the member can legally be absent at runtime and an unguarded read would throw out of the whole ring chain. The suppression exists because the type
+     * says the fallback can never fire; the validator contract says otherwise.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    const guardIds = event.payload.door_guard_ids ?? [];
+
+    // The discovery aid for configuring the door guard filter: every ring that reaches this point records the guard ids it carries.
+    this.log.debug("Doorbell ring door guards: %s.", guardIds.join(", "));
+
+    // An absent-or-empty guard list passes by the filter's own fail-open contract, so an unclassifiable ring can never be silenced.
+    if(!doorbellRingAllowed({ filter: this.doorbellGuardFilter, guardIds })) {
+
+      this.log.debug("Doorbell ring ignored: no door guard matched the configured filter.");
+
+      return;
+    }
+
+    this.doorbellRingRequestId = event.payload.request_id;
 
     // Trigger the doorbell event in HomeKit.
     this.accessory.getService(this.hap.Service.Doorbell)?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
@@ -2027,7 +2793,7 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
 
     // Publish to MQTT.
-    this.controller.mqtt?.publish(this.id, "doorbell", "true");
+    this.controller.mqttPublish(mqttTopic(this.id, "doorbell"), "true");
 
     if(this.hints.logDoorbell) {
 
@@ -2035,10 +2801,67 @@ export class AccessHub extends AccessDevice {
     }
   }
 
+  /* Publish and log who unlocked one of this hub's doors, from a webhook delivery.
+   *
+   * Ownership is the door alone. The hub that drives a door owns that door's unlocks, and the reader that presented the credential never publishes them, so one
+   * physical unlock reaches exactly one accessory rather than every accessory that took part in it.
+   *
+   * Nothing here touches HomeKit state. The notification socket owns lock state and already reports the transition; this rail carries the attribution that socket
+   * has no room for, which is why an attributed unlock produces the socket's line and this one rather than either replacing the other.
+   */
+  private handleUnlockDelivery(delivery: AccessConsumedWebhookDelivery<typeof ACCESS_WEBHOOK_EVENTS.doorUnlock>): void {
+
+    const door = this.#ownedDoor(delivery.data.location.id);
+
+    if(door === null) {
+
+      return;
+    }
+
+    const attribution = unlockAttribution(delivery);
+
+    this.controller.mqttPublish(mqttTopic(this.id, (door === "side") ? "sidedoor/unlock" : "unlock"), JSON.stringify(attribution));
+
+    // The sentence is composed rather than formatted in place, because the door's name is whatever an administrator called it and has no business being read as a
+    // format string.
+    if(this.hints.logLock) {
+
+      this.log.info("%s", describeUnlock({ attribution, door: delivery.data.location.name }));
+    }
+  }
+
+  /* Log how a doorbell call ended, from a webhook delivery.
+   *
+   * Ownership is the hub the ringing reader hangs off, keyed exactly as the notification socket's own ring is: the delivery names the reader that rang and that
+   * reader's record names its hub. The delivery's own host member reads empty on every capture, so the connection is the only thing that names the hub at all.
+   *
+   * There is no MQTT topic for an outcome. A call ending is a fact about the call rather than about the door, and the doorbell topic already carries the ring and
+   * its cancellation.
+   */
+  private handleDoorbellOutcome(delivery: AccessConsumedWebhookDelivery<typeof ACCESS_WEBHOOK_EVENTS.doorbellCompleted>): void {
+
+    if(delivery.data.device?.connected_hub_id !== this.uda.unique_id) {
+
+      return;
+    }
+
+    if(this.hints.logDoorbell) {
+
+      this.log.info("Doorbell call ended: %s", doorbellOutcome(delivery.data.object.reason_code));
+    }
+  }
+
   // Handle doorbell cancel events.
   private handleDoorbellCancel(packet: AccessEventPacket): void {
 
-    if(this.doorbellRingRequestId !== (packet.data as AccessEventDoorbellCancel).remote_call_request_id) {
+    const event = AccessClient.classifyPacket(packet);
+
+    if(event?.kind !== "doorbellCancel") {
+
+      return;
+    }
+
+    if(this.doorbellRingRequestId !== event.payload.remote_call_request_id) {
 
       return;
     }
@@ -2049,7 +2872,7 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
 
     // Publish to MQTT.
-    this.controller.mqtt?.publish(this.id, "doorbell", "false");
+    this.controller.mqttPublish(mqttTopic(this.id, "doorbell"), "false");
 
     if(this.hints.logDoorbell) {
 
@@ -2068,9 +2891,9 @@ export class AccessHub extends AccessDevice {
 
         break;
 
-      case "access.data.device.update":
+      case ACCESS_DEVICE_UPDATE_EVENT:
 
-        this.handleDeviceUpdate(packet);
+        this.handleDeviceUpdate();
 
         break;
 
@@ -2108,9 +2931,8 @@ export class AccessHub extends AccessDevice {
   // against whatever Ubiquiti may do in the future given the inconsistencies in their API implementation for Access across devices of even similar types.
   static {
 
-    // We define the specific sensor input properties we need. We skip DPS since we implement it with a manual getter/setter that provides fallback behavior when the
-    // DPS contact sensor is disabled.
-    for(const input of sensorInputs.filter(i => i !== "Dps")) {
+    // We define the specific sensor input properties we need.
+    for(const input of sensorInputs) {
 
       let propName = "hk" + input + "State";
       const enumKey = "CONTACT_" + input.toUpperCase();

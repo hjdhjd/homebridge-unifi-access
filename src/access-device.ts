@@ -2,94 +2,98 @@
  *
  * access-device.ts: Base class for all UniFi Access devices.
  */
-import { ACCESS_MOTION_DURATION, ACCESS_OCCUPANCY_DURATION } from "./settings.js";
-import type { API, CharacteristicValue, HAP, PlatformAccessory } from "homebridge";
-import type { AccessApi, AccessDeviceConfig, AccessEventPacket } from "unifi-access";
-import { type HomebridgePluginLogging, type Nullable, sanitizeName } from "homebridge-plugin-utils";
-import type { AccessController } from "./access-controller.js";
-import type { AccessPlatform } from "./access-platform.js";
-import { AccessReservedNames } from "./access-types.js";
-import util from "node:util";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "./access-events.ts";
+import type { API, Characteristic, CharacteristicValue, HAP, WithUUID } from "homebridge";
+import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
+import type { AccessEventPacket, AccessStateDevice } from "unifi-access";
+import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import { TimerRegistry, debugGatedLog, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
+import { deviceSerial, serialForm } from "./access-policy.ts";
+import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
+import type { AccessAccessory } from "./access-types.ts";
+import type { AccessController } from "./access-controller.ts";
+import type { AccessListener } from "./access-events.ts";
+import type { AccessPlatform } from "./access-platform.ts";
+import { AccessReservedNames } from "./access-types.ts";
+import type { AccessWebhookEvent } from "unifi-access";
+import type { DecoratedSerial } from "./access-policy.ts";
 
-// Device-specific options and settings.
+/* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
+ * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
+ *
+ * The side-door pair is the exception the UA Gate earns: that hardware drives two doors, and which of them a hint speaks for is not something a shared reading can
+ * express.
+ */
+// The deliveries this plugin consumes, named by the settings constant so the registration a controller asks for and the handler that receives it agree on the
+// vocabulary by construction rather than by two literals happening to match.
+export type AccessConsumedWebhookEventName = typeof ACCESS_WEBHOOK_EVENTS[keyof typeof ACCESS_WEBHOOK_EVENTS];
+
+// The delivery a consumed event name carries, extracted from the library's own union so the payload type follows the name with nothing restated here.
+export type AccessConsumedWebhookDelivery<K extends AccessConsumedWebhookEventName> = Extract<AccessWebhookEvent, { event: K }>;
+
 export interface AccessHints {
 
-  enabled: boolean;
-  hasMethodFace: boolean;
-  hasMethodHand: boolean;
-  hasMethodMobile: boolean;
-  hasMethodNfc: boolean;
-  hasMethodPin: boolean;
-  hasMethodQr: boolean;
-  hasMethodTwoStep: boolean;
   hasSideDoor: boolean;
-  hasWiringDps: boolean;
-  hasWiringRel: boolean;
-  hasWiringRen: boolean;
-  hasWiringRex: boolean;
   hasWiringSideDoorDps: boolean;
-  ledStatus: boolean;
   logDoorbell: boolean;
   logDps: boolean;
   logLock: boolean;
-  logMotion: boolean;
   logRel: boolean;
   logRen: boolean;
   logRex: boolean;
-  motionDuration: number;
-  occupancyDuration: number;
   syncName: boolean;
 }
 
 export abstract class AccessBase {
 
   public readonly api: API;
-  private debug: (message: string, ...parameters: unknown[]) => void;
   protected readonly hap: HAP;
   public readonly log: HomebridgePluginLogging;
   public readonly controller: AccessController;
-  public udaApi: AccessApi;
   public readonly platform: AccessPlatform;
 
   // The constructor initializes key variables and calls configureDevice().
   constructor(controller: AccessController) {
 
     this.api = controller.platform.api;
-    this.debug = controller.platform.debug.bind(this);
     this.hap = this.api.hap;
     this.controller = controller;
-    this.udaApi = controller.udaApi;
     this.platform = controller.platform;
 
-    this.log = {
-
-      debug: (message: string, ...parameters: unknown[]): void => controller.platform.debug(util.format(this.name + ": " + message, ...parameters)),
-      error: (message: string, ...parameters: unknown[]): void => controller.platform.log.error(util.format(this.name + ": " + message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => controller.platform.log.info(util.format(this.name + ": " + message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => controller.platform.log.warn(util.format(this.name + ": " + message, ...parameters))
-    };
+    /* Derive our logger from the platform's. Every level carries this owner's name as a prefix so a line is attributable at a glance, and the debug level is gated at
+     * this owner's own scope so what a user asks to hear from one device stays that device's business rather than the whole plugin's.
+     *
+     * The gate wraps the prefix rather than the other way around, which is what makes a suppressed debug line cost one predicate call and no string composition. The
+     * predicate is a closure over this owner's live identity rather than a value read here, so a line always resolves against the identity the owner holds at the
+     * moment it speaks...an owner consulted before its identity exists resolves at global scope, the only scope that can name it.
+     */
+    this.log = debugGatedLog(prefixedLog(this.platform.log, () => this.name), () => this.debugEnabled());
   }
 
-  // Configure the device information for HomeKit.
-  protected setInfo(accessory: PlatformAccessory, device: AccessDeviceConfig): boolean {
+  /* Whether this owner's debug lines speak. The base answers at the controller's scope alone, because an owner that is the controller itself has no device identity to
+   * resolve against, and a controller-suffixed Log.Debug entry turns on that controller and everything it manages.
+   */
+  protected debugEnabled(): boolean {
+
+    return this.platform.featureOptions.test("Log.Debug", undefined, this.controller.id);
+  }
+
+  /* Configure the device information for HomeKit.
+   *
+   * The hardware identity arrives as its own argument rather than being read from the record, because the record's identity member is optional and the accessory's
+   * is not: an accessory's serial number is frozen at adoption and every cache in the field is keyed by it, so it is the captured identity that belongs here and
+   * never whatever the live record happens to carry now.
+   */
+  protected setInfo(accessory: AccessAccessory, device: AccessStateDevice, mac: string): boolean {
 
     // Update the manufacturer information for this device.
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "Ubiquiti Inc.");
 
-    // Update the model information for this device.
-    const deviceModel = device.display_model ?? device.model;
-
-    if(deviceModel) {
-
-      accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, deviceModel);
-    }
+    // Update the model information for this device. The resolution always answers something a user recognizes, so there is nothing to guard here.
+    accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, this.controller.resolveDeviceModel(device));
 
     // Update the serial number for this device.
-    if(device.mac) {
-
-      accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber,
-        device.mac.replace(/:/g, "").toUpperCase());
-    }
+    accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, serialForm(mac));
 
     // Update the firmware revision for this device.
     if(device.firmware) {
@@ -100,7 +104,7 @@ export abstract class AccessBase {
 
       // Update our firmware revision.
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision,
-        match ? match[1] + "." + (match[2] ?? "0") + "." + (match[3] ?? "0") : device.firmware);
+        match ? (match[1] ?? "0") + "." + (match[2] ?? "0") + "." + (match[3] ?? "0") : device.firmware);
     }
 
     return true;
@@ -109,66 +113,152 @@ export abstract class AccessBase {
   // Utility function to return the fully enumerated name of this device.
   public get name(): string {
 
-    return this.controller.udaApi.name;
+    return this.controller.name;
   }
 }
 
 export abstract class AccessDevice extends AccessBase {
 
-  public accessory!: PlatformAccessory;
+  public accessory!: AccessAccessory;
   public hints: AccessHints;
-  protected listeners: { [index: string]: (packet: AccessEventPacket) => void };
-  public abstract uda: AccessDeviceConfig;
+  // Every handler this device registered, by the event name it answers to. One map and one cleanup loop serve both the socket's packets and the webhook rail's
+  // deliveries, because what teardown owes each of them is identical.
+  protected listeners: Map<string, AccessListener>;
+  /* This device's identity for everything that addresses it by name: the feature-option scope every read on this device resolves at, the debug gate, the
+   * deviation log, and the MQTT topic tail.
+   *
+   * It is composed once from the admission record, so both halves of it - the hardware serial and an Enterprise port's qualifier - are frozen at adoption exactly
+   * as the hardware identity below is, and no read pays for the composition. An identity recomposed from the live record would move under an accessory whose
+   * HomeKit identity was frozen at adoption, which is the drift the capture exists to make impossible.
+   */
+  public readonly id: DecoratedSerial;
+  /* This device's hardware identity, captured once from the record that admitted it into HomeKit.
+   *
+   * The stored record's own identity member is optional - the official API's inventory names a device by an identifier that is not always address-shaped - and the
+   * observe loop below reassigns that record on every tick, so an identity re-read from it could move under an accessory whose HomeKit identity was frozen at
+   * adoption. Every site that needs the hardware identity reads this captured value instead: the serial number characteristic and the accessory's own context.
+   */
+  public readonly mac: string;
+  // The device's live projection into the client's reduced state, and - for lock-capable hardware - the command-bearing view of the same device. The two are separate
+  // fields because the library exports the hub view as a type alone, so there is no runtime narrowing from the base handle; adoption is the one place the concrete
+  // view is known, and it hands both down.
+  protected readonly hubProjection: AccessHubProjection | undefined;
+  protected readonly projection: AccessDeviceProjection;
+  /* This device's own lifetime, as the composition of the controller's terminal signal with this device's own controller, so plugin shutdown and single-device
+   * removal each end it. Public because the controller's own delivery loops address a configured device through its public surface alone.
+   */
+  public readonly signal: AbortSignal;
+  /* Every timer this device arms, bound to the lifetime above. cleanup() needs no call of its own: aborting the device controller drains the registry through the
+   * composed signal. The same abort makes a later registration inert, which is the behavior we want at teardown...a relock armed by an unlock still in flight when
+   * the plugin goes down has nothing left to relock for.
+   */
+  protected readonly timers: TimerRegistry;
+  // The device's own configuration record, refreshed by the observe loop below and by nothing else.
+  public uda: AccessStateDevice;
+  // The controller half of the composed lifetime above. Aborted by cleanup(), which is what ends this device alone without disturbing its siblings.
+  readonly #deviceController: AbortController;
 
-  // The constructor initializes key variables and calls configureDevice().
-  constructor(controller: AccessController, accessory: PlatformAccessory) {
+  /* The constructor initializes key variables and calls configureDevice().
+   *
+   * The admission record is the narrowed record membership admitted this device on, and it exists as an argument of its own because the projection's own record
+   * cannot carry that narrowing: the projection reads through to live state, where a record's hardware identity is optional. Adoption is the one moment the
+   * identity is established, so it is captured here and never read from the live record again.
+   */
+  constructor(controller: AccessController, projection: AccessDeviceProjection, accessory: AccessAccessory, admission: AccessStateDevice & { mac: string },
+    hubProjection?: AccessHubProjection) {
 
     // Call the constructor of our base class.
     super(controller);
 
-    this.hints = {} as AccessHints;
-    this.listeners = {};
+    this.#deviceController = new AbortController();
+    // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
+    // states each one the user's settings actually decide.
+    this.hints = { hasSideDoor: false, hasWiringSideDoorDps: false, logDoorbell: false, logDps: false, logLock: false, logRel: false, logRen: false,
+      logRex: false, syncName: false };
+    this.hubProjection = hubProjection;
+    this.id = deviceSerial(admission);
+    this.listeners = new Map();
+    this.mac = admission.mac;
+    this.projection = projection;
+    this.signal = AbortSignal.any([ controller.signal, this.#deviceController.signal ]);
+    this.timers = new TimerRegistry({ signal: this.signal });
+    this.uda = projection.config;
 
     // Set the accessory.
     this.accessory = accessory;
+
+    /* Observe our own record and keep everything downstream of it current. The loop is the only writer of uda after construction and the reducer's merge is its only
+     * source, so a partial update from either notification dialect lands as a merge rather than as a truncating whole-record assignment.
+     *
+     * A yield whose record has left the state is skipped in its entirety - no refresh, no characteristic writes, no delivery - so a device inside its removal grace
+     * never emits an update about a record that is gone.
+     */
+    this.controller.spawnLoop(this.name + " updates", async () => {
+
+      for await (const projection of this.projection.observe({ signal: this.signal })) {
+
+        const record = projection.peek();
+
+        if(!record) {
+
+          continue;
+        }
+
+        this.uda = record;
+
+        // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
+        this.updateServices(this.hap.Characteristic.StatusActive, this.isOnline);
+
+        // Sync names, if configured to do so.
+        if(this.hints.syncName && this.uda.alias && (this.accessoryName !== sanitizeName(this.uda.alias))) {
+
+          this.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
+          this.configureInfo();
+        }
+
+        /* Deliver the update to the accessory's own handlers, post-fold, through the same chokepoint the wire bridge uses. Doing it from here rather than from the raw
+         * rail is what guarantees the handler sees the record as the update left it: the raw rail fires before the reducer folds, so a handler reading through to
+         * state from there would race the very change it was told about. The two trailing members are what the packet type requires, and both mirror what every
+         * captured wire frame carries.
+         */
+        this.controller.events.emitPacket(this.#updatePacket());
+      }
+    });
+  }
+
+  /* Write a value to every service on this accessory that reports the given characteristic. The one sweep-and-write statement in the plugin: the observe loop above
+   * projects availability through it, and a device's own delivery paths project whatever else is a property of the device rather than of one service. Filtering on
+   * the characteristic rather than on a service list is what keeps a service added mid-run dressed without anyone maintaining a roster.
+   *
+   * The parameter is an intersection because the two HAP calls below ask for different halves of the same class: the lookup wants the static UUID and the write
+   * wants a zero-argument constructor. A concrete characteristic satisfies both, and naming both is what lets one parameter reach both calls without a cast.
+   */
+  protected updateServices(characteristic: WithUUID<typeof Characteristic> & (new () => Characteristic), value: CharacteristicValue): void {
+
+    for(const service of this.accessory.services.filter(x => x.testCharacteristic(characteristic))) {
+
+      service.updateCharacteristic(characteristic, value);
+    }
+  }
+
+  // The update packet this device delivers to its own handlers once its record has folded. The two trailing members are what the packet type requires, and both carry
+  // the wire's own values: every captured frame reports an empty receiver and does not save to history.
+  #updatePacket(): AccessEventPacket {
+
+    // eslint-disable-next-line camelcase
+    return { data: this.uda, event: ACCESS_DEVICE_UPDATE_EVENT, event_object_id: this.uda.unique_id, receiver_id: "", save_to_history: false };
   }
 
   // Configure device-specific settings.
   protected configureHints(): boolean {
 
-    this.hints.enabled = this.hasFeature("Device");
-    this.hints.logMotion = this.hasFeature("Log.Motion");
-    this.hints.motionDuration = this.getFeatureNumber("Motion.Duration") ?? ACCESS_MOTION_DURATION;
-    this.hints.occupancyDuration = this.getFeatureNumber("Motion.OccupancySensor.Duration") ?? ACCESS_OCCUPANCY_DURATION;
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
-    // Sanity check motion detection duration. Make sure it's never less than 2 seconds so we can actually alert the user.
-    if(this.hints.motionDuration < 2) {
-
-      this.hints.motionDuration = 2;
-    }
-
-    // Sanity check occupancy detection duration. Make sure it's never less than 60 seconds so we can actually alert the user.
-    if(this.hints.occupancyDuration < 60) {
-
-      this.hints.occupancyDuration = 60;
-    }
-
-    // Inform the user if we've opted for something other than the defaults.
-    if(this.hints.syncName) {
-
-      this.log.info("Syncing Access device name to HomeKit.");
-    }
-
-    if(this.hints.motionDuration !== ACCESS_MOTION_DURATION) {
-
-      this.log.info("Motion event duration set to %s seconds.", this.hints.motionDuration);
-    }
-
-    if(this.hints.occupancyDuration !== ACCESS_OCCUPANCY_DURATION) {
-
-      this.log.info("Occupancy event duration set to %s seconds.", this.hints.occupancyDuration);
-    }
+    /* Inform the user if we've opted for something other than the defaults. The shared primitive resolves the option itself and speaks only on a deviation, so it
+     * needs no guard of its own...and the scope pair handed to it is the pair every read on this device resolves at, which is what keeps what the user is told
+     * and what the plugin does answering one question. The label is a noun phrase because the primitive composes the sentence around it.
+     */
+    this.platform.featureOptions.logFeature("Device.SyncName", "Device name synchronization", this.log, this.id, this.controller.id);
 
     return true;
   }
@@ -182,281 +272,47 @@ export abstract class AccessDevice extends AccessBase {
       this.accessoryName = this.uda.alias;
     }
 
-    return this.setInfo(this.accessory, this.uda);
+    return this.setInfo(this.accessory, this.uda, this.mac);
   }
 
   // Cleanup our event handlers and any other activities as needed.
   public cleanup(): void {
 
-    for(const eventName of Object.keys(this.listeners)) {
+    for(const [ eventName, handler ] of this.listeners) {
 
-      this.controller.events.removeListener(eventName, this.listeners[eventName]);
-      delete this.listeners[eventName];
+      this.controller.events.off(eventName, handler);
     }
+
+    this.listeners.clear();
+    this.#deviceController.abort();
   }
 
-  // Configure the Access motion sensor for HomeKit.
-  protected configureMotionSensor(isEnabled = true, isInitialized = false): boolean {
+  // Register a handler for one of the controller's notification-socket events, storing it for later cleanup. The socket's vocabulary is an open set of dynamic
+  // strings - event names, device identities, door identities - so the event stays a plain string here.
+  protected registerListener(event: string, handler: (packet: AccessEventPacket) => void): void {
 
-    // Find the motion sensor service, if it exists.
-    let motionService = this.accessory.getService(this.hap.Service.MotionSensor);
-
-    // Have we disabled the motion sensor?
-    if(!isEnabled) {
-
-      if(motionService) {
-
-        this.accessory.removeService(motionService);
-        this.controller.mqtt?.unsubscribe(this.id, "motion/trigger");
-        this.log.info("Disabling motion sensor.");
-      }
-
-      this.configureMotionSwitch(isEnabled);
-      this.configureMotionTrigger(isEnabled);
-
-      return false;
-    }
-
-    // We don't have a motion sensor, let's add it to the device.
-    if(!motionService) {
-
-      // We don't have it, add the motion sensor to the device.
-      motionService = new this.hap.Service.MotionSensor(this.accessoryName);
-
-      this.accessory.addService(motionService);
-      isInitialized = false;
-
-      this.log.info("Enabling motion sensor.");
-    }
-
-    // Have we previously initialized this sensor? We assume not by default, but this allows for scenarios where you may be dynamically reconfiguring a sensor at
-    // runtime (e.g. UniFi sensors can be reconfigured for various sensor modes in realtime).
-    if(!isInitialized) {
-
-      // Initialize the state of the motion sensor.
-      motionService.displayName = this.accessoryName;
-      motionService.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
-      motionService.updateCharacteristic(this.hap.Characteristic.MotionDetected, false);
-      motionService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
-
-      motionService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => {
-
-        return this.isOnline;
-      });
-
-      // Configure our MQTT support.
-      this.configureMqttMotionTrigger();
-
-      // Configure any motion switches or triggers the user may have enabled or disabled.
-      this.configureMotionSwitch(isEnabled);
-      this.configureMotionTrigger(isEnabled);
-    }
-
-    return true;
+    this.#register(event, handler);
   }
 
-  // Configure a switch to easily activate or deactivate motion sensor detection for HomeKit.
-  private configureMotionSwitch(isEnabled = true): boolean {
+  /* Register a handler for one of the webhook deliveries this plugin consumes.
+   *
+   * The event name and its payload are linked at the type level, so a handler written for an unlock cannot be registered against a doorbell outcome. That link is
+   * affordable here and not on the socket registration above because the delivery vocabulary is a closed set the plugin states for itself, where the socket's is
+   * an open one the controller keeps extending.
+   *
+   * @param event   - Which delivery to listen for.
+   * @param handler - The handler, receiving exactly the delivery that name carries.
+   */
+  protected registerDeliveryListener<K extends AccessConsumedWebhookEventName>(event: K, handler: (delivery: AccessConsumedWebhookDelivery<K>) => void): void {
 
-    // Find the switch service, if it exists.
-    let switchService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_SENSOR);
-
-    // Motion switches are disabled by default unless the user enables them.
-    if(!isEnabled || !this.hasFeature("Motion.Switch")) {
-
-      if(switchService) {
-
-        this.accessory.removeService(switchService);
-      }
-
-      // If we disable the switch, make sure we fully reset it's state. Otherwise, we can end up in a situation (e.g. liveview switches) where we have
-      // disabled motion detection with no meaningful way to enable it again.
-      this.accessory.context.detectMotion = true;
-
-      return false;
-    }
-
-    this.log.info("Enabling motion sensor switch.");
-
-    const switchName = this.accessoryName + " Motion Events";
-
-    // Add the switch to the device, if needed.
-    if(!switchService) {
-
-      switchService = new this.hap.Service.Switch(switchName, AccessReservedNames.SWITCH_MOTION_SENSOR);
-
-      switchService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(switchService);
-    }
-
-    // Activate or deactivate motion detection.
-    switchService.getCharacteristic(this.hap.Characteristic.On).onGet(() => {
-
-      return this.accessory.context.detectMotion === true;
-    });
-
-    switchService.getCharacteristic(this.hap.Characteristic.On).onSet((value: CharacteristicValue) => {
-
-      if(this.accessory.context.detectMotion !== value) {
-
-        this.log.info("Motion detection %s.", (value === true) ? "enabled" : "disabled");
-      }
-
-      this.accessory.context.detectMotion = value === true;
-    });
-
-    // Initialize the switch state.
-    if(!("detectMotion" in this.accessory.context)) {
-
-      this.accessory.context.detectMotion = true;
-    }
-
-    switchService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, switchName);
-    switchService.updateCharacteristic(this.hap.Characteristic.On, this.accessory.context.detectMotion as boolean);
-
-    return true;
+    this.#register(ACCESS_WEBHOOK_EVENT_PREFIX + event, handler);
   }
 
-  // Configure a switch to manually trigger a motion sensor event for HomeKit.
-  private configureMotionTrigger(isEnabled = true): boolean {
+  // The one registration statement both kinds of handler pass through: remember it so cleanup can find it, then attach it.
+  #register(event: string, handler: AccessListener): void {
 
-    // Find the switch service, if it exists.
-    let triggerService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_TRIGGER);
-
-    // Motion triggers are disabled by default and primarily exist for automation purposes.
-    if(!isEnabled || !this.hasFeature("Motion.Trigger")) {
-
-      if(triggerService) {
-
-        this.accessory.removeService(triggerService);
-      }
-
-      return false;
-    }
-
-    const triggerName = this.accessoryName + " Motion Trigger";
-
-    // Add the switch to the device, if needed.
-    if(!triggerService) {
-
-      triggerService = new this.hap.Service.Switch(triggerName, AccessReservedNames.SWITCH_MOTION_TRIGGER);
-
-      triggerService.addOptionalCharacteristic(this.hap.Characteristic.ConfiguredName);
-      this.accessory.addService(triggerService);
-    }
-
-    const motionService = this.accessory.getService(this.hap.Service.MotionSensor);
-    const switchService = this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_MOTION_SENSOR);
-
-    // Activate or deactivate motion detection.
-    triggerService.getCharacteristic(this.hap.Characteristic.On).onGet(() => {
-
-      return motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value === true;
-    });
-
-    triggerService.getCharacteristic(this.hap.Characteristic.On).onSet((isOn: CharacteristicValue) => {
-
-      if(isOn) {
-
-        // Check to see if motion events are disabled.
-        if(switchService && !switchService.getCharacteristic(this.hap.Characteristic.On).value) {
-
-          setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, false), 50);
-
-        } else {
-
-          // Trigger the motion event.
-          this.controller.events.motionEventHandler(this);
-
-          // Inform the user.
-          this.log.info("Motion event triggered.");
-        }
-
-        return;
-      }
-
-      // If the motion sensor is still on, we should be as well.
-      if(motionService?.getCharacteristic(this.hap.Characteristic.MotionDetected).value) {
-
-        setTimeout(() => triggerService.updateCharacteristic(this.hap.Characteristic.On, true), 50);
-      }
-    });
-
-    // Initialize the switch.
-    triggerService.updateCharacteristic(this.hap.Characteristic.ConfiguredName, triggerName);
-    triggerService.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    this.log.info("Enabling motion sensor automation trigger.");
-
-    return true;
-  }
-
-  // Configure MQTT motion triggers.
-  private configureMqttMotionTrigger(): boolean {
-
-    // Trigger a motion event in MQTT, if requested to do so.
-    this.controller.mqtt?.subscribe(this.id, "motion/trigger", (message: Buffer) => {
-
-      const value = message.toString();
-
-      // When we get the right message, we trigger the motion event.
-      if(value.toLowerCase() !== "true") {
-
-        return;
-      }
-
-      // Trigger the motion event.
-      this.controller.events.motionEventHandler(this);
-      this.log.info("Motion event triggered via MQTT.");
-    });
-
-    return true;
-  }
-
-  // Configure the Access occupancy sensor for HomeKit.
-  protected configureOccupancySensor(isEnabled = true, isInitialized = false): boolean {
-
-    // Find the occupancy sensor service, if it exists.
-    let occupancyService = this.accessory.getService(this.hap.Service.OccupancySensor);
-
-    // Occupancy sensors are disabled by default and primarily exist for automation purposes.
-    if(!isEnabled || !this.hasFeature("Motion.OccupancySensor")) {
-
-      if(occupancyService) {
-
-        this.accessory.removeService(occupancyService);
-        this.log.info("Disabling occupancy sensor.");
-      }
-
-      return false;
-    }
-
-    // We don't have an occupancy sensor, let's add it to the device.
-    if(!occupancyService) {
-
-      // We don't have it, add the occupancy sensor to the device.
-      occupancyService = new this.hap.Service.OccupancySensor(this.accessoryName);
-
-      this.accessory.addService(occupancyService);
-    }
-
-    // Have we previously initialized this sensor? We assume not by default, but this allows for scenarios where you may be dynamically reconfiguring a sensor at
-    // runtime (e.g. UniFi sensors can be reconfigured for various sensor modes in realtime).
-    if(!isInitialized) {
-
-      // Initialize the state of the occupancy sensor.
-      occupancyService.updateCharacteristic(this.hap.Characteristic.OccupancyDetected, false);
-      occupancyService.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
-
-      occupancyService.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => {
-
-        return this.isOnline;
-      });
-
-      this.log.info("Enabling occupancy sensor.");
-    }
-
-    return true;
+    this.listeners.set(event, handler);
+    this.controller.events.on(event, handler);
   }
 
   // Utility function to return a floating point configuration parameter on a device.
@@ -477,10 +333,10 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }
 
-  // Utility for checking feature options on a device.
+  // Utility for checking whether a feature option is enabled on a device.
   public hasFeature(option: string): boolean {
 
-    return this.controller.hasFeature(option, this.uda);
+    return this.platform.featureOptions.test(option, this.id, this.controller.id);
   }
 
   // Utility function for reserved identifiers for switches.
@@ -495,23 +351,28 @@ export abstract class AccessDevice extends AccessBase {
     return ([ "is_adopted", "is_connected", "is_managed", "is_online" ] as const).every(key => this.uda[key]);
   }
 
-  // Return a unique identifier for an Access device.
-  public get id(): string {
+  /* The name this device's log lines are prefixed with: the device alone, in the form this family of plugins shares. The controller half is left out deliberately -
+   * a device line is about the device, and the controller-scoped lines are where the controller names itself.
+   */
+  public override get name(): string {
 
-    return this.uda.mac.replace(/:/g, "") + ((this.uda.device_type === "UAH-Ent") ? "-" + this.uda.source_id.toUpperCase() : "");
+    return this.controller.getDeviceName(this.uda);
   }
 
-  // Utility function to return the fully enumerated name of this device.
-  public get name(): string {
+  /* A device answers at its own identity alongside the controller's, so a Log.Debug entry suffixed with this device turns on its debug lines alone while its siblings
+   * stay quiet, and a controller-suffixed entry still reaches it. The device is handed over first because the engine walks the scopes in the order it is given them,
+   * and device-before-controller is what lets a device entry outrank the controller entry that would otherwise answer for the whole controller.
+   */
+  protected override debugEnabled(): boolean {
 
-    return this.controller.udaApi.getFullName(this.uda);
+    return this.platform.featureOptions.test("Log.Debug", this.id, this.controller.id);
   }
 
   // Utility function to return the current accessory name of this device.
   public get accessoryName(): string {
 
     return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined) ??
-      (this.uda.alias ?? "Unknown");
+      this.uda.alias;
   }
 
   // Utility function to set the current accessory name of this device.

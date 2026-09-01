@@ -2,9 +2,9 @@
  *
  * index.ts: homebridge-unifi-access plugin registration.
  */
-import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.js";
+import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API } from "homebridge";
-import { AccessPlatform } from "./access-platform.js";
+import { AccessPlatform } from "./access-platform.ts";
 
 // Register our platform with homebridge.
 export default (api: API): void => {
