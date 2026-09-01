@@ -1,0 +1,1796 @@
+/* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
+ *
+ * access-controller.test.ts: Tests for the controller's removal queue and its membership resolution.
+ */
+/* eslint-disable camelcase */
+import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
+import type { AccessAccessory, AccessAccessoryContext } from "./access-types.ts";
+import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
+import type { AccessBootstrapConfig, AccessEventPacket } from "unifi-access";
+import { AccessController, createRemovalQueue } from "./access-controller.ts";
+import type { AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
+import type { AccessWebhookListener, AccessWebhookRoute } from "./access-webhooks.ts";
+import { Characteristic, Service } from "@homebridge/hap-nodejs";
+import { EventEmitter, on } from "node:events";
+import { createMembershipIdsSelector, membershipDelta, serialForm } from "./access-policy.ts";
+import { featureOptionCategories, featureOptions } from "./access-options.ts";
+import { mock, test } from "node:test";
+import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./access-events.ts";
+import type { AccessControllerConnect } from "./access-controller.ts";
+import type { AccessControllerOptions } from "./access-options.ts";
+import type { AccessDevice } from "./access-device.ts";
+import type { AccessPlatform } from "./access-platform.ts";
+import { Buffer } from "node:buffer";
+import { FeatureOptions } from "homebridge-plugin-utils";
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { format } from "node:util";
+import { retry } from "homebridge-plugin-utils";
+
+// The topology root the Enterprise hub below is recognized as building-hosted by.
+const ROOT_ID = "root1";
+
+// The controller's own MAC, in the raw form an accessory context carries and the normalized form feature options resolve against.
+const CONTROLLER_MAC = "11:22:33:44:55:66";
+
+function topology(devices: Record<string, unknown>[]): AccessBootstrapConfig {
+
+  return {
+
+    device_groups: [devices],
+    extra_type: "building",
+    extras: {},
+    floors: [],
+    full_name: "Test Building",
+    level: 0,
+    location_type: "building",
+    name: "Test Building",
+    timezone: "UTC",
+    unique_id: ROOT_ID,
+    up_id: "",
+    work_time: "",
+    work_time_id: ""
+  } as unknown as AccessBootstrapConfig;
+}
+
+/* The Enterprise topology the arms below read: a plain hub, a building-hosted Enterprise hub whose single port extension is what the expansion synthesizes a
+ * device from, and a managed record carrying a device type this plugin cannot project. One fixture serves them because each arm is about a different consumer of
+ * the same three records.
+ */
+// The plain hub of that topology, named on its own because the adoption arm stands one device up and nothing else, and both callers must read one record rather than
+// two that happen to agree.
+function plainHubRecord(): Record<string, unknown> {
+
+  return { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee01", name: "Plain Hub", unique_id: "plain" };
+}
+
+function enterpriseDevices(): Record<string, unknown>[] {
+
+  return [
+
+    plainHubRecord(),
+    {
+
+      alias: "",
+      capabilities: ["is_hub"],
+      device_type: "UAH-Ent",
+      display_model: "UA Hub Enterprise",
+      extensions: [{ device_id: "ent", extension_name: "port_setting", source_id: "port1", target_config: [], target_name: "Front Door", target_type: "door",
+        target_value: "door1", unique_id: "entPort1" }],
+      is_managed: true,
+      location_id: ROOT_ID,
+      mac: "aabbccddee02",
+      name: "Enterprise Hub",
+      unique_id: "ent"
+    },
+    { alias: "", capabilities: [], device_type: "SOMETHING-NEW", is_managed: true, mac: "aabbccddee03", name: "Unsupported", unique_id: "unsupported" }
+  ];
+}
+
+// A cached accessory as Homebridge restores it, carrying whatever context the version that created it wrote: the controller key alone by default, the MAC address
+// where an arm needs the hardware it names, and the device identity where the arm is about an accessory this version created.
+function accessory(uuid: string, context: AccessAccessoryContext = { controller: CONTROLLER_MAC }): AccessAccessory {
+
+  return { UUID: uuid, context, displayName: "Accessory " + uuid } as unknown as AccessAccessory;
+}
+
+/* The accessory constructor Homebridge supplies: the members the controller writes and reads on a freshly created one, and the service surface a device configures
+ * itself through. The services are the genuine HAP classes and the lookups are backed by a plain list, so an accessory the adoption path hands to a device is dressed
+ * here exactly as it is in the field - which is what lets an arm follow an adoption all the way to a constructed device rather than stopping at the registration.
+ */
+class TestAccessory {
+
+  public UUID: string;
+  public context: Record<string, unknown>;
+  public displayName: string;
+  public services: Service[];
+  // Homebridge's own view of the accessory, which the name synchronization writes through.
+  public _associatedHAPAccessory: { displayName: string };
+
+  constructor(displayName: string, uuid: string) {
+
+    this.UUID = uuid;
+    this._associatedHAPAccessory = { displayName };
+    this.context = {};
+    this.displayName = displayName;
+    this.services = [];
+  }
+
+  public addService(service: Service): Service {
+
+    this.services.push(service);
+
+    return service;
+  }
+
+  public getService(target: { UUID: string }): Service | undefined {
+
+    return this.services.find(service => (service.UUID === target.UUID) && !service.subtype);
+  }
+
+  public getServiceById(target: { UUID: string }, subtype: string): Service | undefined {
+
+    return this.services.find(service => (service.UUID === target.UUID) && (service.subtype === subtype));
+  }
+
+  public removeService(service: Service): void {
+
+    this.services.splice(this.services.indexOf(service), 1);
+  }
+}
+
+/* One device handle the client answers for a record's identity, in the shape the adoption path consumes: the projection every device reads its own record through,
+ * and the door members lock-capable hardware is given. Nothing here commands anything, because what an arm reaching for a handle is about is the adoption running to
+ * a constructed device rather than what that device does afterwards - the hub suite owns the command surface.
+ */
+function deviceHandle(record: Record<string, unknown>): unknown {
+
+  return {
+
+    config: record,
+    doorId: "",
+    doorState: undefined,
+    observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ },
+    peek: (): undefined => undefined
+  };
+}
+
+/* The client double a controller is stood up over: the members the controller reads on a connected client, and the ones its login path touches - the event
+ * bridge's subscription, the controller's name, the published API where an arm supplies one, and the disposal a disabled controller performs. What varies
+ * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the orphan sweep
+ * over the caller's own store.
+ */
+function clientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; handles?: Map<string, unknown>; official?: OfficialApi | null;
+  onDispose?: () => void; store: ReturnType<typeof createStateStore>; }): AccessClient {
+
+  return {
+
+    accessPoint: (): undefined => undefined,
+    // A connection that reads healthy and yields nothing unless an arm supplies one it drives, which is what keeps every other arm's observer inert.
+    connection: options.connection ?? { isHealthy: true, observe: async function *(): AsyncGenerator { /* nothing transitions in these arms */ } },
+    controllerInfo: options.controllerInfo,
+    controllerName: "Test Controller",
+    device: (): undefined => undefined,
+    /* The handles an arm named, by the record identity each one answers for. An arm naming none answers no handle at all, which is what keeps every other arm's
+     * adoption stopping short of a constructed device - the state they are about is the accessory list rather than what hangs off it.
+     */
+    hub: (id: string): unknown => options.handles?.get(id),
+    official: options.official ?? null,
+    on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }),
+    state: options.store,
+    [Symbol.asyncDispose]: async (): Promise<void> => options.onDispose?.()
+  } as unknown as AccessClient;
+}
+
+// What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, the lines it said, and the
+// plugin lifetime its own terminal signal composes from.
+interface ControllerHarness {
+
+  accessories: AccessAccessory[];
+  controller: AccessController;
+  logged: string[];
+  registered: string[];
+  shutdown: AbortController;
+  unregistered: string[];
+}
+
+/* Stand up a real AccessController over a platform double and a stubbed client, so an arm reads what the controller actually did to HomeKit rather than what a
+ * mock decided it would do. The accessory list, the registration counters, and the state store all belong to the caller.
+ *
+ * @param options - The controller's configuration, the controller document its client answers with, and the state store behind that client.
+ */
+function makeController(options: { config?: Partial<AccessControllerOptions>; connection?: unknown;
+  controllerInfo?: { host: { device_type?: string; mac: string; shortname?: string } } | null; handles?: Map<string, unknown>; options?: string[];
+  store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
+
+  const accessories: AccessAccessory[] = [];
+  // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
+  const logged: string[] = [];
+  const registered: string[] = [];
+  const unregistered: string[] = [];
+  // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from.
+  const shutdown = new AbortController();
+
+  const api = {
+
+    hap: { Characteristic, Service, uuid: { generate: (input: string): string => "uuid-" + input } },
+    on: (): void => undefined,
+    platformAccessory: TestAccessory,
+    registerPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+
+      for(const target of targets) {
+
+        registered.push(target.UUID);
+      }
+    },
+    unregisterPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+
+      for(const target of targets) {
+
+        unregistered.push(target.UUID);
+      }
+    },
+    updatePlatformAccessories: (): void => undefined
+  };
+
+  const platform = {
+
+    accessories,
+    api,
+    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
+    log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
+      warn: (): void => undefined },
+    signal: shutdown.signal,
+
+    // The platform's one exit an accessory leaves HomeKit through, standing in for the real one so a retirement reaches the same api calls and the same list.
+    unregisterAccessory: (accessory: AccessAccessory): void => {
+
+      const index = accessories.indexOf(accessory);
+
+      if(index < 0) {
+
+        return;
+      }
+
+      api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      accessories.splice(index, 1);
+      api.updatePlatformAccessories();
+    }
+  };
+
+  // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
+  const client = clientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
+    store: options.store ?? createStateStore({}) });
+  /* The token in the default identity is what makes every arm's teardown real rather than decorative: a controller the identity gate turns back never registers
+   * its bridge from the plugin's lifetime to its own, so aborting the plugin would leave that controller's terminal signal standing and prove nothing about what
+   * the abort reaches. An arm that is about some other identity states one, and its own configuration wins.
+   */
+  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4", tokens: { access: "t" }, ...options.config },
+    async (): Promise<AccessClient> => client);
+
+  controller.client = client;
+
+  return { accessories, controller, logged, registered, shutdown, unregistered };
+}
+
+/* The connection monitor a controller observes, with the transitions an arm hands it. The generator ends on the caller's own abort, which is the lifetime the real
+ * monitor's iterator has, so a controller torn down mid-arm stops walking exactly as it does in the field.
+ */
+function connectionDouble(): { connection: unknown; drive: (from: string, to: string) => Promise<void> } {
+
+  const bus = new EventEmitter();
+
+  return {
+
+    connection: {
+
+      isHealthy: true,
+      observe: async function *(opts: { signal: AbortSignal }): AsyncGenerator<{ from: string; to: string }> {
+
+        try {
+
+          for await (const [transition] of on(bus, "transition", { signal: opts.signal })) {
+
+            yield transition as { from: string; to: string };
+          }
+        } catch {
+
+          // The caller's own abort is what ends this iteration, exactly as it ends the real monitor's, so it is the expected exit rather than news.
+        }
+      }
+    },
+
+    // Hand the loop one transition and let it finish walking, which is the point an arm reads what the walk did.
+    drive: async (from: string, to: string): Promise<void> => {
+
+      bus.emit("transition", { from, to });
+
+      await settle();
+    }
+  };
+}
+
+/* A configured device as the connection observer sees it: the two calls its walks make, recorded in the order they arrive, and the log a fault is reported through. A
+ * device an arm names as faulting throws from both, which is what lets each walk's isolation be read separately rather than as one combined verdict.
+ */
+function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; device: AccessDevice; errors: string[] } {
+
+  const calls: string[] = [];
+  const errors: string[] = [];
+
+  const device = {
+
+    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)) },
+    onConnectionRestored: (): void => {
+
+      calls.push("restore");
+
+      if(options.faults) {
+
+        throw new Error("this device is not answering");
+      }
+    },
+    refreshReachability: (): void => {
+
+      calls.push("refresh");
+
+      if(options.faults) {
+
+        throw new Error("this device is not answering");
+      }
+    }
+  };
+
+  return { calls, device: device as unknown as AccessDevice, errors };
+}
+
+test("the connection observer pushes reachability on every transition and restores only where a recovery completed", async (t) => {
+
+  const monitor = connectionDouble();
+  const harness = makeController({ connection: monitor.connection, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const stub = stubDevice();
+
+  harness.controller.configuredDevices.set("stub", stub.device);
+
+  // A recovery concluding at healthy: availability is pushed, and the hook fires because the edge left the reconnecting state for something other than lost.
+  await monitor.drive("reconnecting", "healthy");
+
+  assert.deepEqual(stub.calls, [ "refresh", "restore" ]);
+
+  // A recovery concluding while the transport's breaker happens to be open exits to throttled instead, and is every bit as completed as the one above.
+  await monitor.drive("reconnecting", "throttled");
+
+  assert.deepEqual(stub.calls.slice(2), [ "refresh", "restore" ]);
+
+  // An ordinary fault edge: availability moves, but nothing recovered, so there is nothing to refresh behind it.
+  await monitor.drive("healthy", "degraded");
+
+  assert.deepEqual(stub.calls.slice(4), ["refresh"]);
+
+  // A plain throttle cycle arrives at healthy having done no stream work and missed no packets, which is what rules the arrival state out as the trigger on its own.
+  await monitor.drive("throttled", "healthy");
+
+  assert.deepEqual(stub.calls.slice(5), ["refresh"]);
+});
+
+test("one device's fault on either of the observer's walks costs its siblings nothing", async (t) => {
+
+  const monitor = connectionDouble();
+  const harness = makeController({ connection: monitor.connection, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const faulting = stubDevice({ faults: true });
+  const sibling = stubDevice();
+
+  harness.controller.configuredDevices.set("faulting", faulting.device);
+  harness.controller.configuredDevices.set("sibling", sibling.device);
+
+  // One edge drives both walks, and the faulting device is first in the map on each of them.
+  await monitor.drive("reconnecting", "healthy");
+
+  assert.deepEqual(faulting.calls, [ "refresh", "restore" ], "the faulting device is asked on both walks");
+  assert.deepEqual(sibling.calls, [ "refresh", "restore" ], "and the device behind it receives both, so each walk's isolation holds on its own");
+  assert.equal(faulting.errors.length, 2, "each fault is reported through the device's own log rather than unwinding the loop");
+});
+
+test("the connection observer's lifetime is the controller's own terminal signal", async () => {
+
+  const monitor = connectionDouble();
+  const harness = makeController({ connection: monitor.connection, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  await harness.controller.login();
+
+  const stub = stubDevice();
+
+  harness.controller.configuredDevices.set("stub", stub.device);
+
+  await monitor.drive("reconnecting", "healthy");
+
+  assert.deepEqual(stub.calls, [ "refresh", "restore" ]);
+
+  harness.shutdown.abort();
+
+  await monitor.drive("reconnecting", "healthy");
+
+  assert.deepEqual(stub.calls, [ "refresh", "restore" ], "a transition driven after the plugin's lifetime ended walks nothing");
+});
+
+test("a queued removal fires after its delay only while the accessory is still gone", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const removed: string[] = [];
+  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+
+  queue.queue(accessory("gone"), 60000);
+
+  assert.equal(queue.isQueued("gone"), true);
+
+  mock.timers.tick(59999);
+
+  assert.equal(removed.length, 0, "the removal must wait out its whole delay");
+
+  mock.timers.tick(1);
+
+  assert.deepEqual(removed, ["gone"]);
+  assert.equal(queue.isQueued("gone"), false, "a fired entry must leave the queue");
+
+  mock.timers.reset();
+});
+
+test("a device that returns during its delay is left alone", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const removed: string[] = [];
+
+  // The predicate answers that the accessory came back, which is the whole point of the delay.
+  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => false });
+
+  queue.queue(accessory("returned"), 60000);
+  mock.timers.tick(60000);
+
+  assert.equal(removed.length, 0, "a reappeared device must not be removed");
+  assert.equal(queue.isQueued("returned"), false, "the entry must drop either way");
+
+  mock.timers.reset();
+});
+
+test("an already-queued accessory is not armed a second time and can be cancelled", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const removed: string[] = [];
+  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+
+  queue.queue(accessory("once"), 60000);
+
+  // The caller consults isQueued before arming, so a repeated departure leaves the armed timer owning the removal rather than adding a second.
+  assert.equal(queue.isQueued("once"), true);
+
+  queue.cancel("once");
+
+  assert.equal(queue.isQueued("once"), false);
+
+  mock.timers.tick(60000);
+
+  assert.equal(removed.length, 0, "a cancelled removal must never fire");
+
+  mock.timers.reset();
+});
+
+test("teardown clears every pending removal", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const removed: string[] = [];
+  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+
+  queue.queue(accessory("one"), 60000);
+  queue.queue(accessory("two"), 60000);
+  queue.clear();
+
+  mock.timers.tick(60000);
+
+  assert.equal(removed.length, 0, "no deferred removal may survive the controller it belonged to");
+  assert.equal(queue.isQueued("one"), false);
+  assert.equal(queue.isQueued("two"), false);
+
+  mock.timers.reset();
+});
+
+test("a device leaving controller state lands in the removal half of the membership delta", () => {
+
+  const store = createStateStore({});
+  const selector = createMembershipIdsSelector();
+  const present = { capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee01", name: "Hub", unique_id: "device1" };
+  const other = { capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee02", name: "Other", unique_id: "device2" };
+
+  store.applyRefreshDocuments({ controller: null, topology: topology([ present, other ]) });
+
+  const configured = [...selector(store.snapshot())];
+
+  assert.deepEqual(configured, [ "device1", "device2" ]);
+
+  // The device is unadopted, so the next refresh no longer carries it.
+  store.applyRefreshDocuments({ controller: null, topology: topology([other]) });
+
+  const { toAdd, toRemove } = membershipDelta(selector(store.snapshot()), configured);
+
+  assert.deepEqual(toAdd, []);
+  assert.deepEqual(toRemove, ["device1"], "a departed device must be the one queued for removal");
+});
+
+test("membership resolution keeps what it can project and reclaims what it cannot", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ config: { mqttTopic: "unifi/access", password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  /* Three cached accessories. The plain hub and the Enterprise port are both projectable, so current membership accounts for them; the record carrying no supported
+   * capability is not, so nothing accounts for its accessory and it is reclaimed. An unfiltered membership set would answer the first two identically and keep the
+   * third, which is the regression this arm exists to fail.
+   */
+  const plain = accessory("uuid-AABBCCDDEE01");
+  const port = accessory("uuid-AABBCCDDEE02-PORT1");
+  const unsupported = accessory("uuid-AABBCCDDEE03");
+
+  harness.accessories.push(plain, port, unsupported);
+
+  for(const target of [ plain, port, unsupported ]) {
+
+    harness.controller.removeHomeKitDevice(target);
+  }
+
+  // The default removal delay is sixty seconds, so nothing has been decided yet.
+  assert.equal(harness.unregistered.length, 0);
+
+  mock.timers.tick(60000);
+
+  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE03"], "only the record membership cannot account for may be reclaimed");
+  assert.ok(harness.accessories.includes(plain));
+  assert.ok(harness.accessories.includes(port));
+  assert.ok(!harness.accessories.includes(unsupported));
+
+  mock.timers.reset();
+});
+
+test("the adoption gate addresses one port of an Enterprise hub by that port's own identity", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const port = selectAccessPoints(store.snapshot()).find(candidate => candidate.unique_id === "entPort1");
+  const plain = store.snapshot().devices.get("plain");
+
+  assert.ok(port, "the expansion should synthesize the Enterprise hub's port");
+  assert.ok(plain, "the store should hold the plain hub");
+
+  /* The entry names the port by the qualified identity, which is the only spelling that reaches one port of a multi-door hub. The plain hub is the control: a
+   * gate reaching the engine with the bare hub serial would refuse both of them, and one asking about no device at all would refuse neither.
+   */
+  const refused = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE02-PORT1"], store });
+
+  assert.equal(refused.controller.addHomeKitDevice(port), false, "the entry names this port, so adoption must refuse it");
+  assert.deepEqual(refused.registered, [], "and nothing may reach HomeKit on its behalf");
+  assert.equal(refused.controller.addHomeKitDevice(plain), true, "the plain hub is named by nothing, so it is adopted");
+  assert.deepEqual(refused.registered, ["uuid-AABBCCDDEE01"]);
+
+  // The supersession stated as an assertion: an entry carrying no port qualifier does not address a port, so the port is adopted in spite of it.
+  const bare = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE02"], store });
+
+  assert.equal(bare.controller.addHomeKitDevice(port), true, "an entry carrying no port qualifier does not address a port of an Enterprise hub");
+  assert.deepEqual(bare.registered, ["uuid-AABBCCDDEE02-PORT1"]);
+});
+
+test("the discovered line names each device by the identity an option entry and an MQTT topic address it with", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const port = selectAccessPoints(store.snapshot()).find(candidate => candidate.unique_id === "entPort1");
+  const plain = store.snapshot().devices.get("plain");
+
+  assert.ok(port);
+  assert.ok(plain);
+
+  // A port's line carries its qualifier, which is the point of the clause: the bare MAC address addresses neither port of a multi-door hub.
+  assert.ok(harness.controller.getDeviceName(port, "Front Door", true).includes("id: AABBCCDDEE02-PORT1"), "a port's line must name the port");
+  assert.ok(harness.controller.getDeviceName(plain, "Plain Hub", true).includes("id: AABBCCDDEE01"), "a plain hub's line must name the hub");
+
+  const unaddressed = createStateStore({});
+
+  // The official API names some devices by an identifier that is not address-shaped, so the record carries no hardware identity to render.
+  unaddressed.applyRefreshDocuments({ controller: null, topology: topology([
+    { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, name: "Unaddressed Hub", unique_id: "device1" }
+  ]) });
+
+  const bare = unaddressed.snapshot().devices.get("device1");
+
+  assert.ok(bare);
+
+  const line = harness.controller.getDeviceName(bare, "Unaddressed Hub", true);
+
+  // No fact, no clause: the line renders no label over an absent value, and composing one cannot throw on the startup path this runs on.
+  assert.ok(!line.includes("id:"), "a record with no hardware identity must render no identity clause");
+  assert.ok(line.includes("Unaddressed Hub"));
+});
+
+test("an abort during the connect retry rejects with the signal's own reason", async () => {
+
+  const aborter = new AbortController();
+  const reason = new Error("Shutting down.");
+
+  aborter.abort(reason);
+
+  // This is the boundary the controller's own catch reads to tell an orderly teardown apart from a genuine connect failure.
+  await assert.rejects(async () => retry(async () => "connected", { attempts: Infinity, signal: aborter.signal }), (error: unknown) => error === reason);
+});
+
+test("a connected controller qualifies its name with the host hardware's type, and every line it prefixes carries it", async (t) => {
+
+  const store = createStateStore({});
+  const record = plainHubRecord();
+
+  store.applyRefreshDocuments({ controller: null, topology: topology([record]) });
+
+  /* The controller document here answers with a hardware type and a short name at once, which is what states the resolution order out loud: the hardware type is
+   * what a user sees, and the short name is the fallback for a host that reports no type at all. A composition consulting them in the other order would render the
+   * short name here.
+   */
+  const harness = makeController({ controllerInfo: { host: { device_type: "UNVRAI8", mac: CONTROLLER_MAC, shortname: "UNVR G2 Pro" } },
+    handles: new Map([[ "plain", deviceHandle(record) ]]), store });
+
+  t.after(() => harness.shutdown.abort());
+
+  // Before a connect there is no controller document to read a type from, so the name is the configured form alone. This is what a controller says while it is still
+  // trying to reach its hardware.
+  assert.equal(harness.controller.name, "1.2.3.4", "a controller that has not connected names itself by its configured address");
+
+  await harness.controller.login();
+
+  assert.equal(harness.controller.name, "Test Controller [UNVRAI8]");
+
+  // The connect's own line reads through the name it just settled, so the qualification reaches the log rather than living only on the getter.
+  assert.ok(harness.logged.some(line => line.startsWith("Test Controller [UNVRAI8]: Connected to 1.2.3.4 ")), "the connected line must carry the qualified name");
+
+  const adoption = harness.logged.filter(line => line.includes("Adding"));
+
+  /* The adoption line is where the two scopes meet: the prefix names the controller, the message names the device, and neither repeats the other. A message composing
+   * the controller half itself would name this controller twice in one line, which is what the second assertion reads.
+   */
+  assert.deepEqual(adoption, ["Test Controller [UNVRAI8]: Plain Hub [UA Hub]: Adding UA Hub to HomeKit."]);
+  assert.equal((adoption[0] ?? "").split("Test Controller").length - 1, 1, "the controller is named once in the line, by its prefix");
+});
+
+test("the bracket comes from the controller document alone: a host reporting only a short name falls through to it, and a client that reads no document renders none",
+  async (t) => {
+
+    const shortname = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC, shortname: "UNVR G2 Pro" } } });
+    // A client reached with an API token alone reads no controller document for the life of the process, so this is the field shape rather than a contrived one.
+    const tokenOnly = makeController({ controllerInfo: null });
+
+    t.after(() => {
+
+      shortname.shutdown.abort();
+      tokenOnly.shutdown.abort();
+    });
+
+    await shortname.controller.login();
+    await tokenOnly.controller.login();
+
+    assert.equal(shortname.controller.name, "Test Controller [UNVR G2 Pro]");
+
+    /* The guard the second half is here for: an unguarded append would compose a bracket over an absent type and put the literal "undefined" in front of every line
+     * this controller writes, for the whole class of controllers a token reaches.
+     */
+    assert.equal(tokenOnly.controller.name, "Test Controller");
+    assert.ok(!tokenOnly.controller.name.includes("undefined"), "a controller with no type to render must never say so out loud");
+    assert.ok(tokenOnly.logged.some(line => line.startsWith("Test Controller: Connected to 1.2.3.4 ")), "and its lines carry the undecorated name");
+  });
+
+test("a token-only controller keys ownership by its configured address and reclaims nothing that names another owner", () => {
+
+  const harness = makeController({ controllerInfo: null });
+
+  // The controller document a MAC address comes from is credential surface, so a client holding only a token reads none and answers by its address instead.
+  assert.equal(harness.controller.ownershipKey, "1.2.3.4");
+
+  /* An accessory carrying no owner at all, and one carrying another controller's. The first is the input a direct comparison silently claimed - this controller's
+   * own key read undefined and so did the context, so the two matched - which is why an implementation that compares them directly reclaims a stranger's
+   * accessory here rather than leaving it alone.
+   */
+  const anonymous = accessory("uuid-anonymous", {});
+  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8" });
+
+  harness.accessories.push(anonymous, stranger);
+
+  harness.controller.removeHomeKitDevice(anonymous, true);
+  harness.controller.removeHomeKitDevice(stranger, true);
+
+  assert.deepEqual(harness.unregistered, [], "an accessory this controller does not own must never be unregistered");
+  assert.deepEqual(harness.accessories, [ anonymous, stranger ], "and it must be left in the accessory list untouched");
+});
+
+test("a controller that has learned its MAC address still owns the accessories it adopted under its address", () => {
+
+  const harness = makeController({ config: { password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  assert.equal(harness.controller.ownershipKey, CONTROLLER_MAC);
+
+  // The accessory carries the key this controller answered by before it read a controller document, so it is this controller's own to act on rather than an orphan.
+  const carried = accessory("uuid-carried", { controller: "1.2.3.4" });
+
+  harness.accessories.push(carried);
+  harness.controller.removeHomeKitDevice(carried, true);
+
+  assert.deepEqual(harness.unregistered, ["uuid-carried"], "an accessory keyed by this controller's prior identity is still its own");
+});
+
+test("an accessory created under an earlier form of the device's identity is never adopted, while one under its identity is", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const plain = store.snapshot().devices.get("plain");
+
+  assert.ok(plain, "the store should hold the plain hub");
+
+  /* The accessory an earlier pairing minted, keyed by the colon-bearing spelling the controller wrote that day, beside the one this version created under the
+   * device identity. Adoption reads the identity alone: the current accessory is what the device keeps, nothing is registered, and the earlier accessory is left
+   * for the sweep - an adoption that looked the earlier spelling up would retire one of them here, and one that found nothing at all would register a third.
+   */
+  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const current = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+
+  harness.accessories.push(earlier, current);
+
+  assert.equal(harness.controller.addHomeKitDevice(plain), true);
+  assert.deepEqual(harness.registered, [], "the accessory under the device identity is adopted, so nothing is registered");
+  assert.deepEqual(harness.unregistered, [], "adoption retires nothing; the sweep owns the earlier accessory");
+  assert.deepEqual(harness.accessories, [ earlier, current ]);
+});
+
+test("membership names a device by its identity alone, so a queued removal of an accessory keyed by an earlier form fires", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+
+  harness.accessories.push(earlier);
+
+  /* The default removal delay is sixty seconds and the fire path re-asks membership before acting. Membership names a device by its identity alone, so nothing
+   * accounts for an accessory keyed by an earlier form of it - a membership set widened to earlier spellings would keep this accessory instead.
+   */
+  harness.controller.removeHomeKitDevice(earlier);
+
+  mock.timers.tick(60000);
+
+  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"], "membership accounts for a device under its identity alone");
+  assert.ok(!harness.accessories.includes(earlier));
+
+  mock.timers.reset();
+});
+
+test("a device the user disabled gives up the accessory under its identity, and an earlier one is the sweep's", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE01"], store });
+  const plain = store.snapshot().devices.get("plain");
+
+  assert.ok(plain);
+
+  // The accessory under the device identity and one created under an earlier form. The gate retires the one adoption would have kept; the earlier one is not this
+  // path's to judge, since the sweep accounts for it exactly as it does for every other accessory of this controller's.
+  const current = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+
+  harness.accessories.push(current, earlier);
+
+  assert.equal(harness.controller.addHomeKitDevice(plain), false);
+  assert.deepEqual(harness.registered, [], "a disabled device must never reach HomeKit");
+  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE01"]);
+  assert.deepEqual(harness.accessories, [earlier]);
+
+  const removals = harness.logged.filter(line => line.includes("Removing"));
+
+  assert.equal(removals.length, 1);
+  assert.ok(removals.every(line => line.endsWith("from HomeKit.")), "a disabled device's removal says nothing beyond the departure itself");
+});
+
+test("the accessory seed reads the spelling the library stores, and an update in another spelling moves nothing", () => {
+
+  const store = createStateStore({});
+
+  // The spelling a live controller writes for this hub, which the library stores in its own.
+  store.applyRefreshDocuments({ controller: null, topology: topology([
+
+    { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aa:bb:cc:dd:ee:04", name: "Probe", unique_id: "probe" }
+  ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const record = store.snapshot().devices.get("probe");
+
+  assert.ok(record);
+  assert.equal(record.mac, "AABBCCDDEE04", "the library stores every MAC address it holds in one spelling");
+  assert.equal(harness.controller.addHomeKitDevice(record), true);
+  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE04"], "so a new accessory is minted from the stored spelling rather than from the wire's");
+
+  /* The older notification dialect reaches the merge untranslated, which is where a re-spelling would otherwise land on the stored record. A same-identity update
+   * in another spelling leaves the record's own reference in place, and that is what keeps the seed stable for the life of the process.
+   */
+  const before = store.snapshot().devices.get("probe");
+  const packet = { data: { mac: "AA:BB:CC:DD:EE:04", name: "Probe" }, event: "access.data.device.update", event_object_id: "probe", receiver_id: "",
+    save_to_history: false } as unknown as AccessEventPacket;
+  const event = AccessClient.classifyPacket(packet);
+
+  assert.ok(event, "the captured shape must classify as something the library models");
+  store.dispatch(event);
+
+  assert.equal(store.snapshot().devices.get("probe")?.mac, "AABBCCDDEE04");
+  assert.equal(store.snapshot().devices.get("probe"), before, "a same-identity update in another spelling leaves the record untouched");
+});
+
+test("an accessory naming hardware this controller projects is its own to remove, and one naming nothing here is not", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  /* Both contexts name another controller, so a gate reading the key alone would leave both in place forever. The first names the plain hub's hardware in the
+   * spelling that other controller wrote, which is a claim on this controller's own device that no context key can contradict, under a UUID no seed of that
+   * device produces, so only a claim that reads the address can recognize it; the second names hardware nothing here projects, and is a stranger's to keep.
+   */
+  const claimed = accessory("uuid-stale-01", { controller: "5.6.7.8", mac: "AA:BB:CC:DD:EE:01" });
+  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+
+  harness.accessories.push(claimed, stranger);
+  harness.controller.removeHomeKitDevice(claimed, true);
+  harness.controller.removeHomeKitDevice(stranger, true);
+
+  assert.deepEqual(harness.unregistered, ["uuid-stale-01"]);
+  assert.deepEqual(harness.accessories, [stranger], "an accessory naming hardware this controller does not project is never its business");
+
+  const removals = harness.logged.filter(line => line.includes("Removing"));
+
+  assert.equal(removals.length, 1);
+  assert.ok(removals.every(line => line.endsWith("from HomeKit.")), "a departure says nothing beyond itself");
+});
+
+test("a device adopted to a constructed accessory is spared by the sweep and stamped with the identity it was adopted under", async (t) => {
+
+  const store = createStateStore({});
+  const record = plainHubRecord();
+
+  store.applyRefreshDocuments({ controller: null, topology: topology([record]) });
+
+  /* The client answers a handle for this record, which is what carries the adoption past the projection lookup and on into a constructed device. Every other arm
+   * leaves that handle unanswered, so this is the one place the seed reaches the accessory's own configuration.
+   *
+   * The removal delay is turned off deliberately: a sweep that decided to remove this accessory would otherwise only ARM a timer, and an arm reading the accessory
+   * list straight afterwards would find it still there and call that sparing. With no delay, the sweep's verdict is the list.
+   */
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([[ "plain", deviceHandle(record) ]]),
+    options: ["Disable.Controller.DelayDeviceRemoval"], store });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const configured = harness.controller.configuredDevices.get("uuid-AABBCCDDEE01");
+
+  assert.ok(configured, "the adoption runs to a configured device rather than stopping at the accessory it registered");
+  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE01"], "and the accessory behind that device is the one HomeKit was told about");
+
+  /* The sweep runs in the same unbroken pass, immediately behind the seed that configured this device, and leaves it where it is. A device configured in this very
+   * pass is the case the sweep's own first test is there for.
+   */
+  assert.deepEqual(harness.unregistered, [], "an accessory the seed just configured is not an orphan");
+  assert.deepEqual(harness.accessories.map(accessory => accessory.UUID), ["uuid-AABBCCDDEE01"], "and it stays in HomeKit");
+
+  /* What the accessory carries for the life of the pairing, written by the adoption itself rather than by anything a test arranged: the key this controller answers
+   * by, the identity the accessory was minted under, and the hardware it names. The startup sweep and the platform's reclaim each read one of the three, so an
+   * adoption seeding none of them would strand this accessory at the next start.
+   *
+   * The hardware address is the spelling the library STORES rather than the one the fixture wrote, because the admission record comes from the reduced state and the
+   * reduction normalizes it on the way in - which is what makes the accessories the sweep arms below hand-write spell it the same way.
+   */
+  assert.deepEqual(configured.accessory.context, { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+});
+
+test("the first start after an identity change retires every accessory created under the earlier form, and only those", async (t) => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  t.after(() => {
+
+    harness.shutdown.abort();
+    mock.timers.reset();
+  });
+
+  /* The cache a mixed install restores. Created by an earlier version, recording no identity: the plain hub's accessory under this controller's key, a twin of it
+   * stamped by the controller this one replaced under a UUID no seed produces, an Enterprise port's, one naming a managed record this plugin cannot project, and
+   * one whose hardware has left. Created by this version, recording its identity: the port's current accessory, which shares the earlier one's MAC address, and
+   * one whose hardware has left. And two strangers: one naming nothing here, and one naming that same unprojectable record, which no claim of this controller's
+   * may reach. The sweep must part them three ways - retired at once, delayed as a departure, and left
+   * alone - reading the identity record rather than whether the hardware happens to be present.
+   */
+  const staleOurs = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const staleStranded = accessory("uuid-stranded-01", { controller: "68:d7:9a:60:f6:f8", mac: "AA:BB:CC:DD:EE:01" });
+  const stalePort = accessory("uuid-aa:bb:cc:dd:ee:02-PORT1", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:02" });
+  const currentPort = accessory("uuid-AABBCCDDEE02-PORT1", { controller: CONTROLLER_MAC, id: "AABBCCDDEE02-PORT1", mac: "AABBCCDDEE02" });
+  const unprojected1x = accessory("uuid-aa:bb:cc:dd:ee:03", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:03" });
+  const unprojectedForeign = accessory("uuid-stale-03", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:03" });
+  const departed1x = accessory("uuid-aa:bb:cc:dd:ee:99", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:99" });
+  const departedCurrent = accessory("uuid-AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+
+  harness.accessories.push(staleOurs, staleStranded, stalePort, currentPort, unprojected1x, unprojectedForeign, departed1x, departedCurrent, stranger);
+
+  await harness.controller.login();
+
+  /* The seed adds the plain hub under its identity and adopts the port's current accessory, and the sweep that follows it retires the five accessories that record
+   * no identity at once, saying why. The seed and the sweep run inside login() itself, so nothing here waits on a timer.
+   */
+  const reason = "It carries no record of the device identity this version keys accessories by.";
+
+  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE01"]);
+  assert.deepEqual(harness.unregistered, [ "uuid-aa:bb:cc:dd:ee:01", "uuid-stranded-01", "uuid-aa:bb:cc:dd:ee:02-PORT1", "uuid-aa:bb:cc:dd:ee:03",
+    "uuid-aa:bb:cc:dd:ee:99" ], "an accessory recording no identity was created under an earlier form and goes at once, its hardware present or not");
+
+  const immediate = harness.logged.filter(line => line.includes("Removing"));
+
+  assert.equal(immediate.length, 5);
+  assert.ok(immediate.every(line => line.endsWith(reason)));
+  const delayed = harness.logged.filter(line => line.includes("Delaying device removal"));
+
+  assert.equal(delayed.length, 1, "the one accessory recording an identity nothing projects is a departure");
+
+  // The departure honors the delay and the queue's own membership read, and its removal line carries no reason; the port's current accessory and both
+  // strangers are untouched - the one naming the unprojectable record above all, since a claim walked over unfiltered membership would have taken it.
+  mock.timers.tick(60000);
+
+  assert.deepEqual(harness.unregistered.slice(5), ["uuid-AABBCCDDEE98"]);
+  assert.ok(harness.logged.filter(line => line.includes("Removing")).slice(5).every(line => line.endsWith("from HomeKit.")));
+  assert.deepEqual(harness.accessories.filter(x => x.UUID !== "uuid-AABBCCDDEE01"), [ currentPort, unprojectedForeign, stranger ]);
+});
+
+test("a disabled device's earlier accessory is retired at the first start with its reason, though nothing is added in its place", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE01"], store });
+
+  t.after(() => harness.shutdown.abort());
+
+  // The plain hub is disabled, so the seed adds nothing under its identity, and the sweep still retires the accessory created under the earlier form - the
+  // decision reads the identity record, never whether a replacement exists.
+  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+
+  harness.accessories.push(earlier);
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE02-PORT1"], "the port is added; the disabled hub is not");
+  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"]);
+
+  const removals = harness.logged.filter(line => line.includes("Removing"));
+
+  assert.equal(removals.length, 1);
+  assert.ok(removals.every(line => line.endsWith("It carries no record of the device identity this version keys accessories by.")));
+});
+
+test("a controller the user disabled takes every accessory it can claim out of HomeKit at once, by key or by identity", async (t) => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  // The controller's own scope disables it, which is the gate that runs after connect rather than the global one before it.
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device." + serialForm(CONTROLLER_MAC)], store });
+
+  t.after(() => {
+
+    harness.shutdown.abort();
+    mock.timers.reset();
+  });
+
+  /* One accessory this version created under this controller's key, one an earlier version created that another controller stamped but that names the
+   * Enterprise hub's hardware - which its port shares, so the claim lands at the hardware grain where a serial set built from port-qualified identities would
+   * miss it - and a stranger naming nothing here. The disabled pass retires what the predicate claims, directly and without a delay.
+   */
+  const ours = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const foreign1x = accessory("uuid-stranded-02", { controller: "68:d7:9a:60:f6:f8", mac: "aa:bb:cc:dd:ee:02" });
+  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+
+  harness.accessories.push(ours, foreign1x, stranger);
+
+  await harness.controller.login();
+
+  assert.ok(harness.logged.some(line => line.includes("Disabling this UniFi Access controller in HomeKit.")));
+  assert.deepEqual(harness.registered, [], "a disabled controller adds nothing");
+  assert.deepEqual(harness.unregistered, [ "uuid-AABBCCDDEE01", "uuid-stranded-02" ]);
+  assert.deepEqual(harness.accessories, [stranger]);
+  assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 0, "the disabled pass never queues");
+});
+
+test("login reports the identity outcome its exit took", async (t) => {
+
+  const running = createStateStore({});
+
+  running.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const reporting = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store: running });
+
+  t.after(() => reporting.shutdown.abort());
+
+  assert.equal(await reporting.controller.login(), "reporting", "a controller that connected and serves its membership says so");
+
+  /* The global gate turns a login back before it ever connects, and the harness's own port cannot witness a connect that never happened - so this arm stands its
+   * controller up over a port that counts what it was asked for. The double carries only what the constructor and this exit read.
+   */
+  const shutdown = new AbortController();
+
+  let connects = 0;
+
+  const gatedPlatform = {
+
+    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, ["Disable.Device"]),
+    log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
+    signal: shutdown.signal
+  };
+
+  const gated = new AccessController(gatedPlatform as unknown as AccessPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
+
+    connects++;
+
+    return clientDouble({ controllerInfo: null, store: createStateStore({}) });
+  });
+
+  t.after(() => shutdown.abort());
+
+  assert.equal(await gated.login(), "unavailable", "a login the global gate turns back never learned an identity");
+  assert.equal(connects, 0, "and it never reached the controller to ask for one");
+
+  // The controller's own scope disables it after the connect, so it knows exactly who it is even though it will serve nothing.
+  const turnedOff = createStateStore({});
+
+  turnedOff.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const disabled = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device." + serialForm(CONTROLLER_MAC)],
+    store: turnedOff });
+
+  t.after(() => disabled.shutdown.abort());
+
+  disabled.accessories.push(accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" }));
+
+  assert.equal(await disabled.controller.login(), "disabled", "a controller the user turned off in HomeKit connected first, so its identity is settled");
+  assert.deepEqual(disabled.unregistered, ["uuid-AABBCCDDEE01"], "and it still takes the accessories it answered for with it");
+});
+
+test("a login whose connect exhausts its authentication budget reports no identity", async (t) => {
+
+  const shutdown = new AbortController();
+
+  let attempts = 0;
+
+  const platform = { featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, []),
+    log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal };
+
+  /* Credentials the controller refuses on every attempt. Auth faults get a small consecutive budget so a controller still sorting out its own auth state
+   * recovers, and this spends the whole of it...the wait between attempts runs on the promise-based timers, which the runner's mock timers do not patch, so this
+   * arm serves those waits in real time rather than pretending to.
+   */
+  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    throw new AccessAuthError("Bad credentials.");
+  });
+
+  t.after(() => shutdown.abort());
+
+  assert.equal(await controller.login(), "unavailable", "a connect that never succeeded leaves this controller's identity unknown");
+  assert.equal(attempts, ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, "and the budget is what stopped it, rather than a retry without end");
+});
+
+test("an accessory under the device identity that records none is adopted rather than retired, because membership is read before the record", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: topology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  t.after(() => harness.shutdown.abort());
+
+  /* The accessory under the plain hub's own identity, carrying no identity record - the shape an older version's run leaves behind when it wipes the context of
+   * an accessory this version created. The seed adopts it by its UUID, so nothing is registered for the hub, and the sweep must leave it alone because
+   * membership accounts for it whatever its record says: a sweep that read the record first would retire the identity's own accessory.
+   */
+  const wiped = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" });
+
+  harness.accessories.push(wiped);
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE02-PORT1"], "the hub's accessory is adopted, so only the port is added");
+  assert.deepEqual(harness.unregistered, [], "an accessory membership accounts for is never the sweep's to retire");
+  assert.ok(harness.accessories.includes(wiped));
+});
+
+test("an orphan is named from the controller's own record whichever spelling its context carries", () => {
+
+  const store = createStateStore({});
+
+  /* The record carrying no hardware identity is listed first deliberately: the walk returns on its first match, so a mac-less record placed after the matching one
+   * is never visited and a fold reading its absent address would go unexercised.
+   */
+  store.applyRefreshDocuments({ controller: null, topology: topology([
+
+    { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, name: "Unaddressed Hub", unique_id: "device0" }, ...enterpriseDevices()
+  ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  // A cached accessory whose context carries the colon-bearing spelling the controller wrote when it was created, which is what the naming fold has to resolve.
+  const stale = { UUID: "uuid-aa:bb:cc:dd:ee:01", context: { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" },
+    displayName: "Stale Twin" } as unknown as AccessAccessory;
+
+  harness.accessories.push(stale);
+  harness.controller.removeHomeKitDevice(stale, true);
+
+  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"]);
+
+  const removals = harness.logged.filter(line => line.includes("Removing"));
+
+  assert.equal(removals.length, 1);
+  assert.ok(removals.every(line => line.includes("Plain Hub")), "the controller's own record is what names an accessory it never configured");
+  assert.ok(!removals.some(line => line.includes("Stale Twin")));
+});
+
+test("a record whose hardware identity never arrived is admitted to nothing", () => {
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+
+  const store = createStateStore({});
+
+  // The official API names a device by an identifier that is not always address-shaped, and the projection leaves the hardware identity absent when it is not.
+  store.applyRefreshDocuments({ controller: null, topology: topology([
+
+    { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, name: "Unaddressed Hub", unique_id: "device1" }
+  ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const record = store.snapshot().devices.get("device1");
+
+  assert.ok(record, "the store should hold the record the topology carried");
+  assert.equal(record.mac, undefined, "and it should hold it with no hardware identity, which is what this arm is about");
+
+  // Adoption refuses it outright: there is no identity to derive an accessory from, so nothing is registered and nothing is tracked.
+  assert.equal(harness.controller.addHomeKitDevice(record), false);
+  assert.deepEqual(harness.registered, [], "a record with no hardware identity must never reach HomeKit");
+  assert.equal(harness.controller.configuredDevices.size, 0);
+
+  /* Membership never names it either, so nothing can account for an accessory derived from it and the sweep reclaims one. An implementation that composed an
+   * identity anyway would derive this accessory's own UUID for the record, claim it, and keep it.
+   */
+  const orphan = accessory("uuid-undefined");
+
+  harness.accessories.push(orphan);
+  harness.controller.removeHomeKitDevice(orphan);
+
+  mock.timers.tick(60000);
+
+  assert.deepEqual(harness.unregistered, ["uuid-undefined"], "a record with no hardware identity can account for no accessory");
+
+  mock.timers.reset();
+});
+
+test("the plugin's shutdown reaches a controller through the one signal every controller composes from", async () => {
+
+  const disposals: string[] = [];
+  const harness = makeController({ config: { password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  harness.controller.client = {
+
+    controllerInfo: { host: { mac: CONTROLLER_MAC } },
+    official: null,
+    state: createStateStore({}),
+    [Symbol.asyncDispose]: async (): Promise<void> => void disposals.push("client")
+  } as unknown as AccessClient;
+
+  assert.equal(harness.controller.signal.aborted, false);
+  assert.equal(harness.controller.logApiErrors, true);
+
+  // The plugin's lifetime ends. The controller registered nothing on the Homebridge API of its own, so this is the only thing that can reach it.
+  harness.shutdown.abort();
+
+  /* Three effects follow from that one abort: this controller's own terminal signal fires, the phase moved to its terminal state - which the public error-logging
+   * projection is what reports - and the client was disposed. A wiring that aborted the signal without transitioning or disconnecting satisfies only the first.
+   */
+  assert.equal(harness.controller.signal.aborted, true);
+  assert.equal(harness.controller.logApiErrors, false);
+
+  // The teardown is dispatched rather than awaited, so it settles on the next turn.
+  await delay(0);
+
+  assert.deepEqual(disposals, ["client"], "the client must be disposed, and exactly once");
+});
+
+/* The webhook harness: a real AccessController driven through a real login(), over a client the connect port answers with.
+ *
+ * Everything the controller reaches outside itself is a double that records what it was asked for, in order, into one list - so an arm reads the sequence of acts
+ * rather than a set of independent spies that cannot say what happened before what.
+ */
+interface WebhookOptions {
+
+  closed?: boolean;
+  // Every controller the plugin is configured for, which is what the orphan sweep reads to decide which paths are claimed. The controller under test is the
+  // default, so an arm names this only to put a sibling entry beside it.
+  controllers?: { address: string }[];
+  duplicatePath?: boolean;
+  enabled?: boolean;
+  endpoints?: AccessOfficialWebhookEndpoint[];
+  failures?: Record<string, Error>;
+  hostResolution?: () => Promise<string>;
+  official?: boolean;
+  onCreate?: () => void;
+  options?: string[];
+}
+
+interface WebhookHarness {
+
+  calls: string[];
+  controller: AccessController;
+  deliveries: unknown[];
+  lines: string[];
+  listenerRequests: number;
+  routes: Map<string, AccessWebhookRoute>;
+  run: () => Promise<void>;
+  shutdown: AbortController;
+}
+
+// The registration this controller composes for itself, which several arms compare against.
+const WEBHOOK_PATH = "/unifi-access/1.2.3.4";
+const WEBHOOK_URL = "http://10.0.0.7:10120" + WEBHOOK_PATH;
+const WEBHOOK_NAME = "Homebridge UniFi Access (1.2.3.4)";
+
+// One registration as the controller lists it back.
+function endpointRecord(overrides: { endpoint?: string; id: string; name?: string; secret?: string }): AccessOfficialWebhookEndpoint {
+
+  return { endpoint: overrides.endpoint ?? WEBHOOK_URL, events: ACCESS_WEBHOOK_EVENT_LIST, id: overrides.id, name: overrides.name ?? WEBHOOK_NAME,
+    secret: overrides.secret ?? "secret-" + overrides.id };
+}
+
+// Sign a body exactly as the controller does, so a delivery arm can present a genuine one.
+function sign(secret: string, timestampSeconds: number, body: string): string {
+
+  return "t=" + timestampSeconds.toString() + ",v1=" + createHmac("sha256", secret).update(timestampSeconds.toString()).update(".").update(body).digest("hex");
+}
+
+// Let the dispatched webhook configuration run to completion. It is fire-and-forget by design, so an arm waits on the event loop rather than on a promise it has
+// no way to reach.
+async function settle(turns = 25): Promise<void> {
+
+  if(turns <= 0) {
+
+    return;
+  }
+
+  await delay(0);
+
+  return settle(turns - 1);
+}
+
+function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
+
+  const calls: string[] = [];
+  const deliveries: unknown[] = [];
+  const lines: string[] = [];
+  const routes = new Map<string, AccessWebhookRoute>();
+  const shutdown = new AbortController();
+  /* The registrations this controller currently holds. The double keeps them the way the controller would, because an arm that creates one and then tears down
+   * has to find it listed back or the teardown it is testing has nothing to retire.
+   */
+  const endpoints = options.endpoints ?? [];
+  const failures = new Map(Object.entries(options.failures ?? {}));
+  let listenerRequests = 0;
+
+  // Refuse a call the arm asked to fail, after recording that it was made - a refusal is still an act the sequence should show.
+  const refuse = (name: string): void => {
+
+    const failure = failures.get(name);
+
+    if(failure) {
+
+      throw failure;
+    }
+  };
+
+  const official = {
+
+    webhooks: {
+
+      createEndpoint: async (write: AccessOfficialWebhookEndpointWrite): Promise<AccessOfficialWebhookEndpoint> => {
+
+        calls.push("create");
+        refuse("create");
+        options.onCreate?.();
+
+        const minted = { ...write, id: "minted", secret: "minted-secret" };
+
+        endpoints.push(minted);
+
+        return minted;
+      },
+      deleteEndpoint: async (id: string): Promise<void> => {
+
+        calls.push("delete:" + id);
+        refuse("delete");
+        endpoints.splice(endpoints.findIndex(record => record.id === id), 1);
+      },
+      fetchAllEndpoints: async (): Promise<AccessOfficialWebhookEndpoint[]> => {
+
+        calls.push("fetch");
+        refuse("fetch");
+
+        return [...endpoints];
+      },
+      updateEndpoint: async (id: string, write: AccessOfficialWebhookEndpointWrite): Promise<AccessOfficialWebhookEndpoint> => {
+
+        calls.push("update:" + id);
+        refuse("update");
+
+        const rewritten = { ...write, id, secret: "updated-secret" };
+
+        endpoints.splice(endpoints.findIndex(record => record.id === id), 1, rewritten);
+
+        return rewritten;
+      }
+    }
+  } as unknown as OfficialApi;
+
+  const listener = {
+
+    get closed(): boolean {
+
+      return options.closed === true;
+    },
+    route: (path: string, handler: AccessWebhookRoute): Disposable => {
+
+      if(options.closed === true) {
+
+        throw new TypeError("The webhook listener is closed and cannot accept a route for " + path + ".");
+      }
+
+      if(options.duplicatePath === true) {
+
+        throw new TypeError("The webhook listener already routed " + path + " to another handler.");
+      }
+
+      calls.push("route:" + path);
+      routes.set(path, handler);
+
+      return { [Symbol.dispose]: (): void => void routes.delete(path) };
+    }
+  } as unknown as AccessWebhookListener;
+
+  const store = createStateStore({});
+
+  const client = clientDouble({ controllerInfo: { host: { firmware_version: "4.0.0", mac: CONTROLLER_MAC }, version: "2.0.0" },
+    official: (options.official === false) ? null : official, onDispose: (): void => void calls.push("dispose"), store });
+
+  const entries = options.options ?? [];
+
+  if(options.enabled !== false) {
+
+    entries.push("Enable.Controller.Webhooks");
+  }
+
+  const platform = {
+
+    accessories: [] as AccessAccessory[],
+    api: {
+
+      hap: { uuid: { generate: (input: string): string => "uuid-" + input } },
+      on: (): void => undefined,
+      registerPlatformAccessories: (): void => undefined,
+      unregisterPlatformAccessories: (): void => undefined,
+      updatePlatformAccessories: (): void => undefined
+    },
+    config: { controllers: options.controllers ?? [{ address: "1.2.3.4" }], options: [] },
+    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, entries),
+    localAddressFor: options.hostResolution ?? (async (): Promise<string> => "10.0.0.7"),
+    log: {
+
+      error: (message: string, ...parameters: unknown[]): void => void lines.push("error: " + format(message, ...parameters)),
+      info: (message: string, ...parameters: unknown[]): void => void lines.push("info: " + format(message, ...parameters)),
+      warn: (message: string, ...parameters: unknown[]): void => void lines.push("warn: " + format(message, ...parameters))
+    },
+    signal: shutdown.signal,
+    webhookListener: (): AccessWebhookListener => {
+
+      listenerRequests++;
+
+      return listener;
+    },
+    webhookPort: 10120
+  };
+
+  const connect: AccessControllerConnect = async (): Promise<AccessClient> => client;
+  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4", tokens: { access: "t" } }, connect);
+
+  return {
+
+    calls,
+    controller,
+    deliveries,
+    lines,
+    get listenerRequests(): number {
+
+      return listenerRequests;
+    },
+    routes,
+    run: async (): Promise<void> => {
+
+      await controller.login();
+
+      // Deliveries reach the accessories through the bridge, so listening on it is how an arm sees what the route admitted.
+      controller.events.on(ACCESS_WEBHOOK_EVENT_PREFIX + ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery: unknown) => void deliveries.push(delivery));
+
+      await settle();
+    },
+    shutdown
+  };
+}
+
+test("with webhooks off, a controller lists its endpoints once, clears its own, and binds nothing", async (t) => {
+
+  const harness = makeWebhookController({ enabled: false, endpoints: [endpointRecord({ id: "stale" })] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* Turning the option off cleans the controller rather than leaving it delivering to a port nothing listens on. The listing is the one new act a default
+   * configuration performs, and it happens after the observers rather than on the startup path.
+   */
+  assert.deepEqual(harness.calls, [ "fetch", "delete:stale" ]);
+  assert.equal(harness.listenerRequests, 0, "a plugin with webhooks off must never construct a listener");
+  assert.equal(harness.routes.size, 0);
+});
+
+test("with webhooks on but no published API to register through, a controller says so and binds nothing", async (t) => {
+
+  const harness = makeWebhookController({ official: false });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.ok(harness.lines.some(line => line.includes("Webhooks require an API token with webhook permissions for this controller.")), "the reason must be named");
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.listenerRequests, 0);
+});
+
+test("a controller with nothing registered mints a registration and routes it, in that order", async (t) => {
+
+  const harness = makeWebhookController();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* The route is registered only after the endpoint is in hand, which is what closes the window in which a delivery could arrive at a route with no secret to
+   * verify it against.
+   */
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH ]);
+  assert.ok(harness.lines.some(line => line.includes("Registered for Access webhook deliveries at " + WEBHOOK_URL + ".")), "the registration must be reported");
+});
+
+test("a registration describing something else is rewritten in place rather than duplicated", async (t) => {
+
+  // The same path on a different host, which is what a moved Homebridge host leaves behind at the controller.
+  const harness = makeWebhookController({ endpoints: [endpointRecord({ endpoint: "http://10.9.9.9:10120" + WEBHOOK_PATH, id: "moved" })] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(harness.calls, [ "fetch", "update:moved", "route:" + WEBHOOK_PATH ]);
+});
+
+test("a registration that already says what we want is taken as it stands", async (t) => {
+
+  const harness = makeWebhookController({ endpoints: [endpointRecord({ id: "existing" })] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  // Nothing is minted and nothing is rewritten, which is what keeps the secret the controller already holds and makes a restart cost it nothing.
+  assert.deepEqual(harness.calls, [ "fetch", "route:" + WEBHOOK_PATH ]);
+});
+
+test("registrations that piled up at one path are cleared, and the one being reused is not", async (t) => {
+
+  const harness = makeWebhookController({ endpoints: [ endpointRecord({ id: "keep" }), endpointRecord({ endpoint: "http://10.9.9.9:10120" + WEBHOOK_PATH,
+    id: "leftover" }) ] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  // Exactly one deletion, and it names the second record. An implementation sweeping every match at the path would delete the one it is about to reuse.
+  assert.deepEqual(harness.calls, [ "fetch", "delete:leftover", "route:" + WEBHOOK_PATH ]);
+});
+
+// The registration a controller configured at 9.9.9.9 held at this install's own authority, before the user re-addressed it to the 1.2.3.4 under test.
+const ABANDONED_PATH = "/unifi-access/9.9.9.9";
+const ABANDONED_NAME = "Homebridge UniFi Access (9.9.9.9)";
+
+function abandonedRecord(): AccessOfficialWebhookEndpoint {
+
+  return endpointRecord({ endpoint: "http://10.0.0.7:10120" + ABANDONED_PATH, id: "abandoned", name: ABANDONED_NAME });
+}
+
+test("a registration this plugin holds at an address no configured controller answers for is removed once the route is live", async (t) => {
+
+  const harness = makeWebhookController({ endpoints: [abandonedRecord()] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* The sweep reads the listing this attempt already took, so reconciling still costs one read, and it runs last - after the route is live - so a refusal can
+   * never cost the user the registration this attempt just made.
+   */
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:abandoned" ]);
+  assert.ok(harness.lines.some(line => line.includes("Removed a webhook registration this plugin left at a controller address it is not configured for: " +
+    ABANDONED_NAME + ".")), "the removal must name the registration it removed");
+});
+
+test("a registration at a sibling controller's own path is left where it is", async (t) => {
+
+  const harness = makeWebhookController({ controllers: [ { address: "1.2.3.4" }, { address: "5.6.7.8" } ],
+    endpoints: [endpointRecord({ endpoint: "http://10.0.0.7:10120/unifi-access/5.6.7.8", id: "sibling", name: "Homebridge UniFi Access (5.6.7.8)" })] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  // A path another configured controller answers for is that controller's own, and a sweep that reached it would have one controller deleting its sibling's work.
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH ]);
+});
+
+test("a controller that refuses the sweep keeps the webhooks it just configured", async (t) => {
+
+  const harness = makeWebhookController({ endpoints: [abandonedRecord()],
+    failures: { delete: new AccessOfficialApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) } });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* The refusal costs the orphan and nothing else: the route is live, the registration is reported, and the deletion says why at debug alone - a controller that
+   * will not clean up after a re-addressing is not something to put an error in front of the user about.
+   */
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:abandoned" ]);
+  assert.ok(harness.routes.has(WEBHOOK_PATH), "the route must survive a sweep the controller refused");
+  assert.ok(harness.lines.some(line => line.includes("Registered for Access webhook deliveries at " + WEBHOOK_URL + ".")), "the registration must still be reported");
+  assert.ok(!harness.lines.some(line => line.startsWith("error: ") || line.startsWith("warn: ")), "a refused sweep must not raise its voice");
+});
+
+test("a controller refused its route removes the registration its own attempt created", async (t) => {
+
+  // Two controller entries configured with one address collide on the path, which is the unsupported configuration this arm stands for.
+  const harness = makeWebhookController({ duplicatePath: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(harness.calls, [ "fetch", "create", "delete:minted" ]);
+  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("already routed")), "the refusing condition must be named");
+  assert.ok(!harness.lines.some(line => line.includes("Registered for Access webhook deliveries")), "a controller that never routed must not claim it registered");
+});
+
+test("a controller that meets a closed listener reports it and holds no registration", async (t) => {
+
+  const harness = makeWebhookController({ closed: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(harness.calls, [ "fetch", "create", "delete:minted" ]);
+  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("closed")), "the refusing condition must be named");
+  assert.ok(!harness.lines.some(line => line.includes("Registered for Access webhook deliveries")));
+});
+
+test("a shutdown arriving mid-configuration removes the registration the attempt had just minted", async (t) => {
+
+  /* The plugin goes away in the window between minting a registration and routing it. Nothing would ever retire that record, so the attempt undoes its own rather
+   * than leaving the controller delivering to a plugin that is not there.
+   */
+  let interrupt: () => void = (): void => undefined;
+  const harness = makeWebhookController({ onCreate: (): void => interrupt() });
+
+  interrupt = (): void => harness.shutdown.abort();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  await settle();
+
+  assert.ok(harness.calls.includes("delete:minted"), "a registration minted into a shutdown must be undone");
+  assert.equal(harness.routes.size, 0, "and nothing may be routed against a controller that is going away");
+});
+
+test("a token that cannot manage endpoints is told what to grant, whichever way the controller refuses", async (t) => {
+
+  const refused = async (failure: Error): Promise<string[]> => {
+
+    const harness = makeWebhookController({ failures: { fetch: failure } });
+
+    t.after(() => harness.shutdown.abort());
+
+    await harness.run();
+
+    return harness.lines;
+  };
+
+  const permissions = await refused(new AccessAuthorizationError("The account lacks the privileges this operation requires on the UniFi Access controller."));
+  const envelope = await refused(new AccessOfficialApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }));
+
+  // Both refusal classes reach the same remediation, because both mean the same thing to the person who has to act on it.
+  for(const lines of [ permissions, envelope ]) {
+
+    assert.ok(lines.some(line => line.startsWith("warn: ") && line.includes("The API token cannot manage webhook endpoints") && line.includes(WEBHOOK_URL)),
+      "the remediation must name the URL to register by hand");
+  }
+});
+
+test("turning a controller off in HomeKit retires the registration the option left behind", async (t) => {
+
+  // The controller's own scope disables it, which is the gate that runs after connect rather than the global one before it.
+  const harness = makeWebhookController({ endpoints: [endpointRecord({ id: "stale" })], options: ["Disable.Device." + serialForm(CONTROLLER_MAC)] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  await settle();
+
+  // The retirement runs while the client is still alive, because deleting a registration is an official call like any other.
+  assert.deepEqual(harness.calls, [ "fetch", "delete:stale", "dispose" ]);
+});
+
+test("teardown retires the registration before the client goes away, and does nothing when none was held", async (t) => {
+
+  const holding = makeWebhookController();
+
+  t.after(() => holding.shutdown.abort());
+
+  await holding.run();
+
+  assert.deepEqual(holding.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH ]);
+
+  holding.shutdown.abort();
+  await settle();
+
+  // The delete needs the client alive, so it must precede the disposal rather than race it.
+  assert.deepEqual(holding.calls.slice(3), [ "fetch", "delete:minted", "dispose" ]);
+
+  const empty = makeWebhookController({ enabled: false });
+
+  t.after(() => empty.shutdown.abort());
+
+  await empty.run();
+  empty.shutdown.abort();
+  await settle();
+
+  // A controller holding no registration owes teardown nothing beyond disposing its client.
+  assert.deepEqual(empty.calls, [ "fetch", "dispose" ]);
+});
+
+test("the route admits a genuine delivery once and refuses everything else about it", async (t) => {
+
+  const harness = makeWebhookController();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  const route = harness.routes.get(WEBHOOK_PATH);
+
+  assert.ok(route, "the controller should have routed its own path");
+
+  const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
+    event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "delivery1" });
+  const now = Math.floor(Date.now() / 1000);
+
+  // Nothing to verify against.
+  assert.equal(route({ body: Buffer.from(body), signature: undefined }), false);
+
+  /* A well-formed header that fails the code is a secret mismatch or a forgery, and the first is worth one breadcrumb per registration. A second failure must not
+   * add a second line, or a forger could fill the log at will.
+   */
+  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now, body) }), false);
+  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now, body) }), false);
+  assert.equal(harness.lines.filter(line => line.includes("failed signature verification")).length, 1, "the breadcrumb is once per registration");
+
+  // Authentic, but dated outside the window this host will act on.
+  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", now - 3600, body) }), false);
+
+  // Authentic and fresh, but not JSON at all.
+  assert.equal(route({ body: Buffer.from("not json"), signature: sign("minted-secret", now, "not json") }), false);
+
+  const genuine = sign("minted-secret", now, body);
+
+  assert.equal(route({ body: Buffer.from(body), signature: genuine }), true);
+  assert.equal(harness.deliveries.length, 1, "an admitted delivery reaches the accessories");
+
+  // The same delivery again inside the window is a replay, and the ledger refuses it.
+  assert.equal(route({ body: Buffer.from(body), signature: genuine }), false);
+  assert.equal(harness.deliveries.length, 1);
+});
+
+test("an authentic delivery this plugin does not model is answered without being emitted", async (t) => {
+
+  const harness = makeWebhookController();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  const route = harness.routes.get(WEBHOOK_PATH);
+
+  assert.ok(route);
+
+  const body = JSON.stringify({ event: "something.the.plugin.never.modeled", event_object_id: "other1" });
+
+  /* The controller is told the delivery was taken, so it stops retrying something this plugin is simply not interested in - and nothing is emitted, because there
+   * is nothing here that could read it.
+   */
+  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", Math.floor(Date.now() / 1000), body) }), true);
+  assert.equal(harness.deliveries.length, 0);
+});
