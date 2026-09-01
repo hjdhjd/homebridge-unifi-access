@@ -1,84 +1,188 @@
+<!-- Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
+
+     index.html: homebridge-unifi-access webUI template.
+-->
 <style>
-  .hbup-blockquote {
-    background-color: #E6EEF9;
-    border-left: 5px solid #0559C9;
-    color: #536878;
-    font-size: 0.8rem;
-    font-weight: 550;
+  /* The plugin's logo, sized as a modest banner above the page rather than as its centerpiece, so the content below it leads. */
+  .hbua-logo {
+    width: 33%;
+  }
+
+  /* The login validation's result line. It holds its own height whether or not it is saying anything, so the card does not shift under the user's eye as a
+   * validation answers.
+   */
+  .hbua-result {
+    min-height: 1.25em;
+  }
+
+  /* The sidebar column is pinned to the same fixed width the framework gives #sidebar, so the control it anchors can never float with flex pressure from the
+   * options pane or with the sidebar region's visibility. It reads the framework's own width token, which is the same value #sidebar itself resolves, so the two
+   * cannot drift apart.
+   */
+  #hbuaSidebarColumn {
+    max-width: var(--fo-sidebar-width);
+    min-width: var(--fo-sidebar-width);
+    width: var(--fo-sidebar-width);
+  }
+
+  /* The sidebar column's controls render at the sidebar section headings' own type scale and rhythm, referencing the framework's design tokens so the two cannot
+   * drift apart; each fallback mirrors the token's registered default for any paint before the token sheet adopts. Each label wraps within the pinned column
+   * rather than clipping when the host theme's font metrics run wide.
+   */
+  .hbua-sidebar-control {
+    font-size: var(--fo-font-size-xs, 0.75rem);
+    line-height: 1.2;
+    padding: var(--fo-space-xs, 0.25rem) var(--fo-space-md, 0.75rem);
+    white-space: normal;
+  }
+
+  /* A connection card in a working placement - docked beneath a controller's stats, hosted by the connection-error view, or presented by Add Controller - renders
+   * its controls at the panel's own type scale and rhythm, referencing the framework's design tokens so the two cannot drift apart; each fallback mirrors the
+   * token's registered default for any paint before the token sheet adopts. First run keeps the stock control scale, where the card is the page.
+   */
+  .hbua-compact-card .btn {
+    font-size: var(--fo-font-size-xs, 0.75rem);
+    line-height: 1.2;
+    padding: var(--fo-space-xs, 0.25rem) var(--fo-space-md, 0.75rem);
+  }
+
+  /* The docked editor's disclosure hint sits between the card's small helper text and its heading - prominent enough to read as the affordance it is, without
+   * competing with the stats beside it. No framework type token lands in that interval, so the size is stated directly.
+   */
+  .hbua-compact-card summary {
+    font-size: 0.9375rem;
   }
 </style>
 <p class="text-center">
-  <img src="https://raw.githubusercontent.com/hjdhjd/homebridge-unifi-access/main/images/homebridge-unifi-access.svg" alt="homebridge-unifi-access logo" class="w-50" />
+  <img src="https://raw.githubusercontent.com/hjdhjd/homebridge-unifi-access/main/images/homebridge-unifi-access.svg" alt="homebridge-unifi-access logo" class="hbua-logo" />
 </p>
-<div id="pageFirstRun" style="display: none;">
-  <div class="mx-auto text-left" style="width: 90%;">
-    <p>Please enter the address of your UniFi Access controller (e.g. unvr.local or 10.0.0.1) and the login credentials for a <strong>local user</strong> to get started with <strong>homebridge-unifi-access</strong>.</p>
-    <table class="table table-sm table-borderless text-center">
-      <tr>
-        <td>
-          <input type="text" autocomplete="off" placeholder="Access controller hostname or IP address" size="40" id="address" />
-        </td>
-      </tr>
-      <tr>
-        <td>
-          <input type="username" autocomplete="username" placeholder="Access controller username" size="40" id="username" />
-        </td>
-      </tr>
-      <tr>
-        <td>
-          <input type="password" autocomplete="current-password" placeholder="Access controller password" size="40" id="password" />
-        </td>
-      </tr>
-      <tr>
-        <td class="m-0 p-2 text-center font-weight-bold text-danger" id="loginError">
-          &nbsp;
-        </td>
-      </tr>
-    </table>
-    <blockquote class="blockquote hbup-blockquote mb-0 mt-0 pb-0 pt-0">
-      Things to keep in mind regarding UniFi Access:
-      <ul dir="auto">
-        <li style="font-weight: bold;">A local user account is required to use this plugin. Ubiquiti.com/UI.com accounts are not supported. You can create an account by accessing the <i>Admins & Users</i> tab in the UniFi console webUI.</li>
-      </ul>
-    </blockquote>
+<!-- The eye glyph the credential reveal wears, drawn once at page level and referenced by every card the connection-card template mounts, so the controls cannot
+     drift into different marks and a card mounted outside the first-run page still resolves it. Every stroke draws in currentColor and each instance sizes itself
+     in em, so a glyph takes the color and the scale of the button hosting it. -->
+<svg aria-hidden="true" class="d-none">
+  <symbol id="hbuaEyeGlyph" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25" viewBox="0 0 16 16">
+    <path d="M1 8c2-3.2 4.3-4.8 7-4.8s5 1.6 7 4.8c-2 3.2-4.3 4.8-7 4.8S3 11.2 1 8Z"></path>
+    <circle cx="8" cy="8" r="2.1"></circle>
+  </symbol>
+</svg>
+<!-- The controller connection card, defined once and cloned per mount by the card factory in ui.mjs. One card serves every place a controller's connection is
+     entered or edited: the first-run page, the Add Controller affordance, the docked editor in a controller's own stats panel, and the panel the framework's
+     connection-error view hosts for a controller it cannot reach.
+
+     Everything a mounted card is addressed by is a data attribute rather than an id, because a clone cannot carry ids that are unique on their own: fields carry
+     data-field, controls carry data-action, the verdict line carries data-role, and each label names the field it belongs to with data-label-for so the factory
+     can mint a matching id pair per instance and keep the label's association intact. The heading and helper text are the first-run wording, which the other
+     placements override when they mount. Every control the template offers is present in every clone and the factory reveals only the ones its placement asked
+     for, so a placement declares what it offers rather than assembling markup of its own.
+
+     The two ways in sit side by side deliberately. A local user's credentials reach the Access application's own endpoints, which is where the door and device
+     topology lives; an API token reaches the published API. Either one on its own is a connection the plugin accepts, and the card leaves both open rather than
+     ordering them. -->
+<template id="hbuaConnectionCard">
+  <!-- The card root wears fo-page, the framework's opt-in marker scoping its dark-mode form-control corrections, so every placement's inputs adapt with the theme
+       no matter where the clone mounts. -->
+  <div class="fo-card fo-page mb-3 p-3">
+    <h6 class="mb-1" data-role="heading">UniFi Access controller</h6>
+    <p class="small mb-3" data-role="helper">Your controller's address and either a local user's login or an Access console API token are all this plugin needs to bring your UniFi Access ecosystem into HomeKit.</p>
+    <label class="form-label mb-1" data-label-for="address">Controller address</label>
+    <input type="text" class="form-control fo-monospace" data-field="address" autocomplete="off" placeholder="unifi.local or 10.0.0.1">
+    <label class="form-label mb-1 mt-3" data-label-for="username">Username</label>
+    <input type="text" class="form-control fo-monospace" data-field="username" autocomplete="username">
+    <label class="form-label mb-1 mt-3" data-label-for="password">Password</label>
+    <div class="fo-secret-field">
+      <input type="password" class="form-control fo-monospace" data-field="password" autocomplete="current-password">
+      <button type="button" class="fo-secret-toggle" aria-label="Show the password." aria-pressed="false" data-action="reveal" data-reveal="password"
+        data-reveal-subject="password">
+        <svg aria-hidden="true" height="1em" width="1em"><use href="#hbuaEyeGlyph"></use></svg>
+      </button>
+    </div>
+    <label class="form-label mb-1 mt-3" data-label-for="token">API token</label>
+    <div class="fo-secret-field">
+      <input type="password" class="form-control fo-monospace" data-field="token" autocomplete="off">
+      <button type="button" class="fo-secret-toggle" aria-label="Show the API token." aria-pressed="false" data-action="reveal" data-reveal="token"
+        data-reveal-subject="API token">
+        <svg aria-hidden="true" height="1em" width="1em"><use href="#hbuaEyeGlyph"></use></svg>
+      </button>
+    </div>
+    <div class="form-check mt-3">
+      <input type="checkbox" class="form-check-input" data-field="verifyTls">
+      <label class="form-check-label" data-label-for="verifyTls">Verify this controller's TLS certificate</label>
+    </div>
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      <button type="button" class="btn btn-primary btn-sm" data-action="validate">Validate Login</button>
+      <button type="button" class="btn btn-primary btn-sm d-none" data-action="save">Save</button>
+      <button type="button" class="btn btn-primary btn-sm d-none" data-action="cancel">Cancel</button>
+      <button type="button" class="btn btn-warning btn-sm d-none" data-action="remove">Remove</button>
+    </div>
+    <div class="hbua-result small mt-2" data-role="verdict"></div>
+    <!-- The removal confirmation, armed by the Remove control above and answered here rather than in a browser dialog. The prompt names the controller in words
+         and the factory reveals the sweep choice only when it has a device list to strip settings for. -->
+    <div class="mt-2 d-none" data-role="removeConfirm">
+      <p class="small mb-2" data-role="removePrompt"></p>
+      <div class="d-flex flex-wrap gap-2">
+        <button type="button" class="btn btn-warning btn-sm" data-action="removeConfirmed">Remove</button>
+        <button type="button" class="btn btn-warning btn-sm d-none" data-action="removeSwept">Remove and Delete Its Settings</button>
+        <button type="button" class="btn btn-primary btn-sm" data-action="removeCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+</template>
+<div id="pageFirstRun" class="fo-page" style="display: none;">
+  <div class="mx-auto text-start" style="width: 90%;">
+    <p class="mb-2">Welcome to <strong>homebridge-unifi-access</strong>. To get started:</p>
+    <ol>
+      <li>Decide how this plugin should sign in to your UniFi Access console. A <strong>local user</strong> account unlocks your doors and devices as HomeKit accessories; an <strong>API token</strong> on its own reaches the published Access API and is enough to validate a connection, but no door-level accessories are created without a local user's credentials. You can configure both.</li>
+      <li>Create a <strong>local user</strong> for this plugin from the <i>Admins &amp; Users</i> section of your UniFi console webUI, if you don't already have one. Ubiquiti.com/UI.com cloud accounts are not supported.</li>
+      <li>Enter your UniFi Access controller's address and that sign-in below.</li>
+    </ol>
+    <!-- Where the controller login card mounts. The address and a sign-in are the plugin's whole requirement, so the card leads the page and carries a validation
+         of its own: pressing it tells the user whether the connection works before they commit a configuration, and the submit below validates it again in any
+         case. -->
+    <div id="hbuaFirstRunCard"></div>
   </div>
   <div class="text-center">
-    <br>
-      <button type="button" class="btn btn-primary" id="firstRun">Configure Plugin &rarr;</button>
-    <br>
-      To optimize performance and responsiveness, please make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.
+    <button type="button" class="btn btn-primary" id="firstRun">Configure Plugin &rarr;</button>
+    <p class="small text-muted mb-0 mt-3">To optimize performance and responsiveness, make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.</p>
   </div>
 </div>
 <div id="menuWrapper" class="btn-group w-100 mb-0" role="group" aria-label="UI Menu" style="display: none;">
-  <button type="button" class="btn btn-primary" id="menuSettings">Settings</button>
-  <button type="button" class="btn btn-primary" id="menuFeatureOptions">Feature Options</button>
+  <button type="button" class="btn btn-primary" id="menuFeatureOptions">Settings</button>
   <button type="button" class="btn btn-primary mr-0" id="menuHome">Support</button>
 </div>
 <div id="pageFeatureOptions" class="mt-2" style="display: none;" tabindex="0">
-  <!-- Header information bar -->
   <div id="headerInfo" class="alert alert-info bg-transparent py-2 px-3 mb-2"></div>
-
-  <!-- Main content area -->
   <div class="feature-main-content">
-    <!-- Sidebar -->
-    <aside id="sidebar" class="me-3">
-      <div class="sidebar-content">
-        <nav id="controllersContainer" class="p-2"></nav>
-        <nav id="devicesContainer" class="p-2"></nav>
+    <!-- The plugin-owned sidebar column. The framework manages only the #sidebar region inside it - its visibility, and its containers' contents - so the control
+         anchored here sits directly above the controllers list and survives the framework's re-renders. The data-fo-region attribute joins the column to the page's
+         own visibility rhythm: it hides with the page's teardown and reveals with the page, while remaining the plugin's to fill - the framework never clears it.
+         The column carries its own pinned width, so the control holds the sidebar's exact width in every state. Its click handler lives in ui.mjs and opens a card
+         for a new controller; the session-refresh action is the framework's own, docked on the controller-list heading and registered through the sidebar
+         configuration. -->
+    <div id="hbuaSidebarColumn" class="d-flex flex-column me-3" data-fo-region>
+      <div class="mb-2">
+        <button type="button" class="btn btn-sm w-100 hbua-sidebar-control fo-action" id="hbuaAddController">Add Controller</button>
       </div>
-    </aside>
-
-    <!-- Main content -->
+      <aside id="sidebar">
+        <div class="sidebar-content">
+          <nav id="controllersContainer" class="p-2"></nav>
+          <nav id="devicesContainer" class="p-2"></nav>
+        </div>
+      </aside>
+    </div>
     <main class="feature-content">
-      <!-- Device stats using CSS Grid -->
-      <div id="deviceStatsContainer"></div>
+      <!-- Where the Add Controller affordance mounts its card, as the whole of the main content while it is open. It is a region of our own rather than one of
+           the framework's, so nothing the framework clears or reveals reaches it.
 
-      <!-- Search panel -->
-      <div id="search" class="mb-3"></div>
-
-      <!-- Options content area -->
-      <div id="optionsContainer" class="options-content alert-info rounded p-3">
-        <div id="configTable"></div>
+           The framework's own regions sit inside a wrapper of ours for the same reason. Presenting the card as the main content means hiding what it stands in
+           front of, and hiding our wrapper leaves every display the framework writes on the regions inside it exactly as the framework wrote it - so the two
+           never contend for the same element, and restoring the view is one assignment on something only this plugin owns. -->
+      <div id="hbuaControllerEditor" class="hbua-compact-card" style="display: none;"></div>
+      <div id="hbuaFeatureContent">
+        <div id="deviceStatsContainer"></div>
+        <div id="search" class="mb-3"></div>
+        <div id="optionsContainer" class="options-content alert-info rounded p-3">
+          <div id="configTable"></div>
+        </div>
       </div>
     </main>
   </div>
@@ -88,35 +192,35 @@
     <p class="px-4">I hope you enjoy this plugin as much as I enjoy developing it. All my projects are labors of love. If you'd like to show your appreciation - <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">star this project on GitHub</A> and do some good in your community, either financially or with your time: a food bank, an animal shelter (two of my passions), or whatever resonates with you that can give something back to the world around you. If you're looking for a couple of my faves: <a target="_blank" href="https://wck.org/donate">World Central Kitchen</a> and <a target="_blank" href="https://bestfriends.org/donate">Best Friends</a>.</p>
 
     <div class="px-4">
-      Plugins by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
+      Projects by <a target="_blank" href="https://github.com/hjdhjd">HJD</a>:
 
-      <ul dir="auto">
-        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-comed-hourlypricing">homebridge-comed-hourlypricing: HomeKit integration for ComEd Hourly Pricing customers.</a></li>
-        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-hunter-hydrawise">homebridge-hunter-hydrawise: Hunter Hydrawise integration for HomeKit.</a></li>
-        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo: Ratgdo (non-myQ Liftmaster and Chamberlain) garage door and gate opener support for HomeKit</a></li>
-        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">homebridge-unifi-access: HomeKit integration for the UniFi Access ecosystem</a></li>
-        <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-protect">homebridge-unifi-protect: Complete HomeKit integration for the entire UniFi Protect ecosystem</a></li>
-      </ul>
+<!-- PROJECTS:BEGIN - Auto-generated by homebridge-plugin-utils. Do not edit this region by hand. -->
+<ul dir="auto">
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-comed-hourlypricing">homebridge-comed-hourlypricing: HomeKit integration for ComEd Hourly Pricing customers.</a></li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-hunter-hydrawise">homebridge-hunter-hydrawise: Hunter Hydrawise integration for HomeKit.</a></li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-ratgdo">homebridge-ratgdo: Ratgdo (non-myQ Liftmaster and Chamberlain) garage door and gate opener support for HomeKit</a></li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access">homebridge-unifi-access: HomeKit integration for the UniFi Access ecosystem</a></li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-protect">homebridge-unifi-protect: Complete HomeKit integration for the entire UniFi Protect ecosystem</a></li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/prismcast">prismcast: Chrome-based streaming server that delivers live TV from web sources to Channels DVR and Plex.</a></li>
+</ul>
+<!-- PROJECTS:END -->
     </div>
 
-  <h5>Getting Started</h5>
-    <ul dir="auto">
-      <li>
-          <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/README.md#installation">Installation</a>
-          : installing this plugin, including system requirements.
-      </li>
-      <li>
-        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md">Feature Options</a>: granular options to allow you to configure options at a controller or device level.
-      </li>
-      <li>
-        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/MQTT.md">MQTT</a>: how to configure MQTT support.
-      </li>
-      <li>
-        <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md">Changelog</a>: changes and release history of this plugin.
-      </li>
-    </ul>
+<!-- DOCUMENTATION:BEGIN - Auto-generated by homebridge-plugin-utils. Do not edit this region by hand. -->
+<h5>Getting Started</h5>
+<div class="px-4">
+<ul dir="auto">
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/README.md#installation">Installation</a>: installing this plugin, including system requirements.</li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/README.md#plugin-configuration">Plugin Configuration</a>: how to quickly get up and running.</li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md">Feature Options</a>: granular options to allow you to show or hide specific devices, controllers, and customize behavior.</li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/MQTT.md">MQTT</a>: how to configure MQTT support.</li>
+  <li><a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md">Changelog</a>: changes and release history of this plugin, starting with v1.0.</li>
+</ul>
+</div>
+<!-- DOCUMENTATION:END -->
 
   <h5>Support</h5>
+  <div class="px-4">
   <ul>
     <li>
       <a target="_blank" href="https://discord.gg/QXqfHEW">Discord Support Channel</a>
@@ -125,36 +229,279 @@
       <a target="_blank" href="https://github.com/hjdhjd/homebridge-unifi-access/issues/new/choose">Create a Developer Support Request</a>
     </li>
   </ul>
+  </div>
 </div>
-<script type="module">
-  /* Copyright(C) 2017-2025, HJD (https://github.com/hjdhjd). All rights reserved.
-   *
-   * Plugin webUI script loader.
+<!-- WEBUI LOADER CONFIG {"bust":["./access-config.mjs"],"entry":"./ui.mjs"} -->
+<!-- WEBUI LOADER:BEGIN - Auto-generated by homebridge-plugin-utils. Do not edit this region by hand. -->
+<div id="pageBootError" class="mt-4 text-center" style="display: none;">
+  <h5>The settings interface couldn't load.</h5>
+  <div id="bootErrorMessage">
+    <p data-boot-bucket="browser" style="display: none;">Your browser doesn't support features this interface requires. Please use a current version of Safari or Chrome.</p>
+    <p data-boot-bucket="delivery" style="display: none;">The interface files couldn't be retrieved from the Homebridge server. Reload the page to try again. If this keeps happening, log out of the Homebridge interface and log back in.</p>
+    <p data-boot-bucket="generic" style="display: none;">An unexpected error occurred while starting the interface.</p>
+    <p data-boot-bucket="reload" style="display: none;">The settings interface was updated while this page was open, so this page is pinned to a version that is no longer installed. Reload the page to load the current version.</p>
+  </div>
+  <details open>
+    <summary>Technical details</summary>
+    <div id="bootErrorDetails"></div>
+  </details>
+</div>
+<div id="bootSlowNotice" class="mt-4 text-center" style="display: none;">This is taking longer than expected. If nothing appears shortly, reload the page.</div>
+
+<script>
+  /* Boot monitor for the plugin webUI, generated by homebridge-plugin-utils - do not edit this region by hand. This is a classic inline script, so it runs during
+   * HTML parse ahead of the deferred module loader below and can report a failure anywhere along the boot path. It reveals the hidden status panel with the message
+   * bucket the failing stage names, arms a ten-second watchdog for a boot that hangs, and stands down when webUi.show() signals the app rendered or displayed its
+   * own error. The classic-versus-module split is for execution ordering alone: a classic inline script runs during parse while a module script is deferred.
    */
-  "use strict";
+  (function() {
 
-  // Compute a timestamp for cache-busting so each URL appears unique.
-  const timestamp = Date.now();
+    // A second execution in the same window - a reused iframe across repeated settings-panel opens - returns immediately, so the first run's listeners and watchdog
+    // are never duplicated into an orphaned registration that could resurrect the panel over a working app.
+    if(window.webUiBoot) {
 
-  // Next, set up an import map that will append a cache-busting query string to our modules.
-  const importMap = {
-
-    imports: {
-
-      "./ui.mjs": new URL("./ui.mjs", import.meta.url).href + "?cb=" + timestamp,
-      "./lib/featureOptions.js": new URL("./lib/featureOptions.js", import.meta.url).href + "?cb=" + timestamp,
-      "./lib/webUi.mjs": new URL("./lib/webUi.mjs", import.meta.url).href + "?cb=" + timestamp,
-      "./lib/webUi-featureOptions.mjs": new URL("./lib/webUi-featureOptions.mjs", import.meta.url).href + "?cb=" + timestamp
+      return;
     }
-  };
 
-  // Append the import map script to the document head so the browser applies it.
-  const mapScript = document.createElement("script");
+    const watchdogMs = 10000;
 
-  mapScript.type = "importmap";
-  mapScript.textContent = JSON.stringify(importMap);
-  document.head.appendChild(mapScript);
+    // The stage-to-bucket map. The browser stage stands alone, the manifest and import delivery stages share the delivery bucket, and every other stage - an
+    // uncaught window error or unhandled rejection included - falls through the nullish default to the generic bucket.
+    const buckets = { browser: "browser", import: "delivery", manifest: "delivery" };
 
-  // Finally, import the UI entry point so we always load a fresh copy.
-  await import("./ui.mjs");
+    let settled = false;
+    let watchdog;
+
+    // The bundle stamp the first successful boot in this window pinned its importmap to. Undefined until a boot reports one; see checkStamp below.
+    let pinnedStamp;
+
+    // Set an element's display by id, tolerating an absent node so a stamped region missing a panel element never throws from the monitor.
+    const setDisplay = (id, value) => {
+
+      const element = document.getElementById(id);
+
+      if(element) {
+
+        element.style.display = value;
+      }
+    };
+
+    // Reveal exactly one of the pre-rendered bucket messages, hiding the rest first so a second reveal in the same window cannot leave two messages stacked. The
+    // bucket keys are internal constants, never user input, so the selector is safe.
+    const showBucket = (bucket) => {
+
+      for(const message of document.querySelectorAll("#bootErrorMessage [data-boot-bucket]")) {
+
+        message.style.display = "none";
+      }
+
+      const chosen = document.querySelector("#bootErrorMessage [data-boot-bucket='" + bucket + "']");
+
+      if(chosen) {
+
+        chosen.style.display = "block";
+      }
+    };
+
+    // Write the technical-details lines, each assigned as plain text so untrusted content is never parsed as markup.
+    const writeDetails = (lines) => {
+
+      const details = document.getElementById("bootErrorDetails");
+
+      if(!details) {
+
+        return;
+      }
+
+      details.textContent = "";
+
+      for(const line of lines) {
+
+        const row = document.createElement("div");
+
+        row.textContent = line;
+        details.appendChild(row);
+      }
+    };
+
+    // Stop watching: clear the watchdog and remove both window listeners. Called from every terminal path, so nothing is left open once the boot has resolved one
+    // way or the other.
+    const stop = () => {
+
+      clearTimeout(watchdog);
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+
+    // The first failure wins. Reveal the panel with the classified bucket message and the technical details, retract any slow notice the watchdog raised, stop
+    // watching, and drop the host spinner so it cannot mask the panel. A later failure, and any failure after ready(), is ignored. The handlers never call
+    // preventDefault(), so the browser console keeps every error and the panel only complements it.
+    const fail = (stage, error) => {
+
+      if(settled) {
+
+        return;
+      }
+
+      settled = true;
+
+      stop();
+
+      // Reveal the one pre-rendered message the failing stage's bucket names.
+      showBucket(buckets[stage] ?? "generic");
+      writeDetails([ "Stage: " + stage, "Error: " + ((error instanceof Error) ? error.message : String(error)), "Browser: " + navigator.userAgent ]);
+
+      setDisplay("bootSlowNotice", "none");
+      setDisplay("pageBootError", "block");
+      globalThis.homebridge?.hideSpinner?.();
+    };
+
+    // The app is authoritative and supersedes anything the monitor showed. webUi.show() calls this from its finally once it has rendered or displayed its own toast,
+    // so an earlier boot-phase error was evidently non-fatal - browser-extension noise on window.onerror is real. Stop watching, retract both the slow notice and
+    // the panel, and mark settled so a later fail() is a no-op.
+    const ready = () => {
+
+      settled = true;
+
+      stop();
+
+      setDisplay("bootSlowNotice", "none");
+      setDisplay("pageBootError", "none");
+    };
+
+    /* Compare this boot's bundle stamp against the one an earlier boot in this window pinned its importmap to, and answer whether the boot may proceed.
+     *
+     * The settings frame outlives a single boot: a panel re-open runs the loader again in the same window, while the importmap the FIRST run injected is the one
+     * still in force - a browser applies the first map and every bare specifier resolves through it for the document's life. That is harmless until the bundle is
+     * regenerated underneath the page, at which point the pinned subdir no longer exists on disk: the re-run would fetch the new manifest, inject a map nothing
+     * consults, and import an entry whose every bare-specifier request 404s, leaving the user on the previous bundle's already-loaded code with no sign anything
+     * was wrong. Stopping here is the only honest outcome, because no amount of retrying inside this document can reach the current bundle.
+     *
+     * The first call pins and proceeds; a later call matching the pin proceeds too, which is the ordinary re-open. A later call that differs is terminal, and it
+     * deliberately overrides settled: the earlier boot's ready() is exactly what settles a window that then goes stale, so honoring it would suppress the one
+     * message the user needs.
+     */
+    const checkStamp = (stamp) => {
+
+      if(pinnedStamp === undefined) {
+
+        pinnedStamp = stamp;
+
+        return true;
+      }
+
+      if(pinnedStamp === stamp) {
+
+        return true;
+      }
+
+      settled = true;
+
+      stop();
+
+      showBucket("reload");
+      writeDetails([ "Loaded: " + pinnedStamp, "Available: " + stamp ]);
+
+      setDisplay("bootSlowNotice", "none");
+      setDisplay("pageBootError", "block");
+      globalThis.homebridge?.hideSpinner?.();
+
+      return false;
+    };
+
+    const onError = (event) => fail("uncaught error", event.error ?? event.message);
+    const onRejection = (event) => fail("unhandled rejection", event.reason);
+
+    window.webUiBoot = Object.freeze({ checkStamp, fail, ready });
+
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+
+    // Arm the watchdog. Nothing reported by the deadline means the boot has stalled, so show the slow notice in the spinner's place and drop the spinner; a boot
+    // that finishes later retracts the notice through ready(). The watchdog tears nothing down - boot may still succeed.
+    watchdog = setTimeout(() => {
+
+      setDisplay("bootSlowNotice", "block");
+      globalThis.homebridge?.hideSpinner?.();
+    }, watchdogMs);
+  })();
 </script>
+
+<script type="module">
+  /* Plugin webUI loader, generated by homebridge-plugin-utils from the loader-config comment above - do not edit this region by hand. It reads the
+   * homebridge-plugin-utils manifest at load time and injects an importmap mapping the bare "homebridge-plugin-utils/" specifier to the hashed-versioned subdir the
+   * prepare-ui CLI mirrors into place; the trailing-slash prefix carries transitive imports through relative-URL resolution, and each hand-authored module carries
+   * a Date.now() cache-bust so a single page load stays coherent across them. The body is stage-instrumented: a fetch, importmap, or entry-import failure is
+   * reported to the boot monitor above with the stage that failed, which reveals the on-page status panel. The import-stage probe proves the injected importmap
+   * applied - a browser that ignored it lands in the browser bucket - but it cannot tell a delivery failure from a top-level throw inside a delivered module, so
+   * that case knowingly folds into the delivery bucket and the panel's raw error line is what disambiguates it for support.
+   */
+
+  const cb = Date.now();
+  const bust = (path) => new URL(path, import.meta.url).href + "?cb=" + cb;
+
+  let stage = "manifest";
+
+  try {
+
+    const response = await fetch("./lib/manifest.json", { cache: "no-store" });
+
+    if(!response.ok) {
+
+      throw new Error("The manifest request failed with HTTP status " + response.status + ".");
+    }
+
+    const manifest = await response.json();
+
+    // Hand the monitor this boot's bundle stamp before injecting anything. In a window that already booted, the importmap in force is the first run's, so a stamp
+    // that no longer matches means the bundle was regenerated underneath this document and nothing injected now could reach it; the monitor shows the
+    // needs-reload state and this boot stops rather than half-loading against a subdir that is gone.
+    if(window.webUiBoot.checkStamp(manifest.subdir)) {
+
+      const importMap = {
+
+        imports: {
+
+          "./access-config.mjs": bust("./access-config.mjs"),
+          "./ui.mjs": bust("./ui.mjs"),
+          "homebridge-plugin-utils/": new URL("./lib/" + manifest.subdir + "/", import.meta.url).href
+        }
+      };
+
+      const mapScript = document.createElement("script");
+
+      mapScript.type = "importmap";
+      mapScript.textContent = JSON.stringify(importMap);
+      document.head.appendChild(mapScript);
+
+      stage = "import";
+
+      await import("./ui.mjs");
+    }
+  } catch(error) {
+
+    // The monitor owns the on-page display, so after classifying we report and swallow: rethrowing would only add a duplicate uncaught error to the console the
+    // original failure already produced.
+    if(stage === "import") {
+
+      if(typeof import.meta.resolve !== "function") {
+
+        window.webUiBoot.fail("browser", error);
+      } else {
+
+        try {
+
+          import.meta.resolve("homebridge-plugin-utils/webUi.mjs");
+          window.webUiBoot.fail("import", error);
+        } catch {
+
+          window.webUiBoot.fail("browser", error);
+        }
+      }
+    } else {
+
+      window.webUiBoot.fail("manifest", error);
+    }
+  }
+</script>
+<!-- WEBUI LOADER:END -->

@@ -27,23 +27,6 @@
               "description": "Hostname or IP address of your UniFi Access controller."
             },
 
-            "mqttTopic": {
-              "type": "string",
-              "title": "MQTT Base Topic",
-              "required": false,
-              "placeholder": "e.g. unifi/access",
-              "description": "The base MQTT topic to publish to. Default: unifi/access."
-            },
-
-            "mqttUrl": {
-              "type": "string",
-              "title": "MQTT Broker URL",
-              "required": false,
-              "format": "uri",
-              "placeholder": "e.g. mqtt://1.2.3.4",
-              "description": "URL for the MQTT broker you'd like to publish event messages to. Default: None."
-            },
-
             "name": {
               "type": "string",
               "title": "Controller Name",
@@ -55,17 +38,41 @@
             "password": {
               "type": "string",
               "title": "Controller Password",
-              "required": true,
+              "required": false,
               "placeholder": "e.g. unifi-access-password",
-              "description": "UniFi Access password for this controller. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+              "description": "UniFi Access password for this controller. Credentials are what bring your doors and devices into HomeKit. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+            },
+
+            "tokens": {
+              "type": "object",
+              "title": "API Tokens",
+              "required": false,
+
+              "properties": {
+
+                "access": {
+                  "type": "string",
+                  "title": "Access API Token",
+                  "required": false,
+                  "placeholder": "e.g. an Access console API token",
+                  "description": "API token generated in the UniFi Access console, under Security > Advanced. A token reaches the official Access API and can be used on its own or alongside a local user's credentials."
+                }
+              }
             },
 
             "username": {
               "type": "string",
               "title": "Controller Username",
-              "required": true,
+              "required": false,
               "placeholder": "e.g. some-unifi-access-user",
-              "description": "UniFi Access username for this controller. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+              "description": "UniFi Access username for this controller. Credentials are what bring your doors and devices into HomeKit. Creating a homebridge-specific local user is strongly encouraged for security and sanity."
+            },
+
+            "verifyTls": {
+              "type": "boolean",
+              "title": "Verify TLS Certificate",
+              "required": false,
+              "description": "Require this controller to present a TLS certificate that verifies. Leave this off for a controller presenting the self-signed certificate it ships with; turn it on where a trusted certificate has been installed. Default: false."
             }
           }
         }
@@ -92,17 +99,6 @@
           "description": "Enter only one option per entry. See the plugin documentation for the complete list of available options or use the feature options webUI tab above.",
           "placeholder": "e.g. Disable.Device"
         }
-      },
-
-      "ringDelay": {
-
-        "type": "integer",
-        "title": "Doorbell Ring Delay (seconds)",
-        "required": false,
-        "minimum": 0,
-        "maximum": 60,
-        "placeholder": "e.g. 5",
-        "description": "Delay between doorbell rings. Setting this to a non-zero value will prevent multiple rings of a doorbell over the specified duration.  Default: 0."
       }
     }
   },
@@ -119,7 +115,7 @@
           "key": "controllers",
           "type": "array",
           "name": " ",
-          "description": "Provide the IP address and login details of your UniFi Access controllers.",
+          "description": "Provide the address of each of your UniFi Access controllers, along with a local user's login, an API token, or both.",
           "orderable": false,
           "buttonText": "Add UniFi Access Controller",
           "items": [
@@ -127,6 +123,7 @@
             "controllers[].address",
             "controllers[].username",
             "controllers[].password",
+            "controllers[].tokens.access",
 
             {
               "key": "controllers[]",
@@ -138,23 +135,8 @@
                 {
                   "description": "These settings are optional. The defaults work well for almost everyone.",
                   "items": [
-                    "controllers[].name"
-                  ]
-                }
-              ]
-            },
-            {
-              "key": "controllers[]",
-              "type": "section",
-              "title": "MQTT Settings",
-              "expandable": true,
-              "expanded": false,
-              "items": [
-                {
-                  "description": "MQTT support will only be enabled if an MQTT broker URL is specified below.",
-                  "items": [
-                    "controllers[].mqttUrl",
-                    "controllers[].mqttTopic"
+                    "controllers[].name",
+                    "controllers[].verifyTls"
                   ]
                 }
               ]
