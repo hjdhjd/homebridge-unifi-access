@@ -1,0 +1,96 @@
+{
+  "devBadges": [
+    {
+      "alt": "License",
+      "image": "https://img.shields.io/npm/l/homebridge-unifi-access?color=%230559C9&logo=open%20source%20initiative&logoColor=%23FFFFFF&style=for-the-badge",
+      "link": "https://github.com/hjdhjd/homebridge-unifi-access/blob/main/LICENSE.md"
+    },
+    {
+      "alt": "Build Status",
+      "image": "https://img.shields.io/github/actions/workflow/status/hjdhjd/homebridge-unifi-access/ci.yml?branch=main&color=%230559C9&logo=github-actions&logoColor=%23FFFFFF&style=for-the-badge",
+      "link": "https://github.com/hjdhjd/homebridge-unifi-access/actions?query=workflow%3A%22Continuous+Integration%22"
+    },
+    {
+      "alt": "Dependencies",
+      "image": "https://img.shields.io/librariesio/release/npm/homebridge-unifi-access?color=%230559C9&logo=dependabot&style=for-the-badge",
+      "link": "https://libraries.io/npm/homebridge-unifi-access"
+    },
+    {
+      "alt": "GitHub commits since latest release (by SemVer)",
+      "image": "https://img.shields.io/github/commits-since/hjdhjd/homebridge-unifi-access/latest?color=%230559C9&logo=github&sort=semver&style=for-the-badge",
+      "link": "https://github.com/hjdhjd/homebridge-unifi-access/commits/main"
+    }
+  ],
+  "masthead": {
+    "badges": [
+      {
+        "alt": "Downloads",
+        "image": "https://img.shields.io/npm/dt/homebridge-unifi-access?color=%230559C9&logo=icloud&logoColor=%23FFFFFF&style=for-the-badge",
+        "link": "https://www.npmjs.com/package/homebridge-unifi-access"
+      },
+      {
+        "alt": "Version",
+        "image": "https://img.shields.io/npm/v/homebridge-unifi-access?color=%230559C9&label=Latest%20Version&logo=ubiquiti&logoColor=%23FFFFFF&style=for-the-badge",
+        "link": "https://www.npmjs.com/package/homebridge-unifi-access"
+      },
+      {
+        "alt": "UniFi Access@Homebridge Discord",
+        "image": "https://img.shields.io/discord/432663330281226270?color=0559C9&label=Discord&logo=discord&logoColor=%23FFFFFF&style=for-the-badge",
+        "link": "https://discord.gg/QXqfHEW"
+      },
+      {
+        "alt": "verified-by-homebridge",
+        "image": "https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=for-the-badge&logoColor=%23FFFFFF&logo=homebridge",
+        "link": "https://github.com/homebridge/homebridge/wiki/Verified-Plugins"
+      }
+    ],
+    "logo": {
+      "alt": "homebridge-unifi-access: Native HomeKit support for UniFi Access",
+      "href": "https://github.com/hjdhjd/homebridge-unifi-access",
+      "src": "https://raw.githubusercontent.com/hjdhjd/homebridge-unifi-access/main/images/homebridge-unifi-access.svg"
+    },
+    "tagline": "Complete HomeKit support for the UniFi Access ecosystem using [Homebridge](https://homebridge.io).",
+    "title": "Homebridge UniFi Access"
+  },
+  "nav": [
+    {
+      "entries": [
+        {
+          "anchor": "installation",
+          "blurb": "installing this plugin, including system requirements.",
+          "kind": "readme-anchor",
+          "title": "Installation"
+        },
+        {
+          "anchor": "plugin-configuration",
+          "blurb": "how to quickly get up and running.",
+          "kind": "readme-anchor",
+          "title": "Plugin Configuration"
+        },
+        {
+          "blurb": "granular options to allow you to show or hide specific devices, controllers, and customize behavior.",
+          "file": "docs/FeatureOptions.md",
+          "kind": "doc",
+          "title": "Feature Options"
+        },
+        {
+          "blurb": "how to configure MQTT support.",
+          "file": "docs/MQTT.md",
+          "kind": "doc",
+          "title": "MQTT"
+        },
+        {
+          "blurb": "changes and release history of this plugin, starting with v1.0.",
+          "file": "docs/Changelog.md",
+          "footer": false,
+          "kind": "doc",
+          "masthead": false,
+          "title": "Changelog"
+        }
+      ],
+      "title": "Getting Started"
+    }
+  ],
+  "projects": { "url": "https://raw.githubusercontent.com/hjdhjd/github-workflows/main/projects.json" },
+  "repo": { "branch": "main", "name": "homebridge-unifi-access", "owner": "hjdhjd" }
+}
