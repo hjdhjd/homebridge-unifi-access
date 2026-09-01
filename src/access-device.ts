@@ -206,8 +206,8 @@ export abstract class AccessDevice extends AccessBase {
 
         this.uda = record;
 
-        // If we have services on the accessory associated with the Access device that have a StatusActive characteristic set, update our availability state.
-        this.updateServices(this.hap.Characteristic.StatusActive, this.isOnline);
+        // Project availability from the composed reachability, which is the one statement of that projection wherever it is triggered from.
+        this.refreshReachability();
 
         // Sync names, if configured to do so.
         if(this.hints.syncName && this.uda.alias && (this.accessoryName !== sanitizeName(this.uda.alias))) {
@@ -224,6 +224,28 @@ export abstract class AccessDevice extends AccessBase {
         this.controller.events.emitPacket(this.#updatePacket());
       }
     });
+  }
+
+  /* Restate this device's availability to every service that carries the characteristic. The controller's connection observer pushes it whenever controller-level
+   * reachability may have moved, and this device's own record loop calls it on every delivery, so the two scopes the composition spans reach HomeKit through one
+   * statement rather than through a writer each.
+   *
+   * The characteristic's own value is the single source of what HomeKit was last shown, so nothing here shadows it with a flag that could drift from it.
+   */
+  public refreshReachability(): void {
+
+    this.updateServices(this.hap.Characteristic.StatusActive, this.isReachable);
+  }
+
+  /* Refresh whatever per-device state a broken notification stream may have left stale. The controller's connection observer calls this on every completed recovery,
+   * because a recovery relaunches the stream without replaying the packets the gap swallowed - so anything a device maintains from that rail may be standing on a
+   * reading the controller has since moved past.
+   *
+   * The base keeps no such state beyond the availability refreshReachability above already restates, and a device class that does keep some overrides this.
+   */
+  public onConnectionRestored(): void {
+
+    // Deliberately empty rather than unimplemented: there is nothing at this layer the recovery could have staled.
   }
 
   /* Write a value to every service on this accessory that reports the given characteristic. The one sweep-and-write statement in the plugin: the observe loop above
@@ -343,6 +365,19 @@ export abstract class AccessDevice extends AccessBase {
   public isReservedName(name: string | undefined): boolean {
 
     return name === undefined ? false : Object.values(AccessReservedNames).map(x => x.toUpperCase()).includes(name.toUpperCase());
+  }
+
+  /* Whether this device can be reached, composed over the two scopes that each gate it. Controller health gates every device at once: an outage freezes the record's
+   * own online flags at whatever they last said, so the device-scope read below cannot be trusted on its own while the controller is unreachable. The device's own
+   * state gates it from there.
+   *
+   * This is the plugin's single availability composition. Every StatusActive carrier reads it and so does the gate the door commands open with, so what HomeKit is
+   * shown and what an operation refuses on answer one question. The library deliberately ships no composition of its own, because last-known device state is all it
+   * can honestly own...composing per-operation reachability is the consumer's business, and this is where the consumer does it.
+   */
+  public get isReachable(): boolean {
+
+    return this.controller.client.connection.isHealthy && this.isOnline;
   }
 
   // Utility function to determine whether or not a device is currently online.

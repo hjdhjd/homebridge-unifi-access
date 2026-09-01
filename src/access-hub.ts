@@ -164,6 +164,10 @@ export class AccessHub extends AccessDevice {
   private sideDoorLocationId: string | undefined;
   // The tamper reading we last projected, or undefined until the record has told us anything. Holding it is what lets a genuine change be told from a first sighting.
   private tamperVerdict: boolean | undefined;
+  /* Whether an access method refresh is still out. It bounds the refresh to one in flight per device and is read nowhere else: the seed gets its launch-exactly-once
+   * from its own phase transition, and a refresh running over an already-seeded model has no such transition to lean on.
+   */
+  #accessMethodRefreshInFlight: boolean;
   // What we know about this device's access methods, and the gate every switch's existence and every switch's reading run through.
   #accessMethodState: AccessMethodState;
   // Whether a door-state delivery is still applying its readings, which is what holds the opener's own update until both of them have landed.
@@ -192,7 +196,9 @@ export class AccessHub extends AccessDevice {
     this.sideDoorLocationId = undefined;
     this.doorbellRingRequestId = null;
     this.tamperVerdict = undefined;
-    // Nothing has been heard about this device's access methods yet, which configureDevice() settles below from whichever rail can answer for it.
+    // Nothing has been heard about this device's access methods yet, which configureDevice() settles below from whichever rail can answer for it, and no refresh has
+    // been asked for.
+    this.#accessMethodRefreshInFlight = false;
     this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
     // A door we have not been asked to move is standing still, which is the only honest reading before anything has been commanded.
     this.#doorStateApplying = false;
@@ -671,28 +677,22 @@ export class AccessHub extends AccessDevice {
 
     try {
 
-      /* A device torn down between the dispatch and this run has nothing to read settings for, and asking the signal to throw is what puts that case and a read the
-       * teardown interrupts on the same exit: both land in the catch below, which restores the model and passes in silence.
+      const values = await this.#fetchAccessMethodValues();
+
+      /* A client holding no official surface answers undefined here, and that is what keeps this method total on its own: a client that lost that surface between the
+       * dispatch and this point simply has nothing to read, and the model goes back to unseeded for the next trigger to try again. It exits this way rather than
+       * through the catch below, which belongs to a read that was actually attempted and refused.
        */
-      this.signal.throwIfAborted();
-
-      const official = this.controller.client.official;
-
-      // The official surface is read afresh here rather than carried in, which is what keeps this method total on its own: a client that lost it between the
-      // dispatch and this point simply has nothing to read, and the model goes back to unseeded for the next trigger to try again.
-      if(!official) {
+      if(!values) {
 
         this.#unseedOwnedSeeding();
 
         return;
       }
 
-      const settings = await official.devices.fetchSettings(this.uda.unique_id, { signal: this.signal });
-
       if(this.#accessMethodState.phase === "seeding") {
 
-        this.#accessMethodState = { phase: "seeded",
-          values: accessMethodValuesFromOfficialSettings({ methods: accessMethods, settings: settings.access_methods }) };
+        this.#accessMethodState = { phase: "seeded", values };
       }
     } catch(error) {
 
@@ -708,14 +708,52 @@ export class AccessHub extends AccessDevice {
       this.log.debug("The access method settings read was refused: %s.", formatErrorMessage(error));
     }
 
-    /* Materialize the switches the seed just made knowable, and run the sweep beside them. This sits outside the try deliberately: a failure inside the configure
-     * pass must not un-seed a model the read legitimately established, and the guarded dispatch this runs under is that call's own backstop. A model some faster
-     * path seeded while the read failed is materialized here too, which is the honest reading of a model that holds the truth however it arrived.
+    /* Materialize the switches the seed just made knowable. This sits outside the try deliberately: a failure inside the configure pass must not un-seed a model the
+     * read legitimately established, and the guarded dispatch this runs under is that call's own backstop.
      */
-    if((this.#accessMethodState.phase === "seeded") && !this.signal.aborted) {
+    this.#materializeSeededSwitches();
+  }
 
-      this.configureAccessMethodSwitches();
+  /* Read this device's access methods from the official settings surface and translate them into the vocabulary the model is keyed by. The one fetch-and-translate
+   * statement both the startup seed and the restore refresh run through, so the two can never drift on which surface they read or on how they read it.
+   *
+   * The official surface is read afresh here rather than carried in by a caller, and an absent one answers undefined rather than throwing, because what that absence
+   * means belongs to the caller: the seed hands the model back for a later trigger, where the refresh keeps the values it already holds.
+   *
+   * @returns The values the settings state, or `undefined` where the client holds no official surface to read them from.
+   */
+  async #fetchAccessMethodValues(): Promise<Map<AccessMethodKey, boolean> | undefined> {
+
+    /* A device torn down before this runs has nothing to read settings for, and asking the signal to throw is what puts that case and a read the teardown interrupts
+     * on the same exit: both reach the caller as a throw, and what that means for the model is the caller's own to decide.
+     */
+    this.signal.throwIfAborted();
+
+    const official = this.controller.client.official;
+
+    if(!official) {
+
+      return undefined;
     }
+
+    const settings = await official.devices.fetchSettings(this.uda.unique_id, { signal: this.signal });
+
+    return accessMethodValuesFromOfficialSettings({ methods: accessMethods, settings: settings.access_methods });
+  }
+
+  /* Materialize the switches a settled read has made knowable, and run the sweep beside them. The one statement of that settle-time pass, shared by the seed and the
+   * refresh so what a completed read leaves HomeKit holding cannot differ between them.
+   *
+   * A model some faster path seeded while a read failed is materialized here too, which is the honest reading of a model that holds the truth however it arrived.
+   */
+  #materializeSeededSwitches(): void {
+
+    if((this.#accessMethodState.phase !== "seeded") || this.signal.aborted) {
+
+      return;
+    }
+
+    this.configureAccessMethodSwitches();
   }
 
   // Put the model back to unseeded, but only where this seed still owns the transition it started. A faster path that seeded the model meanwhile holds the truth,
@@ -726,6 +764,81 @@ export class AccessHub extends AccessDevice {
 
       this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
     }
+  }
+
+  /* Re-establish what a lost notification channel may have left stale on this device. A completed recovery relaunches that channel without replaying the packets the
+   * gap swallowed, and a rowless reader's access methods reach us on no other rail, so this is where that model is asked again.
+   *
+   * The fold comes first because the dispatch below states that every caller folds the record's rows first: it takes whatever rows a late delivery carried, before the
+   * fetch question is even asked, and it is what makes an unseeded phase at the dispatch's own refusal mean a record that genuinely carried none. The dispatch's
+   * guards then make it a no-op for anything but an unseeded reader with an official surface, which is the startup seed getting another chance after a read that
+   * failed.
+   */
+  public override onConnectionRestored(): void {
+
+    this.#foldConfigRows();
+    this.#dispatchAccessMethodSeed();
+
+    /* Only a reader the record rail says nothing about has anything left to refresh, and only one refresh is ever out for a device. The latch is set here,
+     * synchronously and ahead of any async work, so a second restore edge arriving while the read is in flight asks for nothing more...the staleness that edge
+     * carried heals at the next recovery to complete.
+     */
+    if(!this.#rowlessSeededReader || this.#accessMethodRefreshInFlight) {
+
+      return;
+    }
+
+    this.#accessMethodRefreshInFlight = true;
+
+    guardedDispatch({ handler: async (): Promise<void> => this.#refreshAccessMethodValues(), label: "access method refresh", log: this.log });
+  }
+
+  /* Whether this device is a reader whose access methods only the official settings read can answer for: seeded, and carrying no configuration rows of its own. The
+   * one named statement of the refresh's subject, read at the dispatch gate above and re-read where the fetch lands.
+   *
+   * The reader term mirrors the seed dispatch's own guard, which is what makes this predicate say exactly what its name says rather than leaning on an argument about
+   * how two surfaces happen to line up.
+   */
+  get #rowlessSeededReader(): boolean {
+
+    return (this.#accessMethodState.phase === "seeded") && (this.uda.configs === undefined) && this.hasCapability("is_reader");
+  }
+
+  /* Re-read a rowless seeded reader's access methods and restate its switches from what comes back. A method the user changed while the notification channel was down
+   * reaches us on no rail at all otherwise, so this read is what closes that gap.
+   *
+   * A failed refresh keeps the values the model already holds, retires nothing, and warns about nothing: the create-on-data and remove-on-data posture the seed
+   * established, carried into a refresh, where the values in hand are a better answer than none. The next recovery to complete tries again.
+   */
+  async #refreshAccessMethodValues(): Promise<void> {
+
+    try {
+
+      const values = await this.#fetchAccessMethodValues();
+
+      // The subject is re-read here rather than assumed from dispatch time: rows that landed while the read was in flight are the device's own authority on its
+      // methods, so a read that went out for a rowless device and came back to a rowful one has been overtaken and applies nothing.
+      if(values && this.#rowlessSeededReader) {
+
+        this.#accessMethodState = { phase: "seeded", values };
+      }
+    } catch(error) {
+
+      // A device on its way out has nothing to say about settings it will never project, so teardown passes in silence.
+      if(this.signal.aborted) {
+
+        return;
+      }
+
+      this.log.debug("The access method refresh was refused: %s.", formatErrorMessage(error));
+    } finally {
+
+      this.#accessMethodRefreshInFlight = false;
+    }
+
+    // Restate the switches from whatever the model holds once the refresh has settled - this read's own answer, or fresher rows that landed while it was in flight.
+    // It sits outside the landing guard above for exactly that reason.
+    this.#materializeSeededSwitches();
   }
 
   /* Write an access method's state through the official Access API and read the settings back for certainty, because a method whose prerequisites the controller
@@ -857,11 +970,25 @@ export class AccessHub extends AccessDevice {
 
       // Initialize the sensor state.
       service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this[state]);
-      service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+      this.dressAvailability(service);
       this.dressTamperState(service);
     }
 
     return true;
+  }
+
+  /* Dress a sensor service we have just acquired with its availability, in the two halves HomeKit needs from us.
+   *
+   * The write is what puts the optional characteristic on the service at all: HomeKit carries one only once something has written it, so without this the sweep that
+   * keeps availability current would find no service to write to. The handler is what makes a read honest, answering from the live composition so HomeKit sees where
+   * the device stands even when nothing has pushed since the composition last moved.
+   *
+   * A repeat configure pass registers the handler over the one the characteristic already holds, which is the same registration idiom the access method switches use.
+   */
+  private dressAvailability(service: Service): void {
+
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
   }
 
   /* Dress a sensor service we have just acquired with the tamper reading we currently hold.
@@ -928,7 +1055,7 @@ export class AccessHub extends AccessDevice {
 
     // Initialize the sensor state from the projection the delivery path maintains, so a repeat call writes the reading we already hold rather than a fresh one.
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkDpsState);
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+    this.dressAvailability(service);
     this.dressTamperState(service);
 
     return true;
@@ -970,7 +1097,7 @@ export class AccessHub extends AccessDevice {
 
     // Initialize the sensor state from the current side door DPS state.
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkSideDoorDpsState);
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isOnline);
+    this.dressAvailability(service);
     this.dressTamperState(service);
 
     return true;
@@ -1754,17 +1881,20 @@ export class AccessHub extends AccessDevice {
    *
    * @param options - The verb a refusal names, and whether the side door of a UA Gate is the target.
    *
-   * @returns The resolved door, or `null` when the hub is offline and the caller has nothing left to do.
+   * @returns The resolved door, or `null` when the hub cannot be reached and the caller has nothing left to do.
    */
   #resolveDoorCommand(options: { action: string; isSideDoor: boolean }): { doorId: string | undefined; doorName: string } | null {
 
     const { action, isSideDoor } = options;
     const doorName = this.#doorCommandName(isSideDoor);
 
-    // If we're not online, we're done.
-    if(!this.isOnline) {
+    /* A device we cannot reach has nothing to command, so we refuse here rather than dispatching into a controller that cannot carry it. The refusal names
+     * reachability rather than the device's own state, because the composition it reads answers for the controller as well, and claiming a device is offline on the
+     * strength of a controller outage would assert knowledge we do not have.
+     */
+    if(!this.isReachable) {
 
-      this.log.error("Unable to %s the %s. Device is offline.", action, doorName);
+      this.log.error("Unable to %s the %s. The device cannot be reached.", action, doorName);
 
       return null;
     }

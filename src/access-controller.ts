@@ -331,6 +331,9 @@ export class AccessController {
     // Spawn the observe loop that keeps every hub's door state current.
     this.#startDoorStateObserver();
 
+    // Spawn the observe loop that pushes controller-level reachability to every device and heals what an outage staled.
+    this.#startConnectionObserver();
+
     /* Bring our webhook registration into line, after the observers and off the startup path. The membership seed above constructs every hub synchronously, so by
      * the time any delivery can be routed each hub present at startup is already listening for it; startup itself never waits on an official round trip; and a
      * fault is logged by the primitive rather than escaping a login the platform calls unawaited.
@@ -833,6 +836,65 @@ export class AccessController {
         device.log.error("Unable to update the door state: %s.", formatErrorMessage(error));
       }
     }
+  }
+
+  /* Observe the controller's connection and keep every device honest about it. This is the single consumer of the connection's state stream in this process, and it
+   * carries both of the controller-wide duties that stream drives on the one iterator.
+   *
+   * Controller health is one fact with one reader. Rather than every device subscribing to a monitor that can only ever tell them all the same thing, this loop walks
+   * the configured devices and pushes each its recomputed reachability, while each device's own record loop pulls the per-device half of that composition. Push where
+   * the fact is controller-wide, pull where it is per-device.
+   *
+   * No initial walk is needed: the connection is healthy by construction where login() reaches this, and every carrier seeds its own value when it is configured.
+   */
+  #startConnectionObserver(): void {
+
+    this.spawnLoop("the controller connection", async () => {
+
+      for await (const transition of this.client.connection.observe({ signal: this.signal })) {
+
+        this.log.debug("Controller connection: %s -> %s.", transition.from, transition.to);
+
+        /* The per-device isolation is what keeps one device's fault from costing its siblings their push: without it, a single synchronous throw would unwind the
+         * whole loop through superviseLoop's terminal catch and end availability pushes for every device on this controller. The restore walk below carries its own
+         * for the same reason.
+         */
+        for(const device of this.configuredDevices.values()) {
+
+          try {
+
+            device.refreshReachability();
+          } catch(error) {
+
+            device.log.error("Unable to update the availability state: %s.", formatErrorMessage(error));
+          }
+        }
+
+        /* Leaving the reconnecting state for anything other than lost is the state machine's own statement that a recovery completed, which is what makes it the
+         * trigger here. Reconnecting has exactly one entry - inside the recovery path, after its reachability probe answers - and a completed recovery re-bootstraps
+         * state and relaunches the notification channel without replaying the packets the gap swallowed, whichever flavor the episode was. It exits to healthy, or to
+         * throttled where the transport's breaker happens to be open at that moment.
+         *
+         * The library's recovered event under-covers this, speaking only for an episode that reached lost, and an arrival at healthy over-covers it, since a plain
+         * throttle cycle arrives there having done no stream work and missed nothing.
+         */
+        if((transition.from !== "reconnecting") || (transition.to === "lost")) {
+
+          continue;
+        }
+
+        for(const device of this.configuredDevices.values()) {
+
+          try {
+
+            device.onConnectionRestored();
+          } catch(error) {
+
+            device.log.error("Unable to refresh state after the connection recovered: %s.", formatErrorMessage(error));
+          }
+        }
+      }
+    });
   }
 
   /* Reconcile HomeKit membership against the controller's current device set. One engine handles both directions: an identity we have not configured is added, and a
