@@ -13,13 +13,12 @@
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
 import { CONTROLLER_KEYS, classifyProbeResponse, controllersAwaitingMigration, hasValidIdentity, makeAccessConfig, withControllerSaved, withPrimaryIdentity }
   from "../homebridge-ui/public/access-config.mjs";
-import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries } from "homebridge-plugin-utils";
+import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, mqttConnectionSettings } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./access-options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./access-options.ts";
 import assert from "node:assert/strict";
 import { composeConnectIdentity } from "./access-policy.ts";
-import { mqttConnectionSettings } from "./access-mqtt.ts";
 import test from "node:test";
 
 // The controller these pins migrate, a sibling that proves one controller's entries never answer for another, and a device beneath the first for the scope corner.
@@ -410,9 +409,9 @@ test("every migrated setting resolves to the same effective broker and topic the
   // makes the before and the after comparable at all.
   const resolve = (state: TestConfig): ReturnType<typeof mqttConnectionSettings> => {
 
-    const controller = (state.controllers?.[0] ?? {}) as { mqttTopic?: string; mqttUrl?: string };
+    const properties = (state.controllers?.[0] ?? {}) as { mqttTopic?: string; mqttUrl?: string };
 
-    return mqttConnectionSettings(engineWith(state.options), controller, CONTROLLER_MAC);
+    return mqttConnectionSettings({ config: properties, controller: CONTROLLER_MAC, featureOptions: engineWith(state.options) });
   };
 
   const before = resolve(config);

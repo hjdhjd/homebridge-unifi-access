@@ -1,15 +1,18 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-mqtt.test.ts: Tests for MQTT connection settings and topic composition.
+ * access-mqtt.test.ts: Tests for the MQTT topic catalog and the broker and topic resolution the plugin constructs its client from.
  *
- * The resolution arms drive the real feature-option engine over the plugin's own catalog rather than a stand-in, so what they pin is the behavior a running
- * configuration actually gets, including how the engine answers an option nobody has configured.
+ * The resolution arms drive the library's resolver over the plugin's own feature-option catalog rather than a stand-in, so what they assert is the behavior a
+ * running configuration actually gets, including how the engine answers an option nobody has configured.
+ *
+ * Importing the topic catalog runs the builder's own validation, so a declaration carrying a duplicate wire topic, an entry with no message text at all, or a
+ * malformed placeholder fails this whole file at load rather than reaching a broker.
  */
+import { FeatureOptions, MQTT_DEVICE_COLUMN, mqttConnectionSettings, mqttTopic } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./access-options.ts";
-import { mqttConnectionSettings, mqttTopic } from "./access-mqtt.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
-import { FeatureOptions } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
+import { mqttTopics } from "./access-mqtt.ts";
 import test from "node:test";
 
 // The controller every per-controller option entry below is scoped to.
@@ -38,7 +41,7 @@ const OPTION_TOPIC = "option/access";
 function resolve(configured: string[], config: { mqttTopic?: string; mqttUrl?: string },
   mac: string | undefined): ReturnType<typeof mqttConnectionSettings> {
 
-  return mqttConnectionSettings(new FeatureOptions(featureOptionCategories, featureOptions, configured), config, mac);
+  return mqttConnectionSettings({ config, controller: mac, featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, configured) });
 }
 
 test("no broker configured anywhere leaves MQTT off for the controller", () => {
@@ -77,20 +80,29 @@ test("a configured option supersedes the legacy property it stands in for", () =
     { brokerUrl: LEGACY_BROKER, topicPrefix: OPTION_TOPIC });
 });
 
-test("a topic option the user has touched owns the answer even when it carries no topic of its own", () => {
+test("a topic option the user turned off leaves MQTT off for that controller", () => {
 
-  /* Disabling the topic option at the controller's scope is the user speaking about the topic, so the option layer answers and the canonical prefix stands. The
-   * alternative - a legacy property outranking an option the user deliberately reached for - would leave no way to walk a controller off its legacy topic short of
-   * editing the configuration file by hand.
+  /* An option the user configured answers in every state it can be in, and off is one of those states. A controller whose topic option is off is therefore a
+   * controller whose MQTT is off, even with a perfectly usable legacy pair sitting beside it: the user reached for the option and said no, and a configuration
+   * property does not get to speak over that. The prefix has no second-choice answer to fall back on either, since the canonical one is what an untouched option
+   * already resolves.
    */
-  assert.deepEqual(resolve(["Disable.Mqtt.Topic." + CONTROLLER_MAC], { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC),
-    { brokerUrl: LEGACY_BROKER, topicPrefix: ACCESS_MQTT_TOPIC });
+  assert.equal(resolve(["Disable.Mqtt.Topic." + CONTROLLER_MAC], { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC), null);
 });
 
-test("a controller that resolves no MAC address rides its legacy configuration", () => {
+test("a broker option carrying no usable value leaves MQTT off for that controller", () => {
+
+  // The same rule read from the broker side: turning the option off is the user saying this controller has no broker, whatever the legacy property still holds.
+  assert.equal(resolve(["Disable.Mqtt.Url." + CONTROLLER_MAC], { mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC), null);
+
+  // Enabling the option without giving it a URL is that same statement made a different way, and it resolves to nothing rather than to the property behind it.
+  assert.equal(resolve(["Enable.Mqtt.Url." + CONTROLLER_MAC], { mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC), null);
+});
+
+test("a controller that resolves no MAC address is carried by its legacy configuration", () => {
 
   /* A token-only identity never resolves a controller MAC, so no per-controller option entry can ever address it and the fallback chain is the whole of its MQTT
-   * provenance. That is a bound of the identity rather than a transient startup window, so it is pinned here as the deliberate answer.
+   * provenance. That is a bound of the identity rather than a transient startup window, so it is asserted here as the deliberate answer.
    */
   assert.deepEqual(resolve([], { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, undefined), { brokerUrl: LEGACY_BROKER, topicPrefix: LEGACY_TOPIC });
 
@@ -99,15 +111,29 @@ test("a controller that resolves no MAC address rides its legacy configuration",
     { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, undefined), { brokerUrl: LEGACY_BROKER, topicPrefix: LEGACY_TOPIC });
 });
 
-test("the composed tail reproduces the wire topic every subscriber already relies on", () => {
+test("the catalog declares the wire topics every subscriber already relies on", () => {
 
-  assert.equal(mqttTopic("AABBCCDDEEFF", "lock"), "AABBCCDDEEFF/lock");
-
-  // A nested tail is composed verbatim, so the side door topics keep their shape too.
-  assert.equal(mqttTopic("AABBCCDDEEFF", "sidedoor/lock"), "AABBCCDDEEFF/sidedoor/lock");
-
-  /* The client prepends the configured prefix and nothing else, so the broker sees prefix + "/" + this tail. Asserting the tail is what this module owns; that the
-   * client prepends its prefix is the library's own tested contract.
+  /* The tails are the plugin's external contract: an automation subscribes to the string on the broker, not to the entry key beside it. They are asserted literally
+   * here rather than derived from the catalog under test, so adding or respelling a topic is a conscious edit in this file as well as in the declaration.
    */
-  assert.equal("unifi/access" + "/" + mqttTopic("AABBCCDDEEFF", "doorbell"), "unifi/access/AABBCCDDEEFF/doorbell");
+  assert.deepEqual(Object.fromEntries(Object.entries(mqttTopics).map(([ key, entry ]) => [ key, entry.topic ])), {
+
+    doorbell: "doorbell",
+    dps: "dps",
+    lock: "lock",
+    rel: "rel",
+    ren: "ren",
+    rex: "rex",
+    sidedoorDps: "sidedoor/dps",
+    sidedoorLock: "sidedoor/lock",
+    sidedoorUnlock: "sidedoor/unlock",
+    telemetry: "telemetry",
+    unlock: "unlock"
+  });
+
+  // One composition through the library, so the string a nested tail puts on the wire is stated here rather than only inferred from the tail above.
+  assert.equal(mqttTopic("AABBCCDDEEFF", mqttTopics.sidedoorLock.topic), "AABBCCDDEEFF/sidedoor/lock");
+
+  // The device column travels with the entries, which is what lets the renderer print a device cell for every row at the docs build.
+  assert.equal(mqttTopics[MQTT_DEVICE_COLUMN].heading, "Access Device Type");
 });

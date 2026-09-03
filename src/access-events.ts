@@ -7,7 +7,8 @@ import type { AccessController } from "./access-controller.ts";
 import type { AccessEventPacket } from "unifi-access";
 import type { AccessWebhookEvent } from "unifi-access";
 import { EventEmitter } from "node:events";
-import { mqttTopic } from "./access-mqtt.ts";
+import { mqttTopic } from "homebridge-plugin-utils";
+import { mqttTopics } from "./access-mqtt.ts";
 
 /* The controller's device-update event name. It is stated here, once, because three consumers depend on it agreeing exactly: the raw-rail bridge excludes it, the
  * per-device observe loop emits it, and the hub's event handler branches on it. A retyped literal at any one of those sites would silently sever the path, so they
@@ -76,7 +77,7 @@ export class AccessEvents extends EventEmitter {
     // If enabled, publish all the event traffic coming from the Access controller to MQTT.
     if(this.mqttPublishTelemetry) {
 
-      this.controller.mqttPublish(mqttTopic(this.controller.id ?? "", "telemetry"), JSON.stringify(packet));
+      this.controller.mqttPublish(mqttTopic(this.controller.id ?? "", mqttTopics.telemetry.topic), JSON.stringify(packet));
     }
 
     if(packet.event === ACCESS_DEVICE_UPDATE_EVENT) {

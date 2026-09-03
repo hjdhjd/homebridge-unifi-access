@@ -13,8 +13,8 @@ import type { HomebridgePluginLogging, MqttClient, Nullable } from "homebridge-p
 import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
   deviceSerial, isManagedRecord, isSupportedAccessDevice, membershipDelta, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
   webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./access-policy.ts";
-import { createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, onAbort, prefixedLog, retry, sanitizeName,
-  superviseLoop } from "homebridge-plugin-utils";
+import { createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, mqttConnectionSettings, onAbort, prefixedLog, retry,
+  sanitizeName, superviseLoop } from "homebridge-plugin-utils";
 import type { AccessControllerOptions } from "./access-options.ts";
 import { AccessDeliveryLedger } from "./access-webhooks.ts";
 import type { AccessDevice } from "./access-device.ts";
@@ -22,7 +22,6 @@ import { AccessEvents } from "./access-events.ts";
 import { AccessHub } from "./access-hub.ts";
 import type { AccessPlatform } from "./access-platform.ts";
 import type { AccessWebhookRequest } from "./access-webhooks.ts";
-import { mqttConnectionSettings } from "./access-mqtt.ts";
 
 /**
  * The connect port: how a controller reaches its Access controller.
@@ -298,18 +297,18 @@ export class AccessController {
     // Initialize our UniFi Access events bridge.
     this.events = new AccessEvents(this);
 
-    /* Initialize MQTT, if configured. The resolution is the one provenance for both settings - the feature options answer first and the controller's configuration
-     * properties are the transition fallback - and a null answer means no broker is configured here, so MQTT is off for this controller. The client binds to our
-     * terminal shutdown signal, so its connection ends on plugin shutdown rather than leaking past it.
+    /* Initialize MQTT, if configured. The library resolves both settings in one place, and the rule it applies is that a configured option answers in every state
+     * it can be in: an option the user turned off, or enabled without giving it a value, is the user saying MQTT is off for this controller. The controller's own
+     * configuration properties answer only where no option speaks. A null answer means there is nothing to connect to, so no client is constructed at all. The
+     * client binds to our terminal shutdown signal, so its connection ends on plugin shutdown rather than leaking past it.
      *
      * A token-only controller resolves no MAC address for the life of the process, since the controller document a MAC comes from is credential surface the
-     * published API does not serve. Per-controller option entries cannot address such a controller at all, so its broker and topic ride the configuration
-     * properties and the canonical topic prefix alone.
+     * published API does not serve. Per-controller option entries cannot address such a controller at all, so its broker and topic are carried by the
+     * configuration properties and the canonical topic prefix alone.
      */
-    const mqttSettings = mqttConnectionSettings(this.platform.featureOptions, this.config, this.id);
+    const mqttSettings = mqttConnectionSettings({ config: this.config, controller: this.id, featureOptions: this.platform.featureOptions });
 
-    this.mqtt ??= mqttSettings && createMqttClient({ brokerUrl: mqttSettings.brokerUrl, log: this.log, topicPrefix: mqttSettings.topicPrefix },
-      { signal: this.signal });
+    this.mqtt ??= mqttSettings && createMqttClient({ ...mqttSettings, log: this.log }, { signal: this.signal });
 
     // Inform the user about the devices we see. This fires once here, so a device that arrives mid-run gets no retroactive line...the adding-to-HomeKit line covers
     // it instead.

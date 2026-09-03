@@ -1,62 +1,67 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-mqtt.ts: MQTT connection settings and topic composition for UniFi Access.
+ * access-mqtt.ts: The MQTT topic catalog for UniFi Access.
  */
-import type { FeatureOptions, Nullable } from "homebridge-plugin-utils";
-import { ACCESS_MQTT_TOPIC } from "./settings.ts";
+import { mqttTopicCatalog } from "homebridge-plugin-utils";
 
-/**
- * Resolve the MQTT broker and topic prefix for one controller, or `null` when that controller has no broker anywhere and MQTT is therefore off for it.
+// The headings the document groups the plugin's topics under, named once here because every entry below cites one and the renderer prints them as subheadings.
+const DOOR_GROUP = "Door and Lock Topics";
+const SIDE_DOOR_GROUP = "Side Door Topics (UA Gate Only)";
+const TELEMETRY_GROUP = "Telemetry Topics";
+
+/* The plugin's whole MQTT topic surface, declared once and read from here by everything that spells a topic. Each publish and subscribe site takes its tail from
+ * this catalog, the renderer projects it into the two marked regions of docs/MQTT.md at the docs build, and the builder validates it at import: a duplicate wire
+ * topic, an entry that declares no message text at all, and a malformed placeholder each fail the load rather than reaching a broker. A tail therefore has exactly
+ * one spelling in the plugin, and what the document prints cannot disagree with what the plugin publishes.
  *
- * Both settings resolve at the controller's own scope first, with the legacy per-controller configuration properties as the transition fallback, so a configuration
- * nobody has opened the webUI on keeps working exactly as it did.
+ * This module imports the library and nothing else - above all nothing from the HomeKit device graph - because the documentation CLI loads it compiled and
+ * standalone, exactly as it loads the feature-option catalog. A single import from the device side would drag that whole graph into the CLI's load.
  *
- * Each read asks its question differently, and deliberately. The broker option defaults off, so an unconfigured broker resolves to nothing and the legacy property
- * answers through the nullish fallback. The topic option carries an always-on default, so reading its value would answer that default even where the user has
- * configured nothing...which would silently outrank a legacy topic. Configured-ness for the topic is therefore read through the option's scope, and only a topic the
- * user has actually touched supersedes the legacy property. Where neither is touched, the plugin's canonical topic prefix answers.
- *
- * A legacy topic of the empty string counts as unset, which is what a blank configuration field means and what the client itself makes of one: an empty prefix
- * disables MQTT outright, so passing it through would silently turn off a controller that is publishing today.
- *
- * @param featureOptions - The feature-option engine the option entries resolve through.
- * @param config         - The controller's configuration, carrying the legacy broker and topic properties.
- * @param mac            - The controller's MAC address, or `undefined` for an identity that never resolves one and can therefore never be addressed by a
- *                         per-controller option entry.
- *
- * @returns The resolved broker URL and topic prefix, or `null` when no broker is configured for this controller.
+ * An entry's label is the word the client's get and set log lines carry: it reaches subscribeGet and subscribeSet as the name of the thing being read or written,
+ * and the user sees it in the sentence the client writes. The device column is documentation alone, projected by the renderer into each row's device cell and read
+ * by nothing at runtime, so its vocabulary fixes both the spelling of every device kind and the order each cell lists them in.
  */
-export function mqttConnectionSettings(featureOptions: FeatureOptions, config: { mqttTopic?: string; mqttUrl?: string },
-  mac: string | undefined): Nullable<{ brokerUrl: string; topicPrefix: string }> {
+export const mqttTopics = mqttTopicCatalog({
 
-  const brokerUrl = featureOptions.value("Mqtt.Url", undefined, mac) ?? config.mqttUrl;
+  doorbell: { devices: ["doorbellHub"], get: "`true` will trigger a publish event of the current doorbell ring status.", group: DOOR_GROUP, label: "doorbell",
+    publish: "`true` when ringing, `false` when the ring ends.", topic: "doorbell" },
+  dps: { devices: [ "ultra", "hub", "hubDoorMini", "gate", "enterprisePort" ], get: "`true` will trigger a publish event of the current door position sensor state.",
+    group: DOOR_GROUP, label: "door position sensor", publish: "`true` when open, `false` when closed, `unknown` if not wired. The door position sensor.", topic: "dps" },
+  lock: { devices: ["allHubs"], get: "`true` will trigger a publish event of the current lock state.", group: DOOR_GROUP, label: "lock",
+    publish: "`true` when locked, `false` when unlocked.", set: "`true` to lock, `false` to unlock. On hubs other than UA Gate, locking requires a configured lock " +
+      "delay interval - a door left on the default momentary unlock has no relock to perform, and the request is refused with an error in the log.", topic: "lock" },
+  rel: { devices: ["hub"], group: DOOR_GROUP, label: "remote release", publish: "`true` when open, `false` when closed. The remote release sensor.", topic: "rel" },
+  ren: { devices: ["hub"], group: DOOR_GROUP, label: "request to enter", publish: "`true` when open, `false` when closed. The request to enter sensor.", topic: "ren" },
+  rex: { devices: [ "ultra", "hub", "hubDoorMini" ], group: DOOR_GROUP, label: "request to exit",
+    publish: "`true` when open, `false` when closed. The request to exit sensor.", topic: "rex" },
+  sidedoorDps: { devices: ["gate"], get: "`true` will trigger a publish event of the current side door position sensor state.", group: SIDE_DOOR_GROUP,
+    label: "side door position sensor",
+    publish: "`true` when open, `false` when closed, `unknown` if not wired. The side door (pedestrian gate) position sensor.", topic: "sidedoor/dps" },
+  sidedoorLock: { devices: ["gate"], get: "`true` will trigger a publish event of the current side door lock state.", group: SIDE_DOOR_GROUP, label: "side door lock",
+    publish: "`true` when locked, `false` when unlocked. The side door lock state.",
+    set: "`true` to lock, `false` to unlock. This controls the side door lock relay.", topic: "sidedoor/lock" },
+  sidedoorUnlock: { devices: ["gate"], group: SIDE_DOOR_GROUP, label: "side door unlock",
+    publish: "A JSON describing who unlocked the side door and how. See [Unlock Attribution](#unlock-attribution) for additional documentation. Published only when " +
+      "`Controller.Webhooks` is enabled.", topic: "sidedoor/unlock" },
+  telemetry: { devices: ["controller"], group: TELEMETRY_GROUP, label: "telemetry",
+    publish: "All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be " +
+      "interested in. This is published to the controller's identity rather than a device's, and only when `Controller.Publish.Telemetry` is enabled.",
+    topic: "telemetry" },
+  unlock: { devices: ["allHubs"], group: DOOR_GROUP, label: "unlock",
+    publish: "A JSON describing who unlocked the door and how. See [Unlock Attribution](#unlock-attribution) for additional documentation. Published only when " +
+      "`Controller.Webhooks` is enabled.", topic: "unlock" }
+}, {
 
-  if(!brokerUrl) {
+  heading: "Access Device Type",
+  vocabulary: {
 
-    return null;
+    allHubs: "All hubs",
+    controller: "Controller",
+    doorbellHub: "Hub with a doorbell",
+    enterprisePort: "Access Enterprise hub ports",
+    gate: "UA Gate",
+    hub: "UA Hub",
+    hubDoorMini: "UA Hub Door Mini",
+    ultra: "UA Ultra"
   }
-
-  // The emptiness test is the one the client applies to the prefix it is handed, so what counts as no topic here is what counts as no topic there.
-  const legacyTopic = config.mqttTopic?.length ? config.mqttTopic : undefined;
-  const topicPrefix = (featureOptions.scope("Mqtt.Topic", undefined, mac) !== "none") ? featureOptions.value("Mqtt.Topic", undefined, mac) : legacyTopic;
-
-  return { brokerUrl, topicPrefix: topicPrefix ?? ACCESS_MQTT_TOPIC };
-}
-
-/**
- * Compose the topic tail for one device's MQTT topic. The client prepends the configured topic prefix and nothing else, so the tail composed here is what decides
- * the rest of the path, and the broker-visible result is `prefix/id/topic`.
- *
- * The composition has one statement here so that every publish and subscribe site in the plugin spells a topic the same way rather than repeating a concatenation
- * at each of them. The id is the device's identity - its decorated serial - so a topic on the wire reads exactly as the device is addressed everywhere else: in
- * the startup log, in a feature-option entry, and in the webUI.
- *
- * @param id    - The device identity the topic addresses.
- * @param topic - The topic tail relative to that device.
- *
- * @returns The composed topic tail.
- */
-export function mqttTopic(id: string, topic: string): string {
-
-  return id + "/" + topic;
-}
+});
