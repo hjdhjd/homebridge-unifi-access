@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-policy.ts: Pure decision logic for the Access plugin.
+ * policy.ts: Pure decision logic for the Access plugin.
  *
  * This module is the home for the plugin's pure decisions - every rule that is a function of its inputs alone - separated from the composition root and the device
  * classes that act on them.
@@ -20,8 +20,8 @@ import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOffic
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, AccessState,
   AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
-import type { AccessControllerTokens } from "./access-options.ts";
-import { AccessReservedNames } from "./access-types.ts";
+import type { AccessControllerTokens } from "./options.ts";
+import { AccessReservedNames } from "./types.ts";
 import type { Nullable } from "homebridge-plugin-utils";
 import { isIP } from "node:net";
 

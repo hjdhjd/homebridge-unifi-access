@@ -1,18 +1,18 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, and its reclaim of accessories nothing answers for.
+ * platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, and its reclaim of accessories nothing answers for.
  */
 import type { API, Logging } from "homebridge";
-import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./access-types.ts";
-import type { AccessLoginOutcome, MembershipClaims } from "./access-policy.ts";
+import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
+import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { mock, test } from "node:test";
 import { APIEvent } from "homebridge-plugin-utils";
-import type { AccessController } from "./access-controller.ts";
-import { AccessPlatform } from "./access-platform.ts";
+import type { AccessController } from "./controller/controller.ts";
+import { AccessPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { format } from "node:util";
-import { serialForm } from "./access-policy.ts";
+import { serialForm } from "./policy.ts";
 
 interface Harness {
 

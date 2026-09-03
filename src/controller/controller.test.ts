@@ -1,25 +1,25 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-controller.test.ts: Tests for the controller's removal queue and its membership resolution.
+ * controller.test.ts: Tests for the controller's removal queue and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
-import type { AccessAccessory, AccessAccessoryContext } from "./access-types.ts";
+import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
 import type { AccessBootstrapConfig, AccessEventPacket } from "unifi-access";
-import { AccessController, createRemovalQueue } from "./access-controller.ts";
+import { AccessController, createRemovalQueue } from "./controller.ts";
 import type { AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
-import type { AccessWebhookListener, AccessWebhookRoute } from "./access-webhooks.ts";
+import type { AccessWebhookListener, AccessWebhookRoute } from "../webhooks.ts";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { createMembershipIdsSelector, membershipDelta, serialForm } from "./access-policy.ts";
-import { featureOptionCategories, featureOptions } from "./access-options.ts";
+import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
+import { featureOptionCategories, featureOptions } from "../options.ts";
 import { mock, test } from "node:test";
-import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./access-events.ts";
-import type { AccessControllerConnect } from "./access-controller.ts";
-import type { AccessControllerOptions } from "./access-options.ts";
-import type { AccessDevice } from "./access-device.ts";
-import type { AccessPlatform } from "./access-platform.ts";
+import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
+import type { AccessControllerConnect } from "./controller.ts";
+import type { AccessControllerOptions } from "../options.ts";
+import type { AccessDevice } from "../devices/device.ts";
+import type { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";

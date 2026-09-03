@@ -7,11 +7,11 @@
  */
 "use strict";
 
-import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/access-status.js";
+import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { composeConnectIdentity, deviceSerial, membershipRecords, officialDeviceModel, serialForm } from "../dist/access-policy.js";
-import { featureOptionCategories, featureOptions } from "../dist/access-options.js";
+import { composeConnectIdentity, deviceSerial, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
+import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import util from "node:util";
 

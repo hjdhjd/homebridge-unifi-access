@@ -43,9 +43,9 @@ const WIRING_DEADLINE = 8;
 const TOKEN_ONLY_NOTICE = "These devices are listed through this controller's API token. Add a local user's username and password below to bring them into HomeKit " +
   "as accessories - the options you set here are kept and take effect as soon as you do.";
 
-// The context-route literal, the plugin's addition to the shared status protocol. It must stay in step with ACCESS_STATUS_CONTEXT_ROUTE in src/access-status.ts,
+// The context-route literal, the plugin's addition to the shared status protocol. It must stay in step with ACCESS_STATUS_CONTEXT_ROUTE in src/webui-status.ts,
 // the route's owner, because browser code cannot import from dist/. The route carries each configured controller's identity beside the decorated serials of the
-// devices its kept probe answer listed; the shared push event and view route belong to homebridge-plugin-utils and ride the imported panel component.
+// devices its kept probe answer listed; the shared push event and view route belong to homebridge-plugin-utils and arrive through the imported panel component.
 const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 
 /* The option catalog, fetched once per session from the plugin's own UI server (a local request to /getOptions, never a cloud call). The framework fetches the same

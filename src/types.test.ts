@@ -1,13 +1,13 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-types.test.ts: Type-level pins for the accessory context threading.
+ * types.test.ts: Type-level pins for the accessory context threading.
  *
  * ENFORCEMENT NOTE: node --strip-types executes this file without checking a single type, so the runner proves nothing here on its own. The teeth are the typecheck
  * gate - tsc --noEmit covers every test file through the base tsconfig - and the pins below are written so that a regression is a compile error rather than a
  * runtime failure.
  */
-import type { AccessAccessoryContext } from "./access-types.ts";
-import type { AccessPlatform } from "./access-platform.ts";
+import type { AccessAccessoryContext } from "./types.ts";
+import type { AccessPlatform } from "./platform.ts";
 import type { PlatformAccessory } from "homebridge";
 import assert from "node:assert/strict";
 import test from "node:test";

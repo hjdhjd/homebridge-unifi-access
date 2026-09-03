@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-mqtt.ts: The MQTT topic catalog for UniFi Access.
+ * mqtt.ts: The MQTT topic catalog for UniFi Access.
  */
 import { mqttTopicCatalog } from "homebridge-plugin-utils";
 

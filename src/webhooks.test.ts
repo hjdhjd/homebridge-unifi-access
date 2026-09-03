@@ -1,12 +1,12 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-webhooks.test.ts: Tests for the plugin's HTTP listener, its replay ledger, and its local address probe.
+ * webhooks.test.ts: Tests for the plugin's HTTP listener, its replay ledger, and its local address probe.
  *
  * Every listener arm drives a real server on an ephemeral port and speaks real HTTP to it. That is deliberate: what this module is for is the behavior of an
  * actual socket - a body arriving in pieces, a header sent twice, a connection that outlives its request, a port somebody else already holds - and none of that
  * is exercised by calling the handlers directly.
  */
-import { AccessDeliveryLedger, AccessWebhookListener, localAddressFor } from "./access-webhooks.ts";
+import { AccessDeliveryLedger, AccessWebhookListener, localAddressFor } from "./webhooks.ts";
 import { Agent, createServer, request as httpRequest } from "node:http";
 import { ACCESS_WEBHOOK_BODY_LIMIT } from "./settings.ts";
 import { Buffer } from "node:buffer";

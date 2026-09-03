@@ -14,11 +14,11 @@ import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "..
 import { CONTROLLER_KEYS, classifyProbeResponse, controllersAwaitingMigration, hasValidIdentity, makeAccessConfig, withControllerSaved, withPrimaryIdentity }
   from "../homebridge-ui/public/access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, mqttConnectionSettings } from "homebridge-plugin-utils";
-import { featureOptionCategories, featureOptions } from "./access-options.ts";
+import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
-import type { AccessControllerOptions } from "./access-options.ts";
+import type { AccessControllerOptions } from "./options.ts";
 import assert from "node:assert/strict";
-import { composeConnectIdentity } from "./access-policy.ts";
+import { composeConnectIdentity } from "./policy.ts";
 import test from "node:test";
 
 // The controller these pins migrate, a sibling that proves one controller's entries never answer for another, and a device beneath the first for the scope corner.

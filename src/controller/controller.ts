@@ -1,27 +1,27 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-controller.ts: Access controller device class for UniFi Access.
+ * controller.ts: Access controller device class for UniFi Access.
  */
-import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
-import type { AccessAccessory, AccessAccessoryContext } from "./access-types.ts";
+import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerOwnershipKeys, DecoratedSerial,
-  MembershipClaims } from "./access-policy.ts";
+  MembershipClaims } from "../policy.ts";
 import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAccessWebhookDelivery, selectDoorStates, verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
   deviceSerial, isManagedRecord, isSupportedAccessDevice, membershipDelta, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
-  webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./access-policy.ts";
+  webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "../policy.ts";
 import { createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, mqttConnectionSettings, onAbort, prefixedLog, retry,
   sanitizeName, superviseLoop } from "homebridge-plugin-utils";
-import type { AccessControllerOptions } from "./access-options.ts";
-import { AccessDeliveryLedger } from "./access-webhooks.ts";
-import type { AccessDevice } from "./access-device.ts";
-import { AccessEvents } from "./access-events.ts";
-import { AccessHub } from "./access-hub.ts";
-import type { AccessPlatform } from "./access-platform.ts";
-import type { AccessWebhookRequest } from "./access-webhooks.ts";
+import type { AccessControllerOptions } from "../options.ts";
+import { AccessDeliveryLedger } from "../webhooks.ts";
+import type { AccessDevice } from "../devices/device.ts";
+import { AccessEvents } from "./events.ts";
+import { AccessHub } from "../devices/hub.ts";
+import type { AccessPlatform } from "../platform.ts";
+import type { AccessWebhookRequest } from "../webhooks.ts";
 
 /**
  * The connect port: how a controller reaches its Access controller.

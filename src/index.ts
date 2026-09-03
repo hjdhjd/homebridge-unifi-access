@@ -4,7 +4,7 @@
  */
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API } from "homebridge";
-import { AccessPlatform } from "./access-platform.ts";
+import { AccessPlatform } from "./platform.ts";
 
 // Register our platform with homebridge.
 export default (api: API): void => {

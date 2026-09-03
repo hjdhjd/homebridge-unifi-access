@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-mqtt.test.ts: Tests for the MQTT topic catalog and the broker and topic resolution the plugin constructs its client from.
+ * mqtt.test.ts: Tests for the MQTT topic catalog and the broker and topic resolution the plugin constructs its client from.
  *
  * The resolution arms drive the library's resolver over the plugin's own feature-option catalog rather than a stand-in, so what they assert is the behavior a
  * running configuration actually gets, including how the engine answers an option nobody has configured.
@@ -9,10 +9,10 @@
  * malformed placeholder fails this whole file at load rather than reaching a broker.
  */
 import { FeatureOptions, MQTT_DEVICE_COLUMN, mqttConnectionSettings, mqttTopic } from "homebridge-plugin-utils";
-import { featureOptionCategories, featureOptions } from "./access-options.ts";
+import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
-import { mqttTopics } from "./access-mqtt.ts";
+import { mqttTopics } from "./mqtt.ts";
 import test from "node:test";
 
 // The controller every per-controller option entry below is scoped to.

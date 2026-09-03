@@ -1,11 +1,11 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-events.test.ts: Tests for the Access event bridge.
+ * events.test.ts: Tests for the Access event bridge.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./access-events.ts";
-import { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
-import type { AccessController } from "./access-controller.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
+import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
+import type { AccessController } from "./controller.ts";
 import type { AccessEventPacket } from "unifi-access";
 import type { AccessWebhookEvent } from "unifi-access";
 import assert from "node:assert/strict";

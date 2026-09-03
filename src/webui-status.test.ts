@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-status.test.ts: Tests for the webUI live-status adapter - the context narrowing, the error classification, the row policy, the connect-on-view lifecycle,
+ * webui-status.test.ts: Tests for the webUI live-status adapter - the context narrowing, the error classification, the row policy, the connect-on-view lifecycle,
  * the emit chokepoint's session guard, the frame identity convention, the resolution layer, and the connection wiring.
  *
  * The fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, and the client boundary is an injected stub wrapped
@@ -12,8 +12,8 @@ import type { AccessApiMode, AccessBootstrapConfig, AccessControllerConfig, Acce
   StateStore } from "unifi-access";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore,
   noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
-import { AccessStatusFeed, classifyStatusError, composeStatusRows, formatUptime, narrowStatusContextRequest } from "./access-status.ts";
-import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./access-status.ts";
+import { AccessStatusFeed, classifyStatusError, composeStatusRows, formatUptime, narrowStatusContextRequest } from "./webui-status.ts";
+import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
 import type { StatusEvent, StatusRow } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import test from "node:test";

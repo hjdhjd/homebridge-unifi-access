@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-policy.test.ts: Tests for the Access controller's pure decision logic.
+ * policy.test.ts: Tests for the Access controller's pure decision logic.
  *
  * The membership and classification fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, so what they pin is the
  * behavior the plugin actually gets rather than a test's idea of it.
@@ -16,7 +16,7 @@ import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSetting
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
   isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, parseDoorbellGuardFilter,
   projectedRecords, reclaimFenceOpen, recordByMac, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
-  webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./access-policy.ts";
+  webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 

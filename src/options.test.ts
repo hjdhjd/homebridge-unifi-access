@@ -1,14 +1,14 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-options.test.ts: Tests for the feature option catalog's metadata channel and its documentation scope hooks.
+ * options.test.ts: Tests for the feature option catalog's metadata channel and its documentation scope hooks.
  *
  * Every arm here drives the REAL catalog rather than a fixture of its own, which is what makes the completeness sweep meaningful: a capability flag added to an
  * option without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
  * because it is a closed union the compiler already holds the map to.
  */
-import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions } from "./access-options.ts";
+import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
-import type { AccessFeatureOption } from "./access-options.ts";
+import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 

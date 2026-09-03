@@ -1,18 +1,18 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-platform.ts: homebridge-unifi-access platform class.
+ * platform.ts: homebridge-unifi-access platform class.
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
 import { APIEvent, FeatureOptions, debugGatedLog, formatErrorMessage, guardedDispatch, onAbort } from "homebridge-plugin-utils";
-import type { AccessAccessory, AccessPlatformConfig } from "./access-types.ts";
-import { AccessController, createRemovalQueue } from "./access-controller.ts";
-import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./access-policy.ts";
-import { AccessWebhookListener, localAddressFor } from "./access-webhooks.ts";
+import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
+import { AccessController, createRemovalQueue } from "./controller/controller.ts";
+import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
+import { AccessWebhookListener, localAddressFor } from "./webhooks.ts";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
-import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen } from "./access-policy.ts";
-import { featureOptionCategories, featureOptions } from "./access-options.ts";
-import type { AccessOptions } from "./access-options.ts";
+import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen } from "./policy.ts";
+import { featureOptionCategories, featureOptions } from "./options.ts";
+import type { AccessOptions } from "./options.ts";
 
 /* What one controller's startup settled: the controller itself, and what its login established about its identity. The two are paired at the moment the login is
  * started, so nothing downstream has to match an outcome back to a controller by its position in an array.

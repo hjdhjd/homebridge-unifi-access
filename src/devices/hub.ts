@@ -1,25 +1,25 @@
 /* Copyright(C) 2019-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-hub.ts: Unified hub and reader device class for UniFi Access.
+ * hub.ts: Unified hub and reader device class for UniFi Access.
  */
 import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient } from "unifi-access";
-import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
-import type { AccessConsumedWebhookDelivery, AccessHints } from "./access-device.ts";
+import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
+import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
 import type { CharacteristicValue, Service } from "homebridge";
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
   composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
-  dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "./access-policy.ts";
+  dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, mqttTopic, validService } from "homebridge-plugin-utils";
-import { ACCESS_DEVICE_UPDATE_EVENT } from "./access-events.ts";
-import type { AccessAccessory } from "./access-types.ts";
-import type { AccessController } from "./access-controller.ts";
-import { AccessDevice } from "./access-device.ts";
-import type { AccessMethodKey } from "./access-policy.ts";
-import { AccessReservedNames } from "./access-types.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
+import type { AccessAccessory } from "../types.ts";
+import type { AccessController } from "../controller/controller.ts";
+import { AccessDevice } from "./device.ts";
+import type { AccessMethodKey } from "../policy.ts";
+import { AccessReservedNames } from "../types.ts";
 import type { Nullable } from "homebridge-plugin-utils";
-import { mqttTopics } from "./access-mqtt.ts";
+import { mqttTopics } from "../mqtt.ts";
 
 // Device types that use the /configs API endpoint instead of /settings for access method changes.
 const configsApiDeviceTypes = ["UVC G6 Entry"];

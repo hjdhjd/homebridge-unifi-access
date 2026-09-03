@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-status.ts: The live device-status adapter for the Config UI X settings panel.
+ * webui-status.ts: The live device-status adapter for the Config UI X settings panel.
  *
  * This module runs exclusively inside the transient custom-UI child process that Config UI X forks for the plugin's settings modal - never inside Homebridge. It is
  * the Access adapter for the shared status wire contract: the StatusEvent union, the StatusRow shape, and the classified StatusErrorReason live in
@@ -21,8 +21,8 @@ import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallErr
   selectControllerUptime, selectDoorStates } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible,
-  membershipRecords, serialForm, tamperState } from "./access-policy.ts";
-import type { DecoratedSerial } from "./access-policy.ts";
+  membershipRecords, serialForm, tamperState } from "./policy.ts";
+import type { DecoratedSerial } from "./policy.ts";
 import { formatErrorMessage } from "homebridge-plugin-utils";
 
 // The onRequest route the context extension registers - the plugin's addition to the shared status protocol. It carries the browser's controller context: each

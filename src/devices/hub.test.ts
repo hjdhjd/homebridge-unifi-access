@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-hub.test.ts: Tests for the hub's door commands, its garage door opener, and the webhook delivery handlers and door-ownership predicate they share.
+ * hub.test.ts: Tests for the hub's door commands, its garage door opener, and the webhook delivery handlers and door-ownership predicate they share.
  *
  * The hub is stood up for real, over genuine HAP service and characteristic classes, because what these arms are about is a hub deciding whether a delivery names
  * one of its own doors - and that decision reads the same live projection and the same discovered door identities the running accessory does.
@@ -9,17 +9,17 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "./access-events.ts";
-import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "./settings.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
+import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
 import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
-import { featureOptionCategories, featureOptions } from "./access-options.ts";
-import type { AccessAccessory } from "./access-types.ts";
-import type { AccessController } from "./access-controller.ts";
+import { featureOptionCategories, featureOptions } from "../options.ts";
+import type { AccessAccessory } from "../types.ts";
+import type { AccessController } from "../controller/controller.ts";
 import type { AccessDoorStateEntry } from "unifi-access";
-import { AccessHub } from "./access-hub.ts";
-import { AccessReservedNames } from "./access-types.ts";
+import { AccessHub } from "./hub.ts";
+import { AccessReservedNames } from "../types.ts";
 import type { AccessStateDevice } from "unifi-access";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";

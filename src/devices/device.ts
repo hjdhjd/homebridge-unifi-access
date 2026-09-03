@@ -1,22 +1,22 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-device.ts: Base class for all UniFi Access devices.
+ * device.ts: Base class for all UniFi Access devices.
  */
-import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "./access-events.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { API, Characteristic, CharacteristicValue, HAP, WithUUID } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessEventPacket, AccessStateDevice } from "unifi-access";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, debugGatedLog, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
-import { deviceSerial, serialForm } from "./access-policy.ts";
-import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
-import type { AccessAccessory } from "./access-types.ts";
-import type { AccessController } from "./access-controller.ts";
-import type { AccessListener } from "./access-events.ts";
-import type { AccessPlatform } from "./access-platform.ts";
-import { AccessReservedNames } from "./access-types.ts";
+import { deviceSerial, serialForm } from "../policy.ts";
+import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
+import type { AccessAccessory } from "../types.ts";
+import type { AccessController } from "../controller/controller.ts";
+import type { AccessListener } from "../controller/events.ts";
+import type { AccessPlatform } from "../platform.ts";
+import { AccessReservedNames } from "../types.ts";
 import type { AccessWebhookEvent } from "unifi-access";
-import type { DecoratedSerial } from "./access-policy.ts";
+import type { DecoratedSerial } from "../policy.ts";
 
 /* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
  * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.

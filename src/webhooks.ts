@@ -1,6 +1,6 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-webhooks.ts: The plugin's HTTP listener for inbound webhook deliveries.
+ * webhooks.ts: The plugin's HTTP listener for inbound webhook deliveries.
  *
  * This is the plugin's one HTTP surface. The unifi-access library hosts none of its own by design: it owns the webhook protocol - the delivery shapes, signature
  * verification, and the registration endpoints - while where a listener binds, what address a controller can reach it on, and how long a delivery stays fresh are

@@ -1,6 +1,6 @@
 /* Copyright(C) 2020-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-options.ts: Feature option and type definitions for UniFi Access.
+ * options.ts: Feature option and type definitions for UniFi Access.
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, ACCESS_DEVICE_UNLOCK_INTERVAL, ACCESS_GARAGE_TRANSITION_DURATION, ACCESS_MQTT_TOPIC,
   ACCESS_WEBHOOK_PORT } from "./settings.ts";

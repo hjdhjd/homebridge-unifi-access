@@ -1,9 +1,9 @@
 /* Copyright(C) 2020-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-types.ts: Interface and type definitions for UniFi Access.
+ * types.ts: Interface and type definitions for UniFi Access.
  */
 import type { PlatformAccessory, PlatformConfig } from "homebridge";
-import type { AccessControllerOptions } from "./access-options.ts";
+import type { AccessControllerOptions } from "./options.ts";
 
 // The typed view of an Access accessory's persisted HomeKit context: the key of the controller that created it, the device identity it was minted under - the
 // decorated serial, absent on an accessory created by a version that recorded none - and the hardware MAC address it names. Every key is optional because a device
