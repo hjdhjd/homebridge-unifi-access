@@ -14,6 +14,7 @@ import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts
 import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
+import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -21,7 +22,7 @@ import type { AccessDoorStateEntry } from "unifi-access";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
 import type { AccessStateDevice } from "unifi-access";
-import { FeatureOptions } from "homebridge-plugin-utils";
+import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { setImmediate as settle } from "node:timers/promises";
@@ -127,8 +128,9 @@ interface HubHarness {
   health: { isHealthy: boolean };
   hub: AccessHub;
   lines: string[];
-  mqttGet: (tail: string) => string;
-  mqttSet: (tail: string, value: string) => void;
+  mqtt: TestMqttClient;
+  mqttGet: (tail: string) => Promise<string | undefined>;
+  mqttSet: (tail: string, value: string) => Promise<void>;
   publishes: { payload: string; topic: string }[];
   reconfigure: (entries: string[]) => void;
   release: () => void;
@@ -182,8 +184,6 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const releases: (() => void)[] = [];
   const requests: string[] = [];
   const handlers = new Map<string, (payload: unknown) => void>();
-  const mqttGets = new Map<string, { getter: () => string; label: string }>();
-  const mqttSets = new Map<string, { handler: (value: string) => void; label: string }>();
   const record = options.record ?? hubRecord();
   let doorState = options.doorState;
 
@@ -241,12 +241,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const transport = options.credentials ? { request: async (endpoint: string, init: { method: string }): Promise<void> => void requests.push(init.method + " " +
     endpoint) } : null;
 
-  // What the hub asked the broker for: the reader behind each get topic and the handler behind each set topic, under the topic it registered them on.
-  const mqtt = {
-
-    subscribeGet: (topic: string, label: string, getter: () => string): void => void mqttGets.set(topic, { getter, label }),
-    subscribeSet: (topic: string, label: string, handler: (value: string) => void): void => void mqttSets.set(topic, { handler, label })
-  };
+  // The broker the hub registers against: the shipped recording double, which keeps every registration with the signal it was registered under and releases
+  // it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker.
+  const mqtt = new TestMqttClient();
 
   const projection = { config: record, observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ }, peek: (): undefined => undefined };
 
@@ -351,21 +348,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
     health,
     hub,
     lines,
-    mqttGet: (tail: string): string => {
-
-      const registered = mqttGets.get(HUB_SERIAL + "/" + tail);
-
-      assert.ok(registered, "the hub should answer the " + tail + " topic");
-
-      return registered.getter();
-    },
-    mqttSet: (tail: string, value: string): void => {
-
-      const registered = mqttSets.get(HUB_SERIAL + "/" + tail);
-
-      assert.ok(registered, "the hub should listen on the " + tail + " topic");
-      registered.handler(value);
-    },
+    mqtt,
+    mqttGet: async (tail: string): Promise<string | undefined> => mqtt.invokeGet(mqttGetTopic(HUB_SERIAL + "/" + tail)),
+    mqttSet: async (tail: string, value: string): Promise<void> => mqtt.invokeSet(mqttSetTopic(HUB_SERIAL + "/" + tail), value),
     publishes,
     /* Restate the user's settings under a hub that is already running, which is how a setting read afresh at each write is told apart from one cached at
      * construction. The engine is swapped rather than mutated, because that is what the platform itself does when a configuration is reloaded.
@@ -1241,6 +1226,27 @@ test("a recovery arriving after the device was torn down reads nothing, changes 
     "and teardown is not the kind of refusal that earns a note - the note belongs to a controller that would not answer");
 });
 
+test("every MQTT registration is bound to the device's lifetime and leaves with it", () => {
+
+  const gate = makeGate();
+
+  // A UA Gate with a doorbell registers the whole topic surface: the doorbell, the door position, the lock in both directions, and the side door's lock in
+  // both directions and its position.
+  assert.deepEqual(gate.mqtt.subscriptions.map(entry => entry.topic).sort(), [ mqttGetTopic(HUB_SERIAL + "/doorbell"), mqttGetTopic(HUB_SERIAL + "/dps"),
+    mqttGetTopic(HUB_SERIAL + "/lock"), mqttSetTopic(HUB_SERIAL + "/lock"), mqttGetTopic(HUB_SERIAL + "/sidedoor/dps"),
+    mqttGetTopic(HUB_SERIAL + "/sidedoor/lock"), mqttSetTopic(HUB_SERIAL + "/sidedoor/lock") ].sort());
+
+  for(const entry of gate.mqtt.subscriptions) {
+
+    assert.equal(entry.init.signal, gate.hub.signal, "the " + entry.topic + " registration must carry the device's own lifetime signal");
+  }
+
+  // Removing the device is what aborts its lifetime, and the broker releases every registration that signal governed.
+  gate.hub.cleanup();
+
+  assert.deepEqual(gate.mqtt.subscriptions, [], "a removed device must leave no registration behind");
+});
+
 test("a completed recovery gives the startup seed of a reader nothing has answered for another attempt", async () => {
 
   const harness = makeHub({
@@ -1394,7 +1400,7 @@ test("a refused close puts a gate's opener back and leaves the lock state and th
   const trigger = switchService(gate, AccessReservedNames.SWITCH_LOCK_TRIGGER);
 
   // Unlock over MQTT first, so there is an unlocked state and a pending relock for the refused close below to leave alone, with the gate itself standing still.
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "the gate is unlocked after the trigger it opens on");
@@ -1485,13 +1491,13 @@ test("a UA Gate's MQTT lock topic closes the gate and then answers locked", asyn
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
-  gate.mqttSet("lock", "true");
+  await gate.mqttSet("lock", "true");
   await settle();
 
   assert.deepEqual(gate.commands, [ { options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }, { options: { doorId: MAIN_DOOR }, verb: "close" } ]);
-  assert.equal(gate.mqttGet("lock"), "true", "the topic answers the state the close established rather than the unlock before it");
+  assert.equal(await gate.mqttGet("lock"), "true", "the topic answers the state the close established rather than the unlock before it");
 
   // The topic a subscriber watches saw the whole window rather than only the half a reader has to ask for.
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
@@ -1503,14 +1509,14 @@ test("a UA Gate's side door relocks through the close command, on its own MQTT t
 
   const gate = makeGate({ options: ["Enable.Hub.SideDoor.Lock.Trigger"] });
 
-  gate.mqttSet("sidedoor/lock", "false");
+  await gate.mqttSet("sidedoor/lock", "false");
   await settle();
-  gate.mqttSet("sidedoor/lock", "true");
+  await gate.mqttSet("sidedoor/lock", "true");
   await settle();
 
   // The side door is named explicitly on both verbs, because the handle's own resolution answers with whichever of the gate's two doors the controller listed first.
   assert.deepEqual(gate.commands, [ { options: { actor: UNLOCK_ACTOR, doorId: SIDE_DOOR }, verb: "unlock" }, { options: { doorId: SIDE_DOOR }, verb: "close" } ]);
-  assert.equal(gate.mqttGet("sidedoor/lock"), "true");
+  assert.equal(await gate.mqttGet("sidedoor/lock"), "true");
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true" ], "the side door's own topic carried the whole window");
 
   /* The close ended the window and said so, and the relock it cancelled would say the same thing again if it had survived. Counting the sentence rather than
@@ -1548,7 +1554,7 @@ test("a UA Gate opens for a client that holds only an API token", async () => {
    */
   const gate = makeGate({ credentials: false, official: true });
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   assert.deepEqual(gate.commands, [{ options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }]);
@@ -1559,7 +1565,7 @@ test("every unlock names Homebridge as the actor behind it, whether or not it na
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   /* The pair is spelled out here rather than read from the constant behind it, so what the arm proves is the identity the controller will file the unlock under
@@ -1586,7 +1592,7 @@ test("an unlock a client cannot attribute is sent again unattributed, and opens 
   const gate = makeGate({ options: [ "Enable.Hub.Lock.Trigger", "Enable.Log.Debug" ], unlockRefusal: new AccessCapabilityError(refusal) });
   const trigger = switchService(gate, AccessReservedNames.SWITCH_LOCK_TRIGGER);
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   /* Two dispatches, the second being the first with the actor dropped and nothing else moved. The door the retry still names is what tells a fallback reusing the
@@ -1620,7 +1626,7 @@ test("an unlock that fails for any reason but the attribution is reported as it 
   const failure = "The controller rejected the request.";
   const gate = makeGate({ unlockRefusal: new AccessOfficialApiError(failure, { code: "CODE_OPERATION_FORBIDDEN" }) });
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   assert.deepEqual(gate.commands, [{ options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }], "one dispatch, and no retry behind it");
@@ -1637,7 +1643,7 @@ test("a gate unlocked from HomeKit announces the window it opened, and the reloc
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   /* The controller sends nothing back over the event stream for a door command of ours, so the announcement of the window is the plugin's own to make. Every
@@ -1664,9 +1670,9 @@ test("a close inside the window ends it once, and the relock it cancelled adds n
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
-  gate.mqttSet("lock", "true");
+  await gate.mqttSet("lock", "true");
   await settle();
 
   // The close is what ended the window, so the topic carries both halves rather than stranding at the unlock's own.
@@ -1721,7 +1727,7 @@ test("a gate the controller reports locked retires the relock our own unlock arm
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   // The rail's own report of the gate secured, which settles and announces the door through the door-state path rather than through the window.
@@ -1746,7 +1752,7 @@ test("a rail-reported lock and re-unlock inside the window leave no stale relock
 
   const gate = makeGate();
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   /* The controller's own reading outranks the window we model. A relock still pending when the rail reports the door locked has nothing left to do, and left
@@ -1769,7 +1775,7 @@ test("an unlock the controller refuses says so and opens no window at all", asyn
 
   const gate = makeGate({ reject: ["unlock"] });
 
-  gate.mqttSet("lock", "false");
+  await gate.mqttSet("lock", "false");
   await settle();
 
   // The refusal is the library's own sentence, inside the wrapper this command reports every failure in.
@@ -2119,21 +2125,21 @@ test("one delivery makes one opener update, from both of its readings and in the
     { characteristic: Characteristic.CurrentDoorState.UUID, value: Characteristic.CurrentDoorState.OPEN } ]);
 });
 
-test("a UA Gate's MQTT position topic answers the state it holds, and a hub with no sensor still answers unknown", () => {
+test("a UA Gate's MQTT position topic answers the state it holds, and a hub with no sensor still answers unknown", async () => {
 
   const gate = makeGate();
 
   // Drive the gate's position away from the state it was born holding, so an answer that ignored the live state cannot pass.
   gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "open", lock: "locked" } }, event: "access.data.v2.location.update" });
 
-  assert.equal(gate.mqttGet("dps"), "true");
+  assert.equal(await gate.mqttGet("dps"), "true");
 
   gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "close", lock: "locked" } }, event: "access.data.v2.location.update" });
 
-  assert.equal(gate.mqttGet("dps"), "false");
+  assert.equal(await gate.mqttGet("dps"), "false");
 
   // A door hub with no position evidence at all still says so rather than guessing.
-  assert.equal(makeHub().mqttGet("dps"), "unknown");
+  assert.equal(await makeHub().mqttGet("dps"), "unknown");
 });
 
 test("a command the controller refuses leaves the machine standing and puts the characteristics back", async (t) => {

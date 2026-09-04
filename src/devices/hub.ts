@@ -1508,8 +1508,14 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Configure MQTT capabilities of this light.
+  // Configure the MQTT topics this device answers on and listens to.
   private configureMqtt(): boolean {
+
+    /* Every registration below is bound to this device's lifetime. The client releases a handler when the signal it was registered under aborts, and drops the
+     * broker subscription when that handler was the last one on its topic, so a device removed mid-run takes its subscriptions with it and a device re-adopted
+     * under the same identity never answers beside a retired instance. Plugin shutdown ends the client itself, which clears every registration at once.
+     */
+    const lifetime = { signal: this.signal };
 
     // MQTT doorbell status.
     if(this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell")) {
@@ -1517,7 +1523,7 @@ export class AccessHub extends AccessDevice {
       this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.doorbell.topic), mqttTopics.doorbell.label, () => {
 
         return this.doorbellRingRequestId !== null ? "true" : "false";
-      });
+      }, lifetime);
     }
 
     // The remaining MQTT subscriptions are hub-specific (lock, DPS, side door).
@@ -1552,7 +1558,7 @@ export class AccessHub extends AccessDevice {
 
           return "unknown";
       }
-    });
+    }, lifetime);
 
     // MQTT lock status.
     this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.lock.topic), mqttTopics.lock.label, () => {
@@ -1571,7 +1577,7 @@ export class AccessHub extends AccessDevice {
 
           return "unknown";
       }
-    });
+    }, lifetime);
 
     // MQTT lock status.
     this.controller.mqtt?.subscribeSet(mqttTopic(this.id, mqttTopics.lock.topic), mqttTopics.lock.label, (value: string) => {
@@ -1596,7 +1602,7 @@ export class AccessHub extends AccessDevice {
 
           break;
       }
-    });
+    }, lifetime);
 
     // MQTT side door lock status (UA Gate only).
     if(this.hints.hasSideDoor) {
@@ -1617,7 +1623,7 @@ export class AccessHub extends AccessDevice {
 
             return "unknown";
         }
-      });
+      }, lifetime);
 
       this.controller.mqtt?.subscribeSet(mqttTopic(this.id, mqttTopics.sidedoorLock.topic), mqttTopics.sidedoorLock.label, (value: string) => {
 
@@ -1641,7 +1647,7 @@ export class AccessHub extends AccessDevice {
 
             break;
         }
-      });
+      }, lifetime);
 
       // MQTT side door DPS status (UA Gate only).
       this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.sidedoorDps.topic), mqttTopics.sidedoorDps.label, () => {
@@ -1665,7 +1671,7 @@ export class AccessHub extends AccessDevice {
 
             return "unknown";
         }
-      });
+      }, lifetime);
     }
 
     return true;
