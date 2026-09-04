@@ -45,7 +45,8 @@ export const mqttTopics = mqttTopicCatalog({
       "`Controller.Webhooks` is enabled.", topic: "sidedoor/unlock" },
   telemetry: { devices: ["controller"], group: TELEMETRY_GROUP, label: "telemetry",
     publish: "All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be " +
-      "interested in. This is published to the controller's identity rather than a device's, and only when `Controller.Publish.Telemetry` is enabled.",
+      "interested in. This is published to the controller's identity rather than a device's: the controller's serial number in the same form as a device identity, " +
+      "or the configured address of a controller reached with an API token alone. Published only when `Controller.Publish.Telemetry` is enabled.",
     topic: "telemetry" },
   unlock: { devices: ["allHubs"], group: DOOR_GROUP, label: "unlock",
     publish: "A JSON describing who unlocked the door and how. See [Unlock Attribution](#unlock-attribution) for additional documentation. Published only when " +

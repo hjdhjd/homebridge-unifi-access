@@ -743,6 +743,23 @@ test("a controller that has learned its MAC address still owns the accessories i
   assert.deepEqual(harness.unregistered, ["uuid-carried"], "an accessory keyed by this controller's prior identity is still its own");
 });
 
+test("a token-only controller publishes its telemetry under its configured address", () => {
+
+  const harness = makeController({ controllerInfo: null });
+
+  // No controller document means no serial, and the address is the one stable name such a controller has, exactly as its ownership key reasons.
+  assert.equal(harness.controller.mqttIdentity, "1.2.3.4");
+});
+
+test("a controller that has read its document publishes its telemetry under its serial, in the same form as a device identity", () => {
+
+  const harness = makeController({ config: { password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+  // The literal is deliberate: it proves the spelling the topic carries rather than agreeing with whatever the normalizer returns.
+  assert.equal(harness.controller.mqttIdentity, "112233445566");
+  assert.notEqual(harness.controller.mqttIdentity, harness.controller.ownershipKey, "the MQTT identity is the serial form, where the ownership key keeps the raw MAC");
+});
+
 test("an accessory created under an earlier form of the device's identity is never adopted, while one under its identity is", () => {
 
   const store = createStateStore({});

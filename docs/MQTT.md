@@ -89,7 +89,7 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 
 | Topic        | Access Device Type  | Message Published
 |--------------|---------------------|----------------------------------
-| `telemetry`  | Controller          | All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be interested in. This is published to the controller's identity rather than a device's, and only when `Controller.Publish.Telemetry` is enabled.
+| `telemetry`  | Controller          | All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be interested in. This is published to the controller's identity rather than a device's: the controller's serial number in the same form as a device identity, or the configured address of a controller reached with an API token alone. Published only when `Controller.Publish.Telemetry` is enabled.
 
 <!-- MQTT PUBLISHED:END -->
 

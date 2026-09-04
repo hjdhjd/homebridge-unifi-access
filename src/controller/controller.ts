@@ -1385,6 +1385,15 @@ export class AccessController {
     return this.uda ? serialForm(this.uda.host.mac) : undefined;
   }
 
+  /* The identity this controller's own MQTT topics are published under: its serial where a controller document exists, and its configured address where one never
+   * will. A controller reached with an API token alone reads no controller document for the life of the process, so its address is the only stable name it has,
+   * exactly as the ownership key above reasons. A credentialed controller publishes under its serial, the same identity form every device topic carries.
+   */
+  public get mqttIdentity(): string {
+
+    return this.id ?? this.config.address;
+  }
+
   // The name this controller's log lines are prefixed with.
   public get name(): string {
 

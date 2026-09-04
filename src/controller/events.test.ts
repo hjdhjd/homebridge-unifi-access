@@ -18,16 +18,16 @@ interface ControllerDouble {
   publishes: { payload: string; topic: string }[];
 }
 
-function makeController(telemetry: boolean): ControllerDouble {
+function makeController(options: { identity?: string; telemetry: boolean }): ControllerDouble {
 
   const publishes: { payload: string; topic: string }[] = [];
 
   const controller = {
 
     client: { on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }) },
-    hasFeature: (): boolean => telemetry,
-    id: "AABBCCDDEEFF",
+    hasFeature: (): boolean => options.telemetry,
     log: { debug: (): void => undefined, error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
+    mqttIdentity: options.identity ?? "AABBCCDDEEFF",
     mqttPublish: (topic: string, payload: string): void => {
 
       publishes.push({ payload, topic });
@@ -53,7 +53,7 @@ function packet(event: string): AccessEventPacket {
 
 test("one packet reaches every addressing pattern a device subscribes on", () => {
 
-  const { controller } = makeController(false);
+  const { controller } = makeController({ telemetry: false });
   const events = new AccessEvents(controller);
   const seen: string[] = [];
 
@@ -69,7 +69,7 @@ test("one packet reaches every addressing pattern a device subscribes on", () =>
 
 test("the bridge forwards a newer-dialect device update and withholds the older one", () => {
 
-  const { controller } = makeController(false);
+  const { controller } = makeController({ telemetry: false });
   const events = new AccessEvents(controller);
   const delivered: AccessEventPacket[] = [];
 
@@ -91,7 +91,7 @@ test("the bridge forwards a newer-dialect device update and withholds the older 
 
 test("telemetry mirrors every frame exactly once, the excluded one included", () => {
 
-  const { controller, publishes } = makeController(true);
+  const { controller, publishes } = makeController({ telemetry: true });
   const events = new AccessEvents(controller);
 
   events.handleRawPacket(packet("access.data.v2.device.update"));
@@ -110,9 +110,21 @@ test("telemetry mirrors every frame exactly once, the excluded one included", ()
   assert.deepEqual(JSON.parse(publishes[2]?.payload ?? "null"), packet(ACCESS_DEVICE_UPDATE_EVENT));
 });
 
+test("telemetry for a controller with no hardware identity publishes under its configured address", () => {
+
+  // A controller reached with an API token alone never reads the document its MAC address comes from, so its configured address is the identity its telemetry carries.
+  const { controller, publishes } = makeController({ identity: "1.2.3.4", telemetry: true });
+  const events = new AccessEvents(controller);
+
+  events.handleRawPacket(packet("access.remote_view"));
+
+  assert.equal(publishes.length, 1, "the frame must be mirrored exactly once");
+  assert.equal(publishes[0]?.topic, "1.2.3.4/telemetry", "the topic must open with the configured address and never with an empty segment");
+});
+
 test("telemetry publishes nothing while the feature option is off", () => {
 
-  const { controller, publishes } = makeController(false);
+  const { controller, publishes } = makeController({ telemetry: false });
   const events = new AccessEvents(controller);
 
   events.handleRawPacket(packet("access.data.v2.device.update"));
@@ -124,7 +136,7 @@ test("telemetry publishes nothing while the feature option is off", () => {
 test("a delivery is emitted under its own prefix and never mirrored to telemetry", () => {
 
   // Telemetry is on for this arm, so a mirror that swallowed deliveries too would publish here.
-  const { controller, publishes } = makeController(true);
+  const { controller, publishes } = makeController({ telemetry: true });
   const events = new AccessEvents(controller);
   const deliveries: unknown[] = [];
   const socketSide: unknown[] = [];
