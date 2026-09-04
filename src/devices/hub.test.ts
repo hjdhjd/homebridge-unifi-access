@@ -15,6 +15,7 @@ import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
 import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
+import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -25,6 +26,7 @@ import type { AccessStateDevice } from "unifi-access";
 import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
+import { mqttTopics } from "../mqtt.ts";
 import { setImmediate as settle } from "node:timers/promises";
 import test from "node:test";
 
@@ -131,7 +133,8 @@ interface HubHarness {
   mqtt: TestMqttClient;
   mqttGet: (tail: string) => Promise<string | undefined>;
   mqttSet: (tail: string, value: string) => Promise<void>;
-  publishes: { payload: string; topic: string }[];
+  publish: (entry: MqttTopicEntry, payload: string) => void;
+  publishes: { init: MqttPublishInit | undefined; payload: string; topic: string }[];
   reconfigure: (entries: string[]) => void;
   release: () => void;
   requests: string[];
@@ -180,7 +183,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const fetches: string[] = [];
   const lines: string[] = [];
   const updates: unknown[] = [];
-  const publishes: { payload: string; topic: string }[] = [];
+  const publishes: { init: MqttPublishInit | undefined; payload: string; topic: string }[] = [];
   const releases: (() => void)[] = [];
   const requests: string[] = [];
   const handlers = new Map<string, (payload: unknown) => void>();
@@ -241,9 +244,17 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const transport = options.credentials ? { request: async (endpoint: string, init: { method: string }): Promise<void> => void requests.push(init.method + " " +
     endpoint) } : null;
 
-  // The broker the hub registers against: the shipped recording double, which keeps every registration with the signal it was registered under and releases
-  // it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker.
-  const mqtt = new TestMqttClient();
+  /* The broker the hub registers against: the shipped recording double, which keeps every registration with the signal it was registered under and releases
+   * it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker. It reports into the harness's own sinks, so what the
+   * double says about a publish it refused is read exactly where an arm reads everything else the run said.
+   */
+  const mqtt = new TestMqttClient({ log: {
+
+    debug: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)),
+    error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
+    warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters))
+  } });
 
   const projection = { config: record, observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ }, peek: (): undefined => undefined };
 
@@ -293,7 +304,11 @@ function makeHub(options: HubOptions = {}): HubHarness {
     id: undefined,
     log: { debug: (): void => undefined, error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
     mqtt,
-    mqttPublish: (topic: string, payload: string): void => void publishes.push({ payload, topic }),
+    mqttPublish: (topic: string, payload: string, init?: MqttPublishInit): void => {
+
+      publishes.push({ init, payload, topic });
+      mqtt.publishGuarded(topic, payload, init);
+    },
     name: "Test Controller",
     ownershipKey: "1.2.3.4",
     platform: {
@@ -351,6 +366,13 @@ function makeHub(options: HubOptions = {}): HubHarness {
     mqtt,
     mqttGet: async (tail: string): Promise<string | undefined> => mqtt.invokeGet(mqttGetTopic(HUB_SERIAL + "/" + tail)),
     mqttSet: async (tail: string, value: string): Promise<void> => mqtt.invokeSet(mqttSetTopic(HUB_SERIAL + "/" + tail), value),
+    /* The device base's publish method is protected by design, so nothing outside the class hierarchy reaches it: this driver is the test's own hand on it, which
+     * is what lets an arm issue a publish exactly as the hub's own code does.
+     */
+    publish: (entry: MqttTopicEntry, payload: string): void => {
+
+      (hub as unknown as { mqttPublish: (entry: MqttTopicEntry, payload: string) => void }).mqttPublish(entry, payload);
+    },
     publishes,
     /* Restate the user's settings under a hub that is already running, which is how a setting read afresh at each write is told apart from one cached at
      * construction. The engine is swapped rather than mutated, because that is what the platform itself does when a configuration is reloaded.
@@ -1245,6 +1267,80 @@ test("every MQTT registration is bound to the device's lifetime and leaves with 
   gate.hub.cleanup();
 
   assert.deepEqual(gate.mqtt.subscriptions, [], "a removed device must leave no registration behind");
+});
+
+test("every publish carries the device's own lifetime signal, and one issued after removal is refused rather than sent", async () => {
+
+  const harness = makeHub();
+
+  harness.publish(mqttTopics.lock, "true");
+
+  await settle();
+
+  // Before the removal the publish is admitted, and it carries this device's own signal rather than the controller's.
+  assert.deepEqual(harness.mqtt.published, [{ payload: "true", topic: HUB_SERIAL + "/lock" }]);
+  assert.equal(harness.publishes[0]?.init?.signal, harness.hub.signal, "a publish must carry the device's own lifetime signal");
+
+  harness.hub.cleanup();
+  harness.publish(mqttTopics.lock, "false");
+
+  await settle();
+
+  // After it, the client refuses the publish on the signal it carries and says so at debug; nothing reaches the broker and nothing is an error.
+  assert.deepEqual(harness.mqtt.published, [{ payload: "true", topic: HUB_SERIAL + "/lock" }], "a publish after removal must never reach the broker");
+  assert.equal(harness.publishes[1]?.init?.signal?.aborted, true);
+  assert.deepEqual(harness.debugs, ["MQTT publish aborted: " + HUB_SERIAL + "/lock."]);
+  assert.deepEqual(harness.errors, []);
+});
+
+test("a gate unlock overtaken by the device's removal announces nothing", async () => {
+
+  const gate = makeGate({ defer: "unlock" });
+
+  // The unlock goes out and parks on the controller's answer.
+  void gate.mqttSet("lock", "false");
+
+  await settle();
+
+  assert.equal(gate.commands.length, 1, "the unlock must have been dispatched");
+
+  // The removal lands while the answer is still outstanding, and then the answer arrives.
+  gate.hub.cleanup();
+  gate.release();
+
+  await settle();
+
+  // The controller accepted the unlock, but there is no device left to open a window for: no lock publish, no line, nothing refused at the broker either.
+  assert.deepEqual(lockPayloads(gate), [], "a removed device must not announce an unlock");
+  assert.equal(lineCount(gate, "Gate unlocked."), 0);
+  assert.deepEqual(gate.debugs.filter(line => line.startsWith("MQTT publish aborted")), []);
+});
+
+test("a gate close overtaken by the device's removal announces nothing", async () => {
+
+  const gate = makeGate({ defer: "close" });
+
+  // Open the window first, so there is a standing unlocked state a close would otherwise settle and announce.
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(lockPayloads(gate), ["false"]);
+  assert.equal(lineCount(gate, "Gate unlocked."), 1);
+
+  void gate.mqttSet("lock", "true");
+
+  await settle();
+
+  assert.equal(gate.commands.length, 2, "the close must have been dispatched");
+
+  gate.hub.cleanup();
+  gate.release();
+
+  await settle();
+
+  // The close was accepted, but the window is never settled on the removed device's behalf.
+  assert.deepEqual(lockPayloads(gate), ["false"], "a removed device must not announce a close");
+  assert.equal(lineCount(gate, "Gate locked."), 0);
 });
 
 test("a completed recovery gives the startup seed of a reader nothing has answered for another attempt", async () => {

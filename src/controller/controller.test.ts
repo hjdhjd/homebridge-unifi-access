@@ -22,6 +22,8 @@ import type { AccessDevice } from "../devices/device.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
 import { FeatureOptions } from "homebridge-plugin-utils";
+import type { MqttClient } from "homebridge-plugin-utils";
+import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1810,4 +1812,24 @@ test("an authentic delivery this plugin does not model is answered without being
    */
   assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", Math.floor(Date.now() / 1000), body) }), true);
   assert.equal(harness.deliveries.length, 0);
+});
+
+test("the publish chokepoint forwards the caller's own per-publish options to the client", async () => {
+
+  const harness = makeController();
+  const debugs: string[] = [];
+  const mqtt = new TestMqttClient({ log: { debug: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)),
+    error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined } });
+
+  // The client is injected as the double, cast at the injection site exactly as the double documents.
+  harness.controller.mqtt = mqtt as unknown as MqttClient;
+
+  harness.controller.mqttPublish("AABBCCDDEEFF/lock", "true");
+  harness.controller.mqttPublish("AABBCCDDEEFF/lock", "false", { signal: AbortSignal.abort() });
+
+  await settle();
+
+  // A publish with no options lands; one carrying an already-aborted signal is refused on that signal, which proves the options reached the client.
+  assert.deepEqual(mqtt.published, [{ payload: "true", topic: "AABBCCDDEEFF/lock" }]);
+  assert.deepEqual(debugs, ["MQTT publish aborted: AABBCCDDEEFF/lock."]);
 });

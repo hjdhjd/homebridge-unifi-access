@@ -9,7 +9,7 @@ import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcom
 import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAccessWebhookDelivery, selectDoorStates, verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
-import type { HomebridgePluginLogging, MqttClient, Nullable } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
   deviceSerial, isManagedRecord, isSupportedAccessDevice, membershipDelta, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
   webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "../policy.ts";
@@ -1194,18 +1194,20 @@ export class AccessController {
    *
    * It exists to state the optionality of MQTT once: a controller whose user configured no broker has no client at all, and every publish site in the plugin would
    * otherwise carry that question of its own. What becomes of the publish belongs to the client, which reports a genuine delivery failure at error level naming the
-   * expanded topic, and drops a cancelled one - the client tearing down, or a signal firing while the publish is in flight - to debug, since a caller whose publish
-   * has been torn down has nothing left to do with the outcome.
+   * expanded topic, and drops a cancelled one - the client tearing down, or the publish's own signal firing before or while it is in flight - to debug, since a
+   * caller whose publish has been torn down has nothing left to do with the outcome.
    *
-   * The subscribe calls stay direct on the client deliberately: registering a subscription is synchronous, returns no promise, and early-returns on an aborted
-   * signal, so no rejection class exists there.
+   * The device layer's own subscribe methods call the client directly rather than through a chokepoint here, deliberately: registering a subscription is
+   * synchronous, returns no promise, and early-returns on an aborted signal, so no rejection class exists there.
    *
    * @param topic   - The composed topic tail to publish to.
    * @param payload - The payload to publish.
+   * @param init    - The client's own per-publish options, forwarded as given. A device publishes under its own lifetime signal; a controller-scoped publish passes
+   *                  nothing, since the client is already bound to the controller's terminal signal.
    */
-  public mqttPublish(topic: string, payload: string): void {
+  public mqttPublish(topic: string, payload: string, init?: MqttPublishInit): void {
 
-    this.mqtt?.publishGuarded(topic, payload);
+    this.mqtt?.publishGuarded(topic, payload, init);
   }
 
   /**

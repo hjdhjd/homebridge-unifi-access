@@ -6,8 +6,8 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, Characteristic, CharacteristicValue, HAP, WithUUID } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessEventPacket, AccessStateDevice } from "unifi-access";
-import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, debugGatedLog, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
+import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -335,6 +335,44 @@ export abstract class AccessDevice extends AccessBase {
 
     this.listeners.set(event, handler);
     this.controller.events.on(event, handler);
+  }
+
+  /* Publish on one of this device's own topics. The identity, the catalog entry, and this device's lifetime meet here and nowhere else, so a publish site names
+   * only what it says and on which topic. The lifetime travels as the publish's own signal: a message still in flight when this device is removed is cancelled
+   * rather than delivered, and one issued after the removal is refused before it reaches the broker, each at debug, because a removed device has nothing left
+   * to announce. The controller's chokepoint is what states whether MQTT is configured at all.
+   *
+   * @param entry   - The catalog entry naming the topic tail.
+   * @param payload - The payload to publish.
+   */
+  protected mqttPublish(entry: MqttTopicEntry, payload: string): void {
+
+    this.controller.mqttPublish(mqttTopic(this.id, entry.topic), payload, { signal: this.signal });
+  }
+
+  /* Register a getter on one of this device's own topics. The topic is composed exactly as mqttPublish composes it, and the registration is bound to this
+   * device's lifetime: the client releases the handler when that lifetime ends, and drops the broker subscription where the handler was the last one on its
+   * topic, so a device removed mid-run takes its subscriptions with it and one re-adopted under the same identity never answers beside a retired instance.
+   * Plugin shutdown ends the client itself, which clears every registration at once. The entry's label is the word the client's own log lines name the value
+   * by. The call stays direct on the client rather than going through the controller: registering is synchronous and returns no promise, so there is no outcome
+   * for a chokepoint to route.
+   *
+   * @param entry    - The catalog entry naming the topic tail and the label.
+   * @param getValue - The getter answering the topic's current value.
+   */
+  protected mqttSubscribeGet(entry: MqttTopicEntry, getValue: MqttGetHandler): void {
+
+    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, entry.topic), entry.label, getValue, { signal: this.signal });
+  }
+
+  /* Register a setter on one of this device's own topics, under the same composition and the same lifetime as the getter above.
+   *
+   * @param entry    - The catalog entry naming the topic tail and the label.
+   * @param setValue - The setter receiving the topic's incoming value.
+   */
+  protected mqttSubscribeSet(entry: MqttTopicEntry, setValue: MqttSetHandler): void {
+
+    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, setValue, { signal: this.signal });
   }
 
   // Utility function to return a floating point configuration parameter on a device.

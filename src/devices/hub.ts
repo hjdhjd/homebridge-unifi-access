@@ -8,17 +8,17 @@ import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
 import type { CharacteristicValue, Service } from "homebridge";
+import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
   composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
   dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
-import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, mqttTopic, validService } from "homebridge-plugin-utils";
+import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
 import type { AccessMethodKey } from "../policy.ts";
 import { AccessReservedNames } from "../types.ts";
-import type { Nullable } from "homebridge-plugin-utils";
 import { mqttTopics } from "../mqtt.ts";
 
 // Device types that use the /configs API endpoint instead of /settings for access method changes.
@@ -67,15 +67,15 @@ const sensorInputs = [ "Rel", "Ren", "Rex" ] as const;
 // Create a union type based on our sensor inputs.
 type SensorInput = typeof sensorInputs[number];
 
-/* Each input's HomeKit-facing name and the catalog entry its MQTT topic tail comes from, in one table so that configuration and live updates cannot drift on
- * either. The tail is named here rather than spelled, so the catalog stays the one place a topic is written. The label is carried in the title case a service name
+/* Each input's HomeKit-facing name and the catalog entry its MQTT topic tail comes from, in one table so that configuration and live updates cannot drift on either.
+ * The entry is named here rather than its tail spelled, so the catalog stays the one place a topic is written. The label is carried in the title case a service name
  * wants; the log lines derive the other casings they need from it, so each input is spelled here exactly once.
  */
-const terminalInputs: { input: SensorInput; label: string; topic: string }[] = [
+const terminalInputs: { input: SensorInput; label: string; topic: MqttTopicEntry }[] = [
 
-  { input: "Rel", label: "Remote Release", topic: mqttTopics.rel.topic },
-  { input: "Ren", label: "Request to Enter Sensor", topic: mqttTopics.ren.topic },
-  { input: "Rex", label: "Request to Exit Sensor", topic: mqttTopics.rex.topic }
+  { input: "Rel", label: "Remote Release", topic: mqttTopics.rel },
+  { input: "Ren", label: "Request to Enter Sensor", topic: mqttTopics.ren },
+  { input: "Rex", label: "Request to Exit Sensor", topic: mqttTopics.rex }
 ];
 
 // The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
@@ -1511,19 +1511,13 @@ export class AccessHub extends AccessDevice {
   // Configure the MQTT topics this device answers on and listens to.
   private configureMqtt(): boolean {
 
-    /* Every registration below is bound to this device's lifetime. The client releases a handler when the signal it was registered under aborts, and drops the
-     * broker subscription when that handler was the last one on its topic, so a device removed mid-run takes its subscriptions with it and a device re-adopted
-     * under the same identity never answers beside a retired instance. Plugin shutdown ends the client itself, which clears every registration at once.
-     */
-    const lifetime = { signal: this.signal };
-
     // MQTT doorbell status.
     if(this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell")) {
 
-      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.doorbell.topic), mqttTopics.doorbell.label, () => {
+      this.mqttSubscribeGet(mqttTopics.doorbell, () => {
 
         return this.doorbellRingRequestId !== null ? "true" : "false";
-      }, lifetime);
+      });
     }
 
     // The remaining MQTT subscriptions are hub-specific (lock, DPS, side door).
@@ -1533,7 +1527,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // MQTT DPS status.
-    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.dps.topic), mqttTopics.dps.label, () => {
+    this.mqttSubscribeGet(mqttTopics.dps, () => {
 
       /* A UA Gate's door position comes from the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence predicate
        * answers false for that hardware by design, and letting it speak here would report a gate whose position we know as unknown.
@@ -1558,10 +1552,10 @@ export class AccessHub extends AccessDevice {
 
           return "unknown";
       }
-    }, lifetime);
+    });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.lock.topic), mqttTopics.lock.label, () => {
+    this.mqttSubscribeGet(mqttTopics.lock, () => {
 
       switch(this.hkLockState) {
 
@@ -1577,10 +1571,10 @@ export class AccessHub extends AccessDevice {
 
           return "unknown";
       }
-    }, lifetime);
+    });
 
     // MQTT lock status.
-    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, mqttTopics.lock.topic), mqttTopics.lock.label, (value: string) => {
+    this.mqttSubscribeSet(mqttTopics.lock, (value: string) => {
 
       switch(value) {
 
@@ -1602,12 +1596,12 @@ export class AccessHub extends AccessDevice {
 
           break;
       }
-    }, lifetime);
+    });
 
     // MQTT side door lock status (UA Gate only).
     if(this.hints.hasSideDoor) {
 
-      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.sidedoorLock.topic), mqttTopics.sidedoorLock.label, () => {
+      this.mqttSubscribeGet(mqttTopics.sidedoorLock, () => {
 
         switch(this.hkSideDoorLockState) {
 
@@ -1623,9 +1617,9 @@ export class AccessHub extends AccessDevice {
 
             return "unknown";
         }
-      }, lifetime);
+      });
 
-      this.controller.mqtt?.subscribeSet(mqttTopic(this.id, mqttTopics.sidedoorLock.topic), mqttTopics.sidedoorLock.label, (value: string) => {
+      this.mqttSubscribeSet(mqttTopics.sidedoorLock, (value: string) => {
 
         switch(value) {
 
@@ -1647,10 +1641,10 @@ export class AccessHub extends AccessDevice {
 
             break;
         }
-      }, lifetime);
+      });
 
       // MQTT side door DPS status (UA Gate only).
-      this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.sidedoorDps.topic), mqttTopics.sidedoorDps.label, () => {
+      this.mqttSubscribeGet(mqttTopics.sidedoorDps, () => {
 
         if(!this.isSideDoorDpsWired) {
 
@@ -1671,7 +1665,7 @@ export class AccessHub extends AccessDevice {
 
             return "unknown";
         }
-      }, lifetime);
+      });
     }
 
     return true;
@@ -1792,13 +1786,13 @@ export class AccessHub extends AccessDevice {
    *
    * @param isSideDoor - Whether the side door of a UA Gate is the door being announced.
    *
-   * @returns The door's rendered name and the tail of its lock topic.
+   * @returns The door's rendered name and its lock topic's catalog entry.
    */
-  #doorAnnounceIdentity(isSideDoor: boolean): { doorName: string; topicTail: string } {
+  #doorAnnounceIdentity(isSideDoor: boolean): { doorName: string; topic: MqttTopicEntry } {
 
     const doorName = this.#doorCommandName(isSideDoor);
 
-    return { doorName: doorName.charAt(0).toUpperCase() + doorName.slice(1), topicTail: isSideDoor ? mqttTopics.sidedoorLock.topic : mqttTopics.lock.topic };
+    return { doorName: doorName.charAt(0).toUpperCase() + doorName.slice(1), topic: isSideDoor ? mqttTopics.sidedoorLock : mqttTopics.lock };
   }
 
   /* Open a gate door's unlock window: the unlocked state, the announcement of it, and the relock that will end it.
@@ -1813,7 +1807,7 @@ export class AccessHub extends AccessDevice {
    */
   #openGateLockWindow(isSideDoor: boolean): void {
 
-    const { doorName, topicTail } = this.#doorAnnounceIdentity(isSideDoor);
+    const { doorName, topic } = this.#doorAnnounceIdentity(isSideDoor);
 
     if(isSideDoor) {
 
@@ -1823,7 +1817,7 @@ export class AccessHub extends AccessDevice {
       this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
     }
 
-    this.controller.mqttPublish(mqttTopic(this.id, topicTail), "false");
+    this.mqttPublish(topic, "false");
 
     if(this.hints.logLock) {
 
@@ -1853,7 +1847,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    const { doorName, topicTail } = this.#doorAnnounceIdentity(isSideDoor);
+    const { doorName, topic } = this.#doorAnnounceIdentity(isSideDoor);
 
     if(isSideDoor) {
 
@@ -1863,7 +1857,7 @@ export class AccessHub extends AccessDevice {
       this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
     }
 
-    this.controller.mqttPublish(mqttTopic(this.id, topicTail), "true");
+    this.mqttPublish(topic, "true");
 
     if(this.hints.logLock) {
 
@@ -1977,6 +1971,14 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
+    /* A removal that overtook the close while it was in flight leaves nothing here to settle. The controller accepted the command, which is what the answer
+     * reports, but the window helper would announce on behalf of a device that is gone, so it is not reached.
+     */
+    if(this.signal.aborted) {
+
+      return true;
+    }
+
     this.#closeGateLockWindow(isSideDoor);
 
     return true;
@@ -2074,6 +2076,13 @@ export class AccessHub extends AccessDevice {
         this.log.error("Unable to %s the %s: %s.", action, target.doorName, formatErrorMessage(error));
 
         return false;
+      }
+
+      // The same removal check the close command makes: an unlock the controller accepted is answered as such, but a device removed while it was in flight has no
+      // window left to open and nothing to announce it on.
+      if(this.signal.aborted) {
+
+        return true;
       }
 
       this.#openGateLockWindow(isSideDoor);
@@ -2607,7 +2616,7 @@ export class AccessHub extends AccessDevice {
         if(isSideDoor) {
 
           this.hkSideDoorLockState = newLockState;
-          this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.sidedoorLock.topic), this.isLocked(newLockState) ? "true" : "false");
+          this.mqttPublish(mqttTopics.sidedoorLock, this.isLocked(newLockState) ? "true" : "false");
 
           if(this.hints.logLock) {
 
@@ -2628,7 +2637,7 @@ export class AccessHub extends AccessDevice {
             this.#doorStateApplying = false;
           }
 
-          this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.lock.topic), this.isLocked(newLockState) ? "true" : "false");
+          this.mqttPublish(mqttTopics.lock, this.isLocked(newLockState) ? "true" : "false");
 
           if(this.hints.logLock) {
 
@@ -2654,7 +2663,7 @@ export class AccessHub extends AccessDevice {
 
           this._hkSideDoorDpsState = newDpsState;
           this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, newDpsState);
-          this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.sidedoorDps.topic), contactDetected ? "false" : "true");
+          this.mqttPublish(mqttTopics.sidedoorDps, contactDetected ? "false" : "true");
 
           if(this.hints.logDps) {
 
@@ -2663,7 +2672,7 @@ export class AccessHub extends AccessDevice {
         } else {
 
           this.hkDpsState = newDpsState;
-          this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.dps.topic), contactDetected ? "false" : "true");
+          this.mqttPublish(mqttTopics.dps, contactDetected ? "false" : "true");
 
           if((this.doorServiceType === "GarageDoorOpener") || this.hints.logDps) {
 
@@ -2701,7 +2710,7 @@ export class AccessHub extends AccessDevice {
 
       // Non-UA Gate hubs: default behavior.
       this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-      this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.lock.topic), "false");
+      this.mqttPublish(mqttTopics.lock, "false");
 
       if(this.hints.logLock) {
 
@@ -2750,7 +2759,7 @@ export class AccessHub extends AccessDevice {
 
         const contactDetected = this.isClosed(this[hkKey]);
 
-        this.controller.mqttPublish(mqttTopic(this.id, topic), contactDetected ? "false" : "true");
+        this.mqttPublish(topic, contactDetected ? "false" : "true");
 
         if(this.hints[logKey]) {
 
@@ -2959,7 +2968,7 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, true);
 
     // Publish to MQTT.
-    this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.doorbell.topic), "true");
+    this.mqttPublish(mqttTopics.doorbell, "true");
 
     if(this.hints.logDoorbell) {
 
@@ -2985,9 +2994,9 @@ export class AccessHub extends AccessDevice {
     }
 
     const attribution = unlockAttribution(delivery);
-    const topic = (door === "side") ? mqttTopics.sidedoorUnlock.topic : mqttTopics.unlock.topic;
+    const topic = (door === "side") ? mqttTopics.sidedoorUnlock : mqttTopics.unlock;
 
-    this.controller.mqttPublish(mqttTopic(this.id, topic), JSON.stringify(attribution));
+    this.mqttPublish(topic, JSON.stringify(attribution));
 
     // The sentence is composed rather than formatted in place, because the door's name is whatever an administrator called it and has no business being read as a
     // format string.
@@ -3039,7 +3048,7 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER)?.updateCharacteristic(this.hap.Characteristic.On, false);
 
     // Publish to MQTT.
-    this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.doorbell.topic), "false");
+    this.mqttPublish(mqttTopics.doorbell, "false");
 
     if(this.hints.logDoorbell) {
 
