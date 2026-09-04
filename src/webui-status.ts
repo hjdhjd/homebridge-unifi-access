@@ -7,10 +7,10 @@
  * homebridge-plugin-utils, while this module owns the Access projection - the context registry and its additive route, the connect-on-view lifecycle, the row policy,
  * and the error classification.
  *
- * The lifecycle is connect-on-view rather than a per-device connection pool, because Access devices ride a controller connection whose identity lives in the plugin
- * configuration: the browser sends the feed a context - each configured controller's identity beside the decorated serials of the devices it answered for - and a
- * view request connects to the controller serving that serial, holds one live client for the active view, and reuses it across views of the same controller. The
- * feed pushes state over the bridge as the panel's own vocabulary - rows, availability, and classified errors - so nothing Access-internal crosses the wire.
+ * The lifecycle is connect-on-view rather than a per-device connection pool, because Access devices are reached over a controller connection whose identity lives in the
+ * plugin configuration: the browser sends the feed a context - each configured controller's identity beside the decorated serials of the devices it answered for - and a
+ * view request connects to the controller serving that serial, holds one live client for the active view, and reuses it across views of the same controller. The feed
+ * pushes state over the bridge as the panel's own vocabulary - rows, availability, and classified errors - so nothing Access-internal crosses the wire.
  *
  * The child process dying with the settings modal is the primary disposal: every connection this module holds lives in this process alone, so the modal closing
  * takes it all down. The explicit disposal method exists for tests and for symmetry, not for a server call site.
@@ -462,7 +462,7 @@ export function composeStatusRows(options: { kind: "controller"; mode: AccessApi
     return [];
   }
 
-  // A reader carries no door state; availability rides the panel's own status label. What it does carry is its access methods, and a device that is neither hub
+  // A reader carries no door state; availability is shown by the panel's own status label. What it does carry is its access methods, and a device that is neither hub
   // nor reader - hardware this plugin holds no row vocabulary for - still answers with nothing.
   if(!isHub(device)) {
 
@@ -473,7 +473,7 @@ export function composeStatusRows(options: { kind: "controller"; mode: AccessApi
   const main = entries.main?.entry;
   const rows: StatusRow[] = [statusRow("lock", lockRowValue(main?.lock))];
 
-  /* The door row. A UA Gate offers it on the strength of the hardware being a gate - the same rule its HomeKit sensor rides - and labels it for what it drives;
+  /* The door row. A UA Gate offers it on the strength of the hardware being a gate - the same rule its HomeKit sensor follows - and labels it for what it drives;
    * every other family answers through the shared eligibility statement, with an ineligible family's row degrading to the placeholder dash rather than vanishing.
    */
   if(gate) {
@@ -490,7 +490,7 @@ export function composeStatusRows(options: { kind: "controller"; mode: AccessApi
     rows.push(statusRow("sidelock", lockRowValue(entries.side.entry?.lock)), statusRow("sidedoor", dpsRowValue(entries.side.entry?.dps)));
   }
 
-  // The tamper row rides the hardware capability; the reading is the record's own, through the shared policy read.
+  // The tamper row follows the hardware capability; the reading is the record's own, through the shared policy read.
   if(device.capabilities.includes("tamper_proofing")) {
 
     rows.push(statusRow("tamper", tamperRowValue(tamperState(device))));
@@ -594,7 +594,7 @@ export interface ResolvedDoors {
 }
 
 /* What a live view is about: the view kind (the controller-as-device arm or an ordinary device), the viewed device's record identity where the state holds one, and
- * the role-labeled door resolution. This is loop wiring rather than target state - it rides the view's closures, bounded by the same signal.
+ * the role-labeled door resolution. This is loop wiring rather than target state - it lives on the view's closures, bounded by the same signal.
  */
 interface ViewSubject {
 
@@ -605,7 +605,7 @@ interface ViewSubject {
 
 /* The one ACTIVE target, a discriminated union over the view lifecycle's phases. The phase split is structural: the establish path holds a session before any
  * client exists, and a flat record with a required client member cannot state that phase without an unsound cast, while a nullable client member would let a stale
- * client ride under a new address - so each phase declares exactly what it holds, and the live phase alone carries the client and the view's door resolution.
+ * client persist under a new address - so each phase declares exactly what it holds, and the live phase alone carries the client and the view's door resolution.
  */
 type StatusViewTarget =
   { address: string; phase: "connecting"; serial: DecoratedSerial; session: number; signal: AbortSignal } |
@@ -662,7 +662,7 @@ export class AccessStatusFeed {
         registry.set(serialForm(serial), entry);
       }
 
-      // The controller-as-device serial resolves through the same registry, so a view of the console itself rides its controller's entry.
+      // The controller-as-device serial resolves through the same registry, so a view of the console itself answers from its controller's entry.
       if(entry.controllerSerial !== undefined) {
 
         registry.set(entry.controllerSerial, entry);
@@ -739,7 +739,7 @@ export class AccessStatusFeed {
     }
 
     // What counts as an identity the client can connect with is the plugin's own policy. A rejection is a refusal to attempt, not a thrown failure, so it answers
-    // auth-missing rather than riding the error classifier.
+    // auth-missing rather than going through the error classifier.
     const identity = composeConnectIdentity({ password: entry.password, tokens: entry.tokens, username: entry.username });
 
     if(identity.error !== undefined) {
@@ -839,14 +839,14 @@ export class AccessStatusFeed {
 
     let lastOnline = currentOnline();
 
-    // The snapshot frame speaks the full row set. Its online member is the frame grammar's pinned literal rather than a claim about the device, and encrypted is a
+    // The snapshot frame speaks the full row set. Its online member is the frame grammar's fixed literal rather than a claim about the device, and encrypted is a
     // transport constant: the Access client connects over TLS exclusively, so there is no unencrypted mode to report.
     const pushSnapshot = (): void => {
 
       this.#emit({ encrypted: true, kind: "snapshot", online: true, rows: lastRows, serialNumber: serial, session });
     };
 
-    // The availability frame carries the device's actual liveness; the offline arm's encrypted: false is the wire union's own pin, because no transport exists.
+    // The availability frame carries the device's actual liveness; the offline arm's encrypted: false is fixed by the wire union itself, because no transport exists.
     const pushAvailability = (online: boolean): void => {
 
       this.#emit(online ? { encrypted: true, kind: "availability", online: true, serialNumber: serial, session } :
@@ -968,7 +968,7 @@ export class AccessStatusFeed {
       void runLoop(client.state.observe(selectController, { signal }));
     }
 
-    /* The connection wiring rides the monitor's purpose-built events rather than a hand-rolled read of generic state transitions. A lost controller makes the
+    /* The connection wiring goes through the monitor's purpose-built events rather than a hand-rolled read of generic state transitions. A lost controller makes the
      * device's liveness unknown, so offline is the honest render - and only the availability frame, because a state re-push would claim knowledge the feed does
      * not have. Recovery and a detected reboot both re-push the snapshot plus the truth frame, since state may have moved while the connection was down - and
      * recovered fires specifically on the return to healthy after lost, so a degraded-to-healthy wobble never triggers a spurious re-push. The subscriptions are
@@ -1031,7 +1031,7 @@ export class AccessStatusFeed {
    */
   #resolveView(client: StatusFeedClient, entry: RegistryEntry, serial: DecoratedSerial): ViewSubject {
 
-    // The controller-as-device rides its controller's client and the row policy's controller arm serves it - no door resolution applies.
+    // The controller-as-device goes through its controller's client and the row policy's controller arm serves it - no door resolution applies.
     if(serial === entry.controllerSerial) {
 
       return { kind: "controller", resolvedDoors: {} };

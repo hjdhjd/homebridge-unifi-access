@@ -143,7 +143,7 @@ test("a delivery is emitted under its own prefix and never mirrored to telemetry
 
   events.on(ACCESS_WEBHOOK_EVENT_PREFIX + ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery: unknown) => deliveries.push(delivery));
 
-  // The same name on the socket vocabulary, where an entirely different payload rides. Registering both is what proves the prefix keeps the two apart.
+  // The same name on the socket vocabulary, where an entirely different payload arrives. Registering both is what proves the prefix keeps the two apart.
   events.on(ACCESS_WEBHOOK_EVENTS.doorUnlock, (frame: unknown) => socketSide.push(frame));
 
   const delivery = { data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} }, event: ACCESS_WEBHOOK_EVENTS.doorUnlock,

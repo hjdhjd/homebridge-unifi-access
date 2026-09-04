@@ -2,7 +2,7 @@
  *
  * policy.test.ts: Tests for the Access controller's pure decision logic.
  *
- * The membership and classification fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, so what they pin is the
+ * The membership and classification fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, so what they assert is the
  * behavior the plugin actually gets rather than a test's idea of it.
  */
 /* eslint-disable camelcase */
@@ -533,7 +533,7 @@ test("a Door Mini's position flows from its topology seed and is corrected by a 
 
   assert.equal(flipped?.dps, "open", "the notification must correct the seeded position");
 
-  // The lock rides the same report. Nothing else carries a single-door hub's lock state, so a report that dropped it would strand the lock projection entirely.
+  // The lock comes from the same report. Nothing else carries a single-door hub's lock state, so a report that dropped it would strand the lock projection entirely.
   assert.equal(flipped?.lock, "unlocked");
 });
 
@@ -596,7 +596,7 @@ test("lockCommandRule maps every configured interval onto the verb that expresse
 
 test("tamperState reports what the record states and stays silent when it states nothing", () => {
 
-  // The captured shape: the condition rides an ordinary configuration row, which is what lets it reach us on the same delivery as every other record change.
+  // The captured shape: the condition is carried by an ordinary configuration row, which is what lets it reach us on the same delivery as every other record change.
   const withTamper = (value: string): AccessStateDevice => hubRecord({ configs: configs({ "tamper_event": value }) }) as unknown as AccessStateDevice;
 
   assert.equal(tamperState(withTamper("true")), true);
@@ -619,7 +619,7 @@ test("composeConnectIdentity accepts every whole identity and names every missin
   assert.equal(composeConnectIdentity({}).error, "No UniFi Access login credentials or API token have been configured.");
 
   // A tokens object carrying nothing describes no token, exactly as an absent one does. A hand-edited configuration can produce either, and the two must never
-  // answer differently...the browser's own identity predicate is pinned to this same rule.
+  // answer differently...the browser's own identity predicate follows this same rule.
   assert.equal(composeConnectIdentity({ tokens: {} }).error, "No UniFi Access login credentials or API token have been configured.");
   assert.deepEqual(composeConnectIdentity({ password: "p", tokens: {}, username: "u" }), { identity: { password: "p", username: "u" } });
 });
@@ -691,7 +691,7 @@ test("accessMethodWriteFollowup routes every verdict onto the action that serves
 
 test("doorbellTriggerAction rings and cancels only through an official path and never repeats what is already true", () => {
 
-  // Without an official path a disagreeing write is unavailable in both directions, so the caller can say why rather than silently ignoring the ask...and pinning
+  // Without an official path a disagreeing write is unavailable in both directions, so the caller can say why rather than silently ignoring the ask...and asserting
   // both directions is what keeps a decision reading the value alone from passing.
   assert.equal(doorbellTriggerAction({ officialAvailable: false, ringing: false, value: true }), "unavailable");
   assert.equal(doorbellTriggerAction({ officialAvailable: false, ringing: true, value: false }), "unavailable");
@@ -901,7 +901,7 @@ test("dpsSensorEligible answers each hardware family from its own evidence", () 
   const withDps = { dps: "close", location_id: "door1" } as AccessDoorStateEntry;
   const withoutDps = { location_id: "door1" } as AccessDoorStateEntry;
 
-  // The UA Gate refuses regardless of the entry - two contrasting entries are what pin the regardless-of-entry claim.
+  // The UA Gate refuses regardless of the entry - two contrasting entries are what prove the regardless-of-entry claim.
   assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }) as unknown as AccessStateDevice, entry: withDps }), false);
   assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }) as unknown as AccessStateDevice, entry: withoutDps }), false);
 

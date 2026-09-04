@@ -38,7 +38,7 @@ const byName = (a, b) => {
  *
  * The payload arrives grouped by the door each device serves. That grouping is real information the library deliberately preserves, and it is not information this
  * page uses, so it is flattened here rather than upstream. The official record carries a hardware type and no display model at all, so the display model comes from
- * the plugin's own policy mapping - reached through the same dist import the identity composition rides - and a type the mapping does not name answers itself.
+ * the plugin's own policy mapping - reached through the same dist import that carries the identity composition - and a type the mapping does not name answers itself.
  *
  * There is no address on this surface, so the rendered IP row is empty for these devices. That is the honest answer: the official API does not report one.
  */
@@ -75,7 +75,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
     this.ready();
 
     // Introduce this fresh adapter process to any surviving panel: a hello carrying this process's generation lets a page that outlived a helper restart clear its
-    // stale token floors and re-elicit its context and view. Delivery is advisory - it rides the same push relay every status event does. Placed after ready() so
+    // stale token floors and re-elicit its context and view. Delivery is advisory - it goes through the same push relay every status event does. Placed after ready() so
     // the bridge channel is as established as the adapter can make it before the introduction goes out.
     this.pushEvent(STATUS_EVENT, { generation, kind: "hello" });
   }
@@ -183,7 +183,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
            * empty set - which is what lets a token-only user configure per-device options in the very keyspace the runtime resolves, ready the moment credentials
            * are added.
            *
-           * No controller row rides this arm. The official surface exposes no console identity at all, and inventing one would put option entries under a key
+           * No controller row comes out of this arm. The official surface exposes no console identity at all, and inventing one would put option entries under a key
            * nothing can read.
            */
           if(!controllerInfo) {
@@ -214,7 +214,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
           };
           /* eslint-enable camelcase */
 
-          /* The devices this plugin projects into HomeKit, listed through the same statement the runtime's own membership rides: an Enterprise hub's ports are
+          /* The devices this plugin projects into HomeKit, listed through the same statement the runtime's own membership comes from: an Enterprise hub's ports are
            * listed as the devices they become, and the building-hosted parent, which never becomes an accessory, is not. Each is decorated with the plugin's
            * device identity, computed by the function the runtime keys every read on, so what the webUI writes an option entry against is what the plugin reads
            * it back by...the browser can reach neither statement to derive one for itself.

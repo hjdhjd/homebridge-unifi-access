@@ -48,7 +48,7 @@ export const controllers = (config) => (Array.isArray(config?.controllers) ? con
 export const primaryController = (config) => controllers(config)[0];
 
 /* Whether a controller item describes an identity the plugin can connect with, which is the browser-side statement of the plugin's own composeConnectIdentity rule
- * and is pinned against it by this module's test suite.
+ * and is checked against it by this module's test suite.
  *
  * The rule reads in one order and that order is the whole of it: a complete credential pair is an identity, with or without a token beside it; half a pair describes
  * no way of authenticating and is rejected BEFORE the token is ever considered, so a username with no password is invalid even with a perfectly good token in the
@@ -89,7 +89,7 @@ export const classifyProbeResponse = (response) => {
 
   switch(response?.kind) {
 
-    // Both successes carry a device list, so one arm validates the shape for each and the tag rides through to tell the two apart downstream.
+    // Both successes carry a device list, so one arm validates the shape for each and the tag is carried through to tell the two apart downstream.
     case "connected":
     case "token-only":
 
@@ -238,7 +238,7 @@ const expandedOptionNames = (catalog) => {
  * gone for good. An empty MAC set therefore carries no options array at all, which leaves every configured entry exactly where it was.
  *
  * What an entry addresses is decided by the framework's own entry enumerator rather than by any reading of the entry's text. Several spellings resolve to one scope
- * - a bare enable or disable, the canonical form whose value rides behind the payload delimiter, and the legacy dot form - and a sweep that matched only the
+ * - a bare enable or disable, the canonical form whose value sits behind the payload delimiter, and the legacy dot form - and a sweep that matched only the
  * canonical one would leave a removed controller's settings behind in the others. Each entry is enumerated on its own against every option the catalog declares, so
  * the answer is the same grammar the plugin's runtime resolves through. The bound that buys: an entry addressing an option the catalog does not declare is left
  * standing, which is the right answer anyway, since nothing in this plugin can resolve such an entry either.
@@ -325,7 +325,7 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
     return !defaultsOn(option) || (value !== registeredDefault(option));
   };
 
-  // Whether a rebuilt successor carries exactly what the item it replaces carried. This decides whether the controllers array rides the patch at all, and it is what
+  // Whether a rebuilt successor carries exactly what the item it replaces carried. This decides whether the controllers array joins the patch at all, and it is what
   // makes the rewrite converge: once every item is already its own allowlisted shape, no successor differs and a later pass leaves the array alone.
   const unchanged = (item, successor) => {
 
@@ -344,7 +344,7 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
      * ahead of the fallback. The property still leaves in that case, because two homes for one setting is the thing this migration exists to end.
      *
      * A property needs the controller's MAC address, which only a controller that answered this pass can supply, so an item whose address is absent from the map
-     * keeps its per-controller keys unchanged and converges at a later open. Everything composes through ONE engine and rides ONE options array, because each engine
+     * keeps its per-controller keys unchanged and converges at a later open. Everything composes through ONE engine and lands in ONE options array, because each engine
      * answers `configuredOptions` as its own complete snapshot: two writers would each produce a whole array and the shallow-merge commit would keep only the last
      * of them, silently discarding everything the other one composed.
      *

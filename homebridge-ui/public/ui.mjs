@@ -50,7 +50,7 @@ const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 
 /* The option catalog, fetched once per session from the plugin's own UI server (a local request to /getOptions, never a cloud call). The framework fetches the same
  * endpoint for its own catalog on every show cycle; the two reads are independent by design, since the framework exposes no handle to its copy. The cached promise is
- * cleared on failure so a later read retries rather than pinning a transient fault for the session, and the bound above is what makes a call that never answers into
+ * cleared on failure so a later read retries rather than holding a transient fault for the session, and the bound above is what makes a call that never answers into
  * a failure the clear can act on.
  *
  * What is cached is the framework's own catalog INDEX rather than the raw response. The index carries the served categories and options verbatim alongside the
@@ -109,7 +109,7 @@ const firstRunOnStart = ({ config }) => {
   return true;
 };
 
-/* The classes the login result line wears in every state. The tone rides on top of this base, so the line's blank, failure, and success states are one layout with
+/* The classes the login result line wears in every state. The tone layers on top of this base, so the line's blank, failure, and success states are one layout with
  * one color decision between them rather than a separate class string per state, which is what would let the states drift apart.
  */
 const LOGIN_RESULT_CLASS = "hbua-result small mt-2";
@@ -288,11 +288,11 @@ let cacheGeneration = 0;
 
 /* Send the live-status feed its controller context: for each configured controller this session holds a kept probe answer for, the identity members exactly as the
  * configuration item spells them, the decorated serials of the answer's devices, and the decorated serial of the answer's controller record where one exists - a
- * token-only answer carries no console identity, so that member is honestly absent. The send rides every devicesByAddress write, the removal delete included, so
+ * token-only answer carries no console identity, so that member is honestly absent. The send follows every devicesByAddress write, the removal delete included, so
  * the feed's registry tracks what this session knows; the feed rebuilds its registry wholesale from each send.
  *
  * The raw request promise feeds the shared panel's link-lost watchdog directly, on the donor discipline the family's status pages share: the watch observes the raw
- * promise so a rejection reaches its two-armed hook as a rejection, the console diagnostic rides a separate chain off the same promise, and the panel handle is read
+ * promise so a rejection reaches its two-armed hook as a rejection, the console diagnostic runs on a separate chain off the same promise, and the panel handle is read
  * at call time because it is minted per show() and must never be captured. The settle is awaited so the one caller that must sequence behind the send - the hello
  * re-elicitation - can; every other call site voids the promise, and the swallow keeps a failure from surfacing twice.
  */
@@ -742,7 +742,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
 /* Validate a card's connection and persist it, which is the whole of what Save means.
  *
  * Validation comes first and a failure writes nothing at all: a controller the plugin cannot connect to is not a configuration worth saving, and the card's own
- * verdict line already says why. The write then opens a session of its own rather than riding the feature-options page's long-lived one, because that page's
+ * verdict line already says why. The write then opens a session of its own rather than reusing the feature-options page's long-lived one, because that page's
  * session is driven by its debounced option-persist effect and a card has no business staging anything behind it.
  *
  * The re-entry through refreshControllers() at the end is a correctness step rather than a repaint. The page's own session holds a replica of the configuration
@@ -868,7 +868,7 @@ const removeController = async ({ address, card, macs }) => {
 
 /* Mount a card that edits a controller already in the configuration, in whichever home the caller names.
  *
- * Each home differs in where it sits and in what a removal can offer, and in nothing else. The docked editor rides a reachable controller's own stats panel
+ * Each home differs in where it sits and in what a removal can offer, and in nothing else. The docked editor sits in a reachable controller's own stats panel
  * and can strip the settings of every device that controller answered with; the editor the connection-error view hosts reaches a controller the page has no device
  * list for, where removal is offered on its own. Both correlate to a configuration item by address, both validate before they write, and both follow the address
  * they wrote so a second save edits the same item rather than appending a duplicate beside it.
@@ -1000,7 +1000,7 @@ const showControllerErrorPanel = ({ controller, panel, signal }) => {
  *
  * Subdividing the dock is what honors mountControllerEditor's ownership contract: its container is the element the editor owns entirely, and its mount
  * replaceChildren()s that container - so the token-only notice lives in a region of its own above the editor's, where the editor's mount can never wipe it. The
- * remembered serial rides the mount pair rather than bare module state, so a fresh mount starts with no remembered serial and a stale one can never leak a stray
+ * remembered serial lives on the mount pair rather than bare module state, so a fresh mount starts with no remembered serial and a stale one can never leak a stray
  * re-view across a remount; the hello re-elicitation reads it from the CURRENT mount pair.
  */
 let detailsPanel = null;
@@ -1047,7 +1047,7 @@ const showAccessDetails = ({ device, panel, signal }) => {
   // editor is offered.
   const tokenOnly = Boolean(device) && (devicesByAddress.get(device.hbuaConfigAddress)?.kind === "token-only");
 
-  /* The docked editor rides the controller's own node, and every node of a token-only controller. A credentialed controller answers with a record of its own, so
+  /* The docked editor sits on the controller's own node, and every node of a token-only controller. A credentialed controller answers with a record of its own, so
    * its node is the one place its connection is edited and a device render leaves the editor out of sight - a device is not a thing whose connection can be edited.
    * A token-only controller has no record of its own to select, so the editor is offered from wherever the user is instead of from a node that does not exist. It is
    * created once per mount and only toggled here, which is what keeps its wiring alive across the selection changes that repaint the panel beside it.

@@ -4,7 +4,7 @@
  * the emit chokepoint's session guard, the frame identity convention, the resolution layer, and the connection wiring.
  *
  * The fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, and the client boundary is an injected stub wrapped
- * around that real store, so what the arms pin is the behavior the plugin actually gets. The device MAC addresses are deliberately colon-bearing lowercase - the
+ * around that real store, so what the arms assert is the behavior the plugin actually gets. The device MAC addresses are deliberately colon-bearing lowercase - the
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
 /* eslint-disable camelcase */
@@ -30,7 +30,7 @@ const SERIAL_TWO = "AABBCCDDEE02";
 // The controller address every fixture's registry entry carries.
 const ADDRESS = "192.0.2.10";
 
-// The uptime, in seconds, that renders as "127d 14h" - the formatter's pinned arithmetic input.
+// The uptime, in seconds, that renders as "127d 14h" - the formatter's fixed arithmetic input.
 const UPTIME_127D_14H = 11023200;
 
 // Build a minimal topology document carrying doors, each with its serving devices. Only the members the reducer and the selectors read are meaningful; the rest
@@ -107,7 +107,7 @@ function doorEvent(doorId: string, state: Record<string, unknown>): NonNullable<
 
   const packet = {
 
-    // The captured location-update shape carries the full member set; the classifier keys on it, so the defaults ride every dispatch and a caller's members
+    // The captured location-update shape carries the full member set; the classifier keys on it, so every dispatch carries the defaults and a caller's members
     // layer over them.
     data: { id: doorId, location_type: "door", name: "Door " + doorId,
       state: { dps_connected: true, emergency: { hardware: "none", software: "none" }, is_unavailable: false, ...state } },
@@ -318,7 +318,7 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
 
 test("formatUptime renders the two largest units that apply and degrades null to absence", () => {
 
-  // The pinned day-tier arithmetic: a wrong day divisor must go red here, not render plausibly.
+  // The day-tier arithmetic this arm locks in: a wrong day divisor must go red here, not render plausibly.
   assert.equal(formatUptime(UPTIME_127D_14H), "127d 14h");
 
   assert.equal(formatUptime(3660), "1h 1m");
@@ -340,7 +340,7 @@ test("the row policy answers a wired hub's rows from the entry the store establi
 
   const entry = selectDoorStates(state).get("door1");
 
-  // The wiring pair reads live and the input reads closed, so the seeded entry answers both rows - and no tamper row rides a hub without the capability.
+  // The wiring pair reads live and the input reads closed, so the seeded entry answers both rows - and no tamper row appears on a hub without the capability.
   assert.deepEqual(idValues(composeStatusRows({ device, entries: { main: { entry } }, kind: "device", state })), [ [ "lock", "Locked" ], [ "door", "Closed" ] ]);
 });
 
@@ -685,7 +685,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   assert.equal(offline.online, false);
   assert.equal(offline.encrypted, false);
 
-  // An unrelated door's change wakes nothing: the per-entry selector rides the reducer's reference stability, so the viewed serial stays silent.
+  // An unrelated door's change wakes nothing: the per-entry selector relies on the reducer's reference stability, so the viewed serial stays silent.
   frames.length = 0;
   store.dispatch(doorEvent("door2", { dps: "open", dps_connected: true, lock: "unlocked" }));
   await settle();
@@ -693,7 +693,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   assert.deepEqual(forSerial(frames, SERIAL_ONE), []);
 });
 
-test("a row set that grows mid-view is pushed as a fresh snapshot, where a value moving inside a fixed set rides a row frame", async () => {
+test("a row set that grows mid-view is pushed as a fresh snapshot, where a value moving inside a fixed set goes out as a row frame", async () => {
 
   const store = createStateStore({});
   const tamperCapable = { capabilities: [ "is_hub", "dps_alarm", "tamper_proofing" ] };
@@ -941,7 +941,7 @@ test("a superseded establish emits nothing for its session and releases the clie
   assert.deepEqual(forSerial(frames, SERIAL_ONE).map((frame) => frame.kind), ["connecting"]);
   assert.equal(disposeCount(), 1);
 
-  // The bypass polarity that keeps the pin non-vacuous: the same sequence WITHOUT the supersession pushes the snapshot.
+  // The bypass polarity that keeps the assertion non-vacuous: the same sequence WITHOUT the supersession pushes the snapshot.
   const plainFrames: StatusEvent[] = [];
   const plainRig = makeClient(store, [{ doorId: "door1", record }]);
   const plainFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => plainRig.client, log: noopLog,
@@ -1192,7 +1192,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
   const frames: StatusEvent[] = [];
   const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
 
-  // The console's serial rides ONLY the controllerSerial member - it is deliberately not in serials - so a feed without the controller routing answers not-found
+  // The console's serial is carried ONLY by the controllerSerial member - it is deliberately not in serials - so a feed without the controller routing answers not-found
   // here by construction. The colon-bearing spelling exercises the context boundary's normalization of this member too.
   feed.context(contextRequest([SERIAL_ONE], { controllerSerial: "aa:bb:cc:00:00:99" }));
 

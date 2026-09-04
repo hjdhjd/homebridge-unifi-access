@@ -12,7 +12,7 @@ import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// The catalog entry a category and option name address, asserted to exist so each pin below reads an entry rather than a nullable one.
+// The catalog entry a category and option name address, asserted to exist so each check below reads an entry rather than a nullable one.
 function entryFor(category: string, name: string): AccessFeatureOption {
 
   const entry = (featureOptions[category] ?? []).find(option => option.name === name);
@@ -69,7 +69,7 @@ test("the doorbell family is gated on the doorbell capability", () => {
 
   for(const name of [ "Doorbell", "Doorbell.DoorGuards", "Doorbell.Trigger" ]) {
 
-    assert.deepEqual(entryFor("Hub", name).meta, { hasCapability: ["door_bell"] }, "Hub." + name + " rides the doorbell capability and nothing else");
+    assert.deepEqual(entryFor("Hub", name).meta, { hasCapability: ["door_bell"] }, "Hub." + name + " declares the doorbell capability and nothing else");
   }
 
   assert.deepEqual(entryFor("Log", "Doorbell").meta, { hasCapability: ["door_bell"] }, "the logging option for the same events is gated identically");

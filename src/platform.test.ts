@@ -35,7 +35,7 @@ function makeHarness(): Harness {
   const registered: string[] = [];
   const unregistered: string[] = [];
 
-  // Every line rendered exactly as the user reads it, which is what lets an arm pin a removal's own sentence rather than the format string behind it.
+  // Every line rendered exactly as the user reads it, which is what lets an arm assert a removal's own sentence rather than the format string behind it.
   const log = {
 
     debug: (message: string, ...parameters: unknown[]): void => { lines.push("debug: " + format(message, ...parameters)); },
@@ -115,7 +115,7 @@ test("a line that speaks for the plugin as a whole answers the global debug entr
 
   platform.debug("Plugin wide.");
 
-  /* The line rides the warn channel, which Homebridge prints whether or not its own debug switch is set, and it carries no owner name...a line speaking for the
+  /* The line goes out on the warn channel, which Homebridge prints whether or not its own debug switch is set, and it carries no owner name...a line speaking for the
    * plugin as a whole has neither a device nor a controller to attribute it to.
    */
   assert.deepEqual(enabled.lines, ["warn: Plugin wide."]);
@@ -390,7 +390,7 @@ test("a disabled controller contributes its keys and is never asked for claims",
   const disabled = { reclaimClaims: (): MembershipClaims => { throw new Error("A disabled controller must never be asked what it projects."); },
     reclaimKeys: { currentKey: "5.6.7.8", priorKey: undefined } } as unknown as AccessController;
 
-  /* This pins the decision's letter at this layer rather than a production scenario: by the time the pass runs, a controller the user disabled has already taken
+  /* This asserts the decision's letter at this layer rather than a production scenario: by the time the pass runs, a controller the user disabled has already taken
    * every accessory its keys would spare out of HomeKit, so the first fixture is constructible only with a double.
    */
   platform.accessories.push(

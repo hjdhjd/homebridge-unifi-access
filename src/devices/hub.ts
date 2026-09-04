@@ -300,7 +300,7 @@ export class AccessHub extends AccessDevice {
    *
    * Every seed here reaches HomeKit rather than the backing field alone. This runs after the services are configured, and the relay rows they were built from can
    * disagree with what the door state map says - so a characteristic left holding the record's reading would render a stale door until that door next moved. The
-   * locks ride their setters, whose early return on an agreeing reading makes the two sources agreeing cost nothing; the side door's position has no accessor pair,
+   * locks go through their setters, whose early return on an agreeing reading makes the two sources agreeing cost nothing; the side door's position has no accessor pair,
    * so it takes the file's own idiom for that field - the assignment followed by an explicit push. Adoption stays silent throughout, with no MQTT tail and no log
    * line, because a reading we are seeing for the first time is not a transition anyone observed.
    */
@@ -425,7 +425,7 @@ export class AccessHub extends AccessDevice {
     this.registerListener("access.remote_view", handler);
     this.registerListener("access.remote_view.change", handler);
 
-    // Listen for the two webhook deliveries this plugin consumes. They ride their own rail rather than the packet handler above, because a delivery and a socket
+    // Listen for the two webhook deliveries this plugin consumes. They go through their own rail rather than the packet handler above, because a delivery and a socket
     // frame of the same name carry entirely different payloads.
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
@@ -1535,7 +1535,7 @@ export class AccessHub extends AccessDevice {
     // MQTT DPS status.
     this.controller.mqtt?.subscribeGet(mqttTopic(this.id, mqttTopics.dps.topic), mqttTopics.dps.label, () => {
 
-      /* A UA Gate's door position rides the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence predicate
+      /* A UA Gate's door position comes from the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence predicate
        * answers false for that hardware by design, and letting it speak here would report a gate whose position we know as unknown.
        */
       if((this.uda.device_type !== "UGT") && !this.dpsEvidence) {
@@ -2583,7 +2583,7 @@ export class AccessHub extends AccessDevice {
   private applyDoorState(doorState: { dps?: string; lock?: string }, isSideDoor: boolean): void {
 
     const doorName = isSideDoor ? "Side door" : "";
-    // Whether this delivery moved anything at all, which is what the opener's own update below rides.
+    // Whether this delivery moved anything at all, which is what the opener's own update below reads.
     let changed = false;
 
     // Update lock state.

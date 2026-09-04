@@ -183,8 +183,8 @@ export class AccessController {
 
     /* The unifi-access client logger. The library logs complete sentences with structured context attached as trailing parameters, and rendering that context inline
      * would put raw object dumps in front of the user - so each non-debug level emits the sentence alone at its level and echoes the full line, context included, to
-     * debug, where the forensic detail belongs. Every level rides our own logger, so a library line is attributable to the controller that produced it exactly as the
-     * lines we write ourselves are, and the echo answers to the debug gate. Error output is additionally gated by logApiErrors so teardown noise stays quiet, while
+     * debug, where the forensic detail belongs. Every level goes through our own logger, so a library line is attributable to the controller that produced it exactly as
+     * the lines we write ourselves are, and the echo answers to the debug gate. Error output is additionally gated by logApiErrors so teardown noise stays quiet, while
      * the echo is left out of that gate so debug logging captures the full record even where the user-facing line is suppressed.
      */
     const routeClientContext = (write: (message: string) => void): ((message: string, ...parameters: unknown[]) => void) => {
@@ -748,7 +748,7 @@ export class AccessController {
     }
   }
 
-  // Whether the terminal shutdown signal has fired. Read through a method so each caller re-reads the live signal rather than a snapshot an earlier bail pinned.
+  // Whether the terminal shutdown signal has fired. Read through a method so each caller re-reads the live signal rather than a snapshot an earlier bail captured.
   #isShuttingDown(): boolean {
 
     return this.signal.aborted;

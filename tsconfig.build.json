@@ -2,7 +2,7 @@
  *
  * tsconfig.build.json: The emit configuration, which is the base configuration less everything that exists only to be run in place.
  *
- * The base tsconfig keeps the test files so the typechecker and the editor cover them - the type-level pins are only enforced by a typecheck, since the test runner
+ * The base tsconfig keeps the test files so the typechecker and the editor cover them - the type-level assertions are only enforced by a typecheck, since the test runner
  * strips types without checking them. This configuration is what emits, so it excludes them and dist carries the plugin alone.
  */
 {

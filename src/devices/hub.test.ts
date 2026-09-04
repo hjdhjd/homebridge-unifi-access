@@ -31,17 +31,17 @@ import test from "node:test";
 // The door this hub drives, and the reader hanging off it, in the identities the live captures use.
 const HUB_ID = "74acb9d55b9c";
 const HUB_MAC = "aabbccddee01";
-// The identity the plugin addresses this hub by, written as a literal so the pin proves the spelling rather than agreeing with whatever the composition answers.
+// The identity the plugin addresses this hub by, written as a literal so the assertion proves the spelling rather than agreeing with whatever the composition answers.
 const HUB_SERIAL = "AABBCCDDEE01";
 const MAIN_DOOR = "740785e0-ef1d-4a2b-a720-3c8804feea9c";
 const SIDE_DOOR = "8f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
 const READER_ID = "d8b3706bb73b";
 
-// The identity every unlock this plugin sends names itself by, written as a literal so the pins prove the spelling rather than agreeing with whatever the constant
+// The identity every unlock this plugin sends names itself by, written as a literal so the assertions prove the spelling rather than agreeing with whatever the constant
 // behind them answers.
 const UNLOCK_ACTOR = { id: "homebridge-unifi-access", name: "Homebridge" };
 
-// The pause the plugin gives HomeKit's own write before putting a refused characteristic back, and the delay a UA Gate's self-managed relock rides.
+// The pause the plugin gives HomeKit's own write before putting a refused characteristic back, and the delay a UA Gate's self-managed relock uses.
 const REVERT_DELAY_MS = 50;
 const RELOCK_DELAY_MS = 5000;
 
@@ -374,7 +374,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   };
 }
 
-// A UA Gate with both of its doors discovered and a credentialed client behind it, which is what the location endpoint its opening direction rides needs.
+// A UA Gate with both of its doors discovered and a credentialed client behind it, which is what the location endpoint behind its opening direction needs.
 function makeGate(options: HubOptions = {}): HubHarness {
 
   return makeHub({ credentials: true, doors: [ { name: "Main Gate", unique_id: MAIN_DOOR }, { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ],
@@ -480,7 +480,7 @@ function accessMethodPacket(value: string): unknown {
 }
 
 /* Everything a hub published on one of its lock topics, in the order it published it. An unlock window is a sequence rather than a set - it opens, it ends, and an
- * arm about it has to see a repeat or a stranded half - so the payloads are read as a list and pinned exactly.
+ * arm about it has to see a repeat or a stranded half - so the payloads are read as a list and asserted exactly.
  *
  * @param harness - The hub to read.
  * @param tail    - The lock topic to read, the main door's unless the side door's is named.
@@ -661,7 +661,7 @@ test("a UA Gate publishes its side door's unlocks under the side door's own topi
 
   assert.deepEqual(gate.publishes.map(published => published.topic), [HUB_SERIAL + "/sidedoor/unlock"]);
 
-  // And the main gate still rides the main tail, so the two doors of one accessory stay told apart.
+  // And the main gate still publishes on the main tail, so the two doors of one accessory stay told apart.
   gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: MAIN_DOOR, doorName: "Main Gate" }));
 
   assert.deepEqual(gate.publishes.map(published => published.topic), [ HUB_SERIAL + "/sidedoor/unlock", HUB_SERIAL + "/unlock" ]);
@@ -1358,13 +1358,13 @@ test("a UA Gate's opener closes through the close command and opens through the 
 
   await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
 
-  // The opening direction is the library's unlock, naming the gate's own door for the same reason the close does, and with no close riding along beside it.
+  // The opening direction is the library's unlock, naming the gate's own door for the same reason the close does, and with no close sent along beside it.
   assert.deepEqual(opening.commands, [{ options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }]);
 
-  /* Both directions leave the endpoint the plugin once composed for itself untouched. The pin is the negative control against a half-finished migration: a door
+  /* Both directions leave the endpoint the plugin once composed for itself untouched. The assertion is the negative control against a half-finished migration: a door
    * command that still reached for the Access application's own endpoint would show up here rather than passing quietly.
    */
-  assert.equal(opening.requests.length, 0, "the opening direction rides the library's rail rather than an endpoint composed here");
+  assert.equal(opening.requests.length, 0, "the opening direction goes through the library's rail rather than an endpoint composed here");
 });
 
 test("a garage door opener on a door hub closes with the momentary pulse, on a credentialed client and a token-only one alike", async () => {
@@ -1413,7 +1413,7 @@ test("a refused close puts a gate's opener back and leaves the lock state and th
   assert.equal(opener.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "a close the controller refused never locks the door behind HomeKit's back");
 
-  // The unlock rode the library's own rail, and the close that followed it was dispatched and refused rather than never sent.
+  // The unlock went through the library's own rail, and the close that followed it was dispatched and refused rather than never sent.
   assert.deepEqual(gate.commands, [ { options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }, { options: { doorId: MAIN_DOOR }, verb: "close" } ]);
 
   // A close nobody accepted ends no window, so the topic still stands where the unlock left it rather than announcing a gate that never locked.
@@ -1550,7 +1550,7 @@ test("a UA Gate's own lock automation trigger closes the gate", async () => {
 test("a UA Gate opens for a client that holds only an API token", async () => {
 
   /* The client behind this gate holds no credentials at all. Which rail carries the unlock is the library's own decision, and its own suite's to prove; what this
-   * arm pins is that the plugin hands the unlock over whatever identity the client holds, rather than refusing an identity of its own accord.
+   * arm asserts is that the plugin hands the unlock over whatever identity the client holds, rather than refusing an identity of its own accord.
    */
   const gate = makeGate({ credentials: false, official: true });
 
@@ -1574,7 +1574,7 @@ test("every unlock names Homebridge as the actor behind it, whether or not it na
    */
   assert.deepEqual(gate.commands, [{ options: { actor: { id: "homebridge-unifi-access", name: "Homebridge" }, doorId: MAIN_DOOR }, verb: "unlock" }]);
 
-  // The same identity rides an unlock that names no door at all, which is what a door hub sends for its momentary pulse.
+  // The same identity goes out on an unlock that names no door at all, which is what a door hub sends for its momentary pulse.
   assert.deepEqual(await openerDispatch({}, Characteristic.TargetDoorState.OPEN),
     [{ options: { actor: { id: "homebridge-unifi-access", name: "Homebridge" } }, verb: "unlock" }]);
 });
@@ -1584,7 +1584,7 @@ test("an unlock a client cannot attribute is sent again unattributed, and opens 
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
   /* The refusal the library raises, and the sentence the plugin composes from it. The shared formatter drops the message's own full stop, so the composed line
-   * ends with exactly one...spelling the expectation out rather than rebuilding it here is what makes that the pin.
+   * ends with exactly one...spelling the expectation out rather than rebuilding it here is what makes that the assertion.
    */
   const refusal = "This UniFi Access client cannot carry an unlock attributed to an actor.";
   const noted = LOG_PREFIX + "The attributed unlock was refused, so it is being sent unattributed: This UniFi Access client cannot carry an unlock attributed " +
@@ -1606,7 +1606,7 @@ test("an unlock a client cannot attribute is sent again unattributed, and opens 
   assert.equal(lineCount(gate, "Gate unlocked."), 1);
 
   /* What the user reads is nothing at all. An attribution the client cannot carry is the library's own routing decision rather than a fault of the unlock, so the
-   * fallback is worth a note and nothing louder...and pinning the whole of what was said is what proves nothing was said beside it.
+   * fallback is worth a note and nothing louder...and asserting the whole of what was said is what proves nothing was said beside it.
    */
   assert.deepEqual(gate.errors, [], "a fallback the library asked for is not an error the user has to read");
   assert.deepEqual(gate.debugs, [noted], "the fallback speaks once, at debug, and nothing louder is said beside it");
@@ -1958,7 +1958,7 @@ test("a halted door resumes the direction its own hardware answers to: a gate th
     // The resume is the unlock again, exactly as an opening write from a standstill is, with the halt between the two.
     assert.deepEqual(opening.commands, [ { options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }, { options: { doorId: MAIN_DOOR }, verb: "stop" },
       { options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" } ]);
-    assert.equal(opening.requests.length, 0, "every one of the three rides the library's own rail");
+    assert.equal(opening.requests.length, 0, "every one of the three goes through the library's own rail");
 
     // And the mirror: halted while closing, asked to close again.
     const closing = makeGate();

@@ -1,12 +1,12 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * access-config.test.ts: The webUI's per-controller legacy-settings migration and its configuration interpreters, exercised against the REAL feature-option engine
- * and the REAL served catalog, so the pins bind to the same grammar the plugin's runtime resolves against rather than to a stand-in that could drift from either.
+ * and the REAL served catalog, so the assertions bind to the same grammar the plugin's runtime resolves against rather than to a stand-in that could drift from either.
  *
  * A controllers[] item key deletes by OMISSION from the successor the migration rebuilds, never by being carried as an explicitly undefined value, so what gets
  * asserted throughout is a key's ABSENCE from the rebuilt item rather than a comparison against undefined.
  *
- * Post-migration state resolves through the engine's own instruments rather than by matching entry strings, so a pin binds to the option grammar instead of to one
+ * Post-migration state resolves through the engine's own instruments rather than by matching entry strings, so an assertion binds to the option grammar instead of to one
  * spelling of it. The closing round trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a
  * migrated configuration runs on the same effective values the legacy one did.
  */
@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { composeConnectIdentity } from "./policy.ts";
 import test from "node:test";
 
-// The controller these pins migrate, a sibling that proves one controller's entries never answer for another, and a device beneath the first for the scope corner.
+// The controller these assertions migrate, a sibling that proves one controller's entries never answer for another, and a device beneath the first for the scope corner.
 const CONTROLLER_MAC = "AABBCCDDEEFF";
 const OTHER_MAC = "112233445566";
 const DEVICE_MAC = "0123456789AB";
@@ -33,7 +33,7 @@ const TOKEN = "an-access-console-api-token";
 const TOKENS = { access: TOKEN };
 const CREDENTIALS = { address: ADDRESS, password: "correct horse battery", username: "access@example.com" };
 
-// The legacy values these pins carry, each deliberately different from its option's registered default.
+// The legacy values these assertions carry, each deliberately different from its option's registered default.
 const LEGACY_BROKER = "mqtt://127.0.0.1:1883";
 const LEGACY_TOPIC = "home/access";
 
@@ -47,8 +47,8 @@ const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 // The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index, and the framework's own entry enumerator.
 const accessConfig = makeAccessConfig({ FeatureOptions, catalog, enumerateConfiguredEntries });
 
-// The configuration shapes these pins build. The module's own declaration types every property as unknown, which is the honest shape of a hand-editable config
-// file...narrowing the fields the pins read back keeps the assertions free of casts without weakening anything the interpreters are handed.
+// The configuration shapes these tests build. The module's own declaration types every property as unknown, which is the honest shape of a hand-editable config
+// file...narrowing the fields these tests read back keeps the assertions free of casts without weakening anything the interpreters are handed.
 type TestConfig = AccessConfig & { controllers?: AccessControllerConfig[]; options?: string[] };
 
 // A feature-option engine over the real catalog and the supplied entries, which is how every post-migration assertion here resolves an option.
@@ -57,7 +57,7 @@ function engineWith(options: string[] = []): FeatureOptions {
   return new FeatureOptions(featureOptionCategories, featureOptions, options);
 }
 
-// One configured entry, composed through the engine's own setOption rather than hand-typed, so a pin that starts from an existing entry starts from the canonical
+// One configured entry, composed through the engine's own setOption rather than hand-typed, so an assertion that starts from an existing entry starts from the canonical
 // form the engine itself would have written.
 function composedEntry(args: { enabled: boolean; id?: string; option: string; value?: string }): string {
 
@@ -72,13 +72,13 @@ function composedEntry(args: { enabled: boolean; id?: string; option: string; va
   return entry;
 }
 
-// The session's shallow-merge commit, in the one line these pins need of it: the controllers array and the options array each replace wholesale.
+// The session's shallow-merge commit, in the one line these assertions need of it: the controllers array and the options array each replace wholesale.
 function applyPatch(config: TestConfig, patch: AccessConfigPatch): TestConfig {
 
   return { ...config, ...patch };
 }
 
-// The patch a configuration migrates to, asserted to exist so each pin below reads a patch rather than a nullable one.
+// The patch a configuration migrates to, asserted to exist so each check below reads a patch rather than a nullable one.
 function migrated(config: TestConfig, macByAddress: ReadonlyMap<string, string> = UNRESOLVED): AccessConfigPatch {
 
   const patch = accessConfig.migrate(config, macByAddress);
@@ -130,7 +130,7 @@ test("a per-controller display name survives the rebuild", () => {
 
 test("the controller allowlist accounts for every property the controller options type declares", () => {
 
-  /* The compile-time half of this pin, read in both directions, is the pair of annotated assignments below - the runtime assertions after them only name what the
+  /* The compile-time half of this check, read in both directions, is the pair of annotated assignments below - the runtime assertions after them only name what the
    * annotations already enforce. The first proves every allowlisted key is a property AccessControllerOptions declares. The second proves the only properties the
    * allowlist omits are the two that migrate, so a controller property added to the type without joining the allowlist fails this file's typecheck rather than
    * being silently dropped from every rebuilt item at runtime.
@@ -165,7 +165,7 @@ test("a token-only controller is never probed for migration, and nothing compose
     "a token never reaches the document a MAC address comes from, so probing this item would never resolve and would repeat on every open");
 
   // The pass runs the way the wiring runs it: only the controllers the probe list named can contribute a resolved MAC address, so an item nobody asked about has
-  // nothing for its settings to land against. Handing the migration a map it could never have been given would pin a scenario that cannot occur.
+  // nothing for its settings to land against. Handing the migration a map it could never have been given would assert a scenario that cannot occur.
   const probed = new Map(controllersAwaitingMigration(config).map((entry) => [ entry.address as string, CONTROLLER_MAC ]));
 
   assert.equal(accessConfig.migrate(config, probed), null,
@@ -360,8 +360,8 @@ test("removal drops the item its address names, and an empty MAC set leaves the 
 
 test("the sweep strips every spelling the framework's own enumerator resolves to a swept MAC", () => {
 
-  /* Each form below is first proven to address a MAC scope through the engine itself, so these pins bind to the parser's grammar rather than to a reading of it:
-   * the bare enable and the bare disable, the canonical entry whose value rides behind the payload delimiter, and the legacy dot spelling the parser still accepts
+  /* Each form below is first proven to address a MAC scope through the engine itself, so these assertions bind to the parser's grammar rather than to a reading of it:
+   * the bare enable and the bare disable, the canonical entry whose value sits behind the payload delimiter, and the legacy dot spelling the parser still accepts
    * from configurations hand-authored before that delimiter existed.
    */
   const bareDisable = "Disable.Log.Lock." + DEVICE_MAC;

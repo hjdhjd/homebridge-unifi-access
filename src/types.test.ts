@@ -1,9 +1,9 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * types.test.ts: Type-level pins for the accessory context threading.
+ * types.test.ts: Type-level assertions for the accessory context threading.
  *
  * ENFORCEMENT NOTE: node --strip-types executes this file without checking a single type, so the runner proves nothing here on its own. The teeth are the typecheck
- * gate - tsc --noEmit covers every test file through the base tsconfig - and the pins below are written so that a regression is a compile error rather than a
+ * gate - tsc --noEmit covers every test file through the base tsconfig - and the assertions below are written so that a regression is a compile error rather than a
  * runtime failure.
  */
 import type { AccessAccessoryContext } from "./types.ts";
@@ -27,13 +27,13 @@ const macIsOptionalString: Equal<AccessAccessoryContext["mac"], string | undefin
 const controllerIsOptionalString: Equal<AccessAccessoryContext["controller"], string | undefined> = true;
 const idIsOptionalString: Equal<AccessAccessoryContext["id"], string | undefined> = true;
 
-/* The declared keys replace homebridge's index signature outright, so an undeclared key does not resolve at all. Without this pin every member pin above would
- * still pass while each mistyped context read fell through an index signature and resolved to something.
+/* The declared keys replace homebridge's index signature outright, so an undeclared key does not resolve at all. Without this assertion every member assertion above
+ * would still pass while each mistyped context read fell through an index signature and resolved to something.
  */
 // @ts-expect-error - reading an undeclared context key must be a compile error.
 export type UndeclaredContextKey = AccessAccessoryContext["somethingUndeclared"];
 
-test("the accessory context threading is pinned by the typechecker", () => {
+test("the accessory context threading is enforced by the typechecker", () => {
 
   assert.equal(accessoryIsThreaded, true);
   assert.equal(macIsOptionalString, true);

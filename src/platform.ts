@@ -155,7 +155,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * consumes them can attribute an outcome without counting positions. A login that rejects is absorbed at its own pair and reported against the controller it
    * belongs to, which keeps one controller's failure from costing its siblings anything and leaves the aggregate unable to reject.
    *
-   * The logins are started by the map above the dispatch, so they begin eagerly whatever the dispatch does with them. The reclaim itself rides the shared guarded
+   * The logins are started by the map above the dispatch, so they begin eagerly whatever the dispatch does with them. The reclaim itself goes through the shared guarded
    * dispatch, which reports a fault through our log rather than letting one float out of a call nothing awaits.
    */
   private launchControllers(): void {

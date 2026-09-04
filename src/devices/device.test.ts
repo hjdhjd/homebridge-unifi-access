@@ -534,7 +534,7 @@ test("an Enterprise port's identity is captured at adoption and survives a recor
   assert.equal(device.id, "AABBCCDDEE02-PORT1", "the identity is composed once and never re-read from the live record");
 });
 
-test("a typed delivery registration rides the same map that cleanup drains", () => {
+test("a typed delivery registration lands in the same map that cleanup drains", () => {
 
   const harness = makeHarness([]);
   const device = new DeliveryDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites), harness.construction);

@@ -58,7 +58,7 @@ export interface AccessProbeVerdict {
 
 /**
  * The commit-shaped patch the migration produces. A consumed per-controller legacy property deletes by OMISSION from the freshly rebuilt successor, which is why no
- * per-item key appears here at all: the whole array rides instead, and only when at least one item's successor differs from the item it replaces.
+ * per-item key appears here at all: the whole array is carried instead, and only when at least one item's successor differs from the item it replaces.
  */
 export interface AccessConfigPatch {
 

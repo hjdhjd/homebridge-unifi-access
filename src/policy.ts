@@ -381,7 +381,7 @@ export function *membershipRecords(state: AccessState): Iterable<AccessStateDevi
     }
   }
 
-  // The Enterprise ports. The expansion spreads the hub's own fields onto each port, so the hub's managedness rides the same read the plain records take.
+  // The Enterprise ports. The expansion spreads the hub's own fields onto each port, so the hub's managedness goes through the same read the plain records take.
   for(const port of selectAccessPoints(state)) {
 
     if(isManagedRecord(port)) {
@@ -764,7 +764,7 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
  * reads.
  *
  * Each family answers from what its own hardware establishes. A UA Gate answers no: it drives two doors, the library derives no topology facts for it, and its
- * sensor rides the paths its hardware has always used rather than an evidence read. A UA Ultra answers from its multiplex, because it carries no wiring pair at
+ * sensor follows the paths its hardware has always used rather than an evidence read. A UA Ultra answers from its multiplex, because it carries no wiring pair at
  * all and the mode its single input is configured for is the only evidence its record offers - an input serving request-to-exit duty is not a door position
  * sensor, whatever the door's state entry happens to carry - while a record that carries no extensions at all offers no multiplex to read, so it answers from the
  * door-state model like every other family. Every other family answers from that model through {@link hasDpsEvidence}.
@@ -842,7 +842,7 @@ export function lockCommandRule(options: { delayInterval: number | undefined; is
  * What a device's record says about tampering, or `undefined` when it says nothing at all.
  *
  * Whether the hardware can report tampering is a capability question its owner already answers, so this answers exactly one thing: what the record states. The
- * condition rides an ordinary configuration row, which is what makes tampering a property of the record rather than of a notification, and lets a caller see it
+ * condition is carried by an ordinary configuration row, which is what makes tampering a property of the record rather than of a notification, and lets a caller see it
  * change through the same delivery every other record change arrives on.
  *
  * A record carrying no tamper row has reported nothing, which is deliberately distinct from reporting that there is no tampering. A caller needs the two apart to

@@ -58,7 +58,7 @@ export interface AccessControllerTokens {
 export type AccessModelKey = "UA Gate" | "UA Hub" | "UA Hub Door Mini" | "UA Ultra" | "all" | "controller";
 
 /* The webUI and the documentation renderer make use of additional metadata to surface only the feature options relevant for a particular device. These properties
- * ride in the opaque `meta` channel that homebridge-plugin-utils forwards back to us without interpreting, and provide that metadata. Both the option and the
+ * are carried in the opaque `meta` channel that homebridge-plugin-utils forwards back to us without interpreting, and provide that metadata. Both the option and the
  * category channel carry the same properties, so one type serves both.
  *
  * hasCapability:  Properties in the capabilities array that must be enabled for this option to be exposed. This stays open-ended because capability flags are the
