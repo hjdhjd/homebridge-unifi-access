@@ -1173,12 +1173,14 @@ const featureOptionsParams = {
   },
   ui: {
 
-    /* The choice sources our catalog names, each answering the list its picker offers for the device in view. The lists are attached to the device records the
-     * server answers, because deriving them needs what only the server reaches - the topology's door guards and the official users census - so a resolver here
-     * reads what its record carries and nothing more. Each runs on every projection recompute and must stay pure and cheap.
+    /* The choice sources our catalog names, each answering the list its picker offers for the device in view. The lists are attached to the device records the server
+     * answers, because deriving them needs what only the server reaches - the topology's door guards and the official users census, and the access-method catalog - so a
+     * resolver here reads what its record carries and nothing more. Each runs on every projection recompute and must stay pure and cheap.
      */
     choices: {
 
+      // The methods the reader in view supports; at the global and controller views, where no device is in view, every method the catalog knows.
+      accessMethods: ({ device, option }) => device?.accessMethods ?? option.meta?.choiceDomain ?? [],
       // The door guards the door in view lists. The option is offered at device scope alone, so a resolver with no device in view answers a list nothing renders.
       doorGuards: ({ device }) => device?.doorGuards ?? []
     },

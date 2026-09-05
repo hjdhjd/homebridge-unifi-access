@@ -6,12 +6,12 @@
  * option without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
  * because it is a closed union the compiler already holds the map to.
  */
+import { accessMethodChoices, doorServiceChoices } from "./policy.ts";
 import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
 import { buildCatalogIndex } from "homebridge-plugin-utils";
-import { doorServiceChoices } from "./policy.ts";
 import test from "node:test";
 
 // The catalog entry a category and option name address, asserted to exist so each check below reads an entry rather than a nullable one.
@@ -105,7 +105,7 @@ test("the side door group is scoped to the gate that has one", () => {
 
 test("a capability-gated option renders its own prose suffix", () => {
 
-  assert.equal(describeOptionScope(entryFor("AccessMethod", "Face")), " <BR>*Supported on UniFi Access readers that support face unlock authentication.*",
+  assert.equal(describeOptionScope(entryFor("AccessMethod", "Switches")), " <BR>*Supported on UniFi Access readers.*",
     "the capability gate is what the suffix names");
   assert.equal(describeOptionScope(entryFor("Hub", "SideDoor")), " <BR>*Supported on UniFi Access Gate.*",
     "an option gated on a model alone names the model instead");
@@ -203,4 +203,22 @@ test("the door service is one inline choice whose default is the automatic one, 
 
     assert.equal(featureOptions["Hub"]?.find(option => option.name === name), undefined, "Hub." + name + " is not a catalog entry");
   }
+});
+
+test("the access methods are one selection over a page-registered source, none selected by default, offered on readers", () => {
+
+  const entries = featureOptions["AccessMethod"] ?? [];
+
+  assert.deepEqual(entries.map(entry => entry.name), ["Switches"], "one selection stands for every method");
+
+  const switches = entryFor("AccessMethod", "Switches");
+
+  assert.equal(switches.choices, "accessMethods");
+  assert.equal(switches.multiple, true);
+  assert.equal(switches.default, true);
+  assert.equal(switches.defaultValue, "");
+  assert.deepEqual(switches.meta?.hasCapability, ["is_reader"]);
+
+  // The domain the page offers where no reader is in view is the catalog's own list, so the two can never disagree about a method's spelling.
+  assert.deepEqual(switches.meta?.choiceDomain, accessMethodChoices());
 });

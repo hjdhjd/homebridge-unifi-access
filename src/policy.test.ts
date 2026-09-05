@@ -10,13 +10,13 @@ import { ACCESS_DOORBELL_REASON_CODES, AccessAuthError, AccessClient, createStat
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessBootstrapConfig, AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice,
   AccessStateDoor } from "unifi-access";
-import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessoryOwnership,
-  accessoryStranded, canTransition, composeAccessMethodUpdate,
-  composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, describeUnlock, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations,
-  doorGuardChoices, doorServiceChoices, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix,
-  hasDpsEvidence, isManagedRecord, isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations,
-  projectedRecords, reclaimFenceOpen, recordByMac, resolveDoorService, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh,
-  webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
+import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
+  accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
+  createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
+  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
+  isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
+  recordByMac, resolveDoorService, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl,
+  webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1408,4 +1408,17 @@ test("resolveDoorService takes an explicit service as chosen and defers everythi
 
   // The offered values are the two services and the automatic choice, spelled as the configuring log line spells the services.
   assert.deepEqual(doorServiceChoices.map(choice => choice.value), [ "Automatic", "Lock", "GarageDoorOpener" ]);
+});
+
+test("accessMethodChoices offers the whole catalog with no device and only what a device reports with one, from the one catalog the switches read", () => {
+
+  // The whole catalog, in its own order, labeled by display name and valued by the choice spelling a selection stores.
+  assert.deepEqual(accessMethodChoices(), accessMethods.map(method => ({ label: method.name, value: method.choice })));
+
+  // A device narrows the list to the capabilities it reports, a family capability counting on any member.
+  const device = { capabilities: [ "is_reader", "pin_code", "support_mobile_unlock" ] } as unknown as AccessStateDevice;
+
+  assert.deepEqual(accessMethodChoices(device).map(choice => choice.value), [ "Mobile", "PIN" ]);
+  assert.equal(deviceHasCapability(device, [ "mobile_unlock_ver2", "support_mobile_unlock" ]), true);
+  assert.equal(deviceHasCapability(device, "qr_code"), false);
 });

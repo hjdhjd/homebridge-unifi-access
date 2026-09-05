@@ -99,15 +99,9 @@ These option(s) apply to: Access controllers.
 
 #### <A NAME="accessmethod"></A>Access method feature options.
 
-| Option                                                         | Description
-|----------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="AccessMethod.Face"></A>`AccessMethod.Face`            | Add a switch accessory to control the face unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support face unlock authentication.*
-| <A NAME="AccessMethod.Hand"></A>`AccessMethod.Hand`            | Add a switch accessory to control the hand wave unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support hand wave authentication.*
-| <A NAME="AccessMethod.Mobile"></A>`AccessMethod.Mobile`        | Add a switch accessory to control the mobile unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support mobile authentication.*
-| <A NAME="AccessMethod.NFC"></A>`AccessMethod.NFC`              | Add a switch accessory to control the NFC card access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support NFC authentication.*
-| <A NAME="AccessMethod.PIN"></A>`AccessMethod.PIN`              | Add a switch accessory to control the PIN unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support PIN authentication.*
-| <A NAME="AccessMethod.QR"></A>`AccessMethod.QR`                | Add a switch accessory to control the QR unlock access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support QR code authentication.*
-| <A NAME="AccessMethod.TouchPass"></A>`AccessMethod.TouchPass`  | Add a switch accessory to control the Touch Pass access method. **(default: enabled)**. <BR>*Supported on UniFi Access readers that support Touch Pass.*
+| Option                                                               | Description
+|----------------------------------------------------------------------|-------------------------------------------------------------
+| <A NAME="AccessMethod.Switches"></A>`AccessMethod.Switches=<value>`  | Add switch accessories to control the selected access methods from HomeKit. The list offers the methods this reader supports, and each selected method gets its own switch. None are selected by default. **(default: none)**. <BR>*Supported on UniFi Access readers.*
 
 #### <A NAME="log"></A>Logging feature options.
 

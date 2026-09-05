@@ -20,8 +20,8 @@ import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLog
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, selectController,
   selectControllerUptime, selectDoorStates } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
-import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible,
-  membershipRecords, serialForm, tamperState } from "./policy.ts";
+import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
+  dpsSensorEligible, membershipRecords, serialForm, tamperState } from "./policy.ts";
 import type { DecoratedSerial } from "./policy.ts";
 import { formatErrorMessage } from "homebridge-plugin-utils";
 
@@ -367,13 +367,6 @@ function tamperRowValue(verdict: boolean | undefined): string {
   return verdict ? "Detected" : "Normal";
 }
 
-// Whether a device's capabilities carry one catalog entry's capability, stated in whichever form that entry uses: a single flag, or a family where any member
-// counts. This mirrors the hub's own capability read, so the methods a reader's row lists and the methods its HomeKit switches offer can never disagree.
-function hasMethodCapability(device: AccessStateDevice, capability: string | readonly string[]): boolean {
-
-  return Array.isArray(capability) ? capability.some((entry: string) => device.capabilities.includes(entry)) : device.capabilities.includes(capability as string);
-}
-
 /* Compose a reader's access methods row: every catalog method the hardware offers, in the catalog's own order, each stating whether the device's configuration
  * rows say it is enabled. The rows are read through the same shared translation the hub's own fold reads them through, in the same configs vocabulary, so the row
  * and the switches answer from one interpretation rather than two that can drift.
@@ -395,7 +388,7 @@ function accessMethodsRow(device: AccessStateDevice): StatusChoicesRow {
 
     const value = values.get(method.key);
 
-    if((value === undefined) || !hasMethodCapability(device, method.capability)) {
+    if((value === undefined) || !deviceHasCapability(device, method.capability)) {
 
       continue;
     }

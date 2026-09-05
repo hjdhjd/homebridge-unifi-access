@@ -4,8 +4,8 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, ACCESS_DEVICE_UNLOCK_INTERVAL, ACCESS_GARAGE_TRANSITION_DURATION, ACCESS_MQTT_TOPIC,
   ACCESS_WEBHOOK_PORT } from "./settings.ts";
-import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
-import { doorServiceChoices } from "./policy.ts";
+import type { FeatureCategoryEntry, FeatureOptionChoice, FeatureOptionEntry } from "homebridge-plugin-utils";
+import { accessMethodChoices, doorServiceChoices } from "./policy.ts";
 import { mqttFeatureOptions } from "homebridge-plugin-utils";
 
 // Plugin configuration options.
@@ -62,12 +62,14 @@ export type AccessModelKey = "UA Gate" | "UA Hub" | "UA Hub Door Mini" | "UA Ult
  * are carried in the opaque `meta` channel that homebridge-plugin-utils forwards back to us without interpreting, and provide that metadata. Both the option and the
  * category channel carry the same properties, so one type serves both.
  *
+ * choiceDomain:   The whole list a page-registered choice source draws from, offered where no device is in view to narrow it.
  * hasCapability:  Properties in the capabilities array that must be enabled for this option to be exposed. This stays open-ended because capability flags are the
  *                 controller's own wire vocabulary, which grows with firmware...the completeness sweep in this module's test suite is what catches a typo here.
  * modelKey:       Device models the option applies to, or the sentinels described on AccessModelKey.
  */
 export interface AccessOptionMeta {
 
+  choiceDomain?: readonly FeatureOptionChoice[];
   hasCapability?: string[];
   modelKey?: AccessModelKey[];
 }
@@ -99,16 +101,11 @@ export const featureOptionCategories: AccessFeatureCategory[] = [
 // Individual feature options, broken out by category.
 export const featureOptions: Record<string, AccessFeatureOption[]> = {
 
-  // Access method options.
+  // Access method options. One selection stands for every method: the switches a reader gets are exactly the methods chosen here, from the methods that reader
+  // supports, and none are chosen until a user picks them.
   "AccessMethod": [
 
-    { default: true, description: "Add a switch accessory to control the face unlock access method.", meta: { hasCapability: ["identity_face_unlock"] }, name: "Face" },
-    { default: true, description: "Add a switch accessory to control the hand wave unlock access method.", meta: { hasCapability: ["hand_wave"] }, name: "Hand" },
-    { default: true, description: "Add a switch accessory to control the mobile unlock access method.", meta: { hasCapability: [ "mobile_unlock_ver2", "support_mobile_unlock" ] }, name: "Mobile" },
-    { default: true, description: "Add a switch accessory to control the NFC card access method.", meta: { hasCapability: ["nfc_card_easy_provision"] }, name: "NFC" },
-    { default: true, description: "Add a switch accessory to control the PIN unlock access method.", meta: { hasCapability: ["pin_code"] }, name: "PIN" },
-    { default: true, description: "Add a switch accessory to control the QR unlock access method.", meta: { hasCapability: ["qr_code"] }, name: "QR" },
-    { default: true, description: "Add a switch accessory to control the Touch Pass access method.", meta: { hasCapability: ["support_apple_pass"] }, name: "TouchPass" }
+    { choices: "accessMethods", default: true, defaultValue: "", description: "Add switch accessories to control the selected access methods from HomeKit. The list offers the methods this reader supports, and each selected method gets its own switch. None are selected by default.", meta: { choiceDomain: accessMethodChoices(), hasCapability: ["is_reader"] }, multiple: true, name: "Switches" }
   ],
 
   // Controller options.

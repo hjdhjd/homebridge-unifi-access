@@ -10,9 +10,9 @@ import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, Access
 import type { AccessMethodKey, DoorServiceType } from "../policy.ts";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
-  composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
-  dpsSensorEligible, lockCommandRule, resolveDoorService, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
+import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
+  accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
+  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -459,11 +459,15 @@ export class AccessHub extends AccessDevice {
       return true;
     }
 
+    // The methods the user selected switches for, read afresh on every pass so a changed selection is what the next pass materializes or retires, and read
+    // against the catalog's own spellings so a hand-written entry selects a method in whatever case it named it.
+    const selected = this.getFeatureValueList("AccessMethod.Switches", accessMethodChoices().map(choice => choice.value));
+
     for(const accessMethod of accessMethods) {
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.Switch,
-        this.hasCapability("is_reader") && this.hasCapability(accessMethod.capability) && this.hasFeature(accessMethod.option), accessMethod.subtype)) {
+        this.hasCapability("is_reader") && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice), accessMethod.subtype)) {
 
         continue;
       }
@@ -2568,10 +2572,10 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.ContactSensor, name)?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, value);
   }
 
-  // Utility to validate hub capabilities.
+  // Whether this hub carries a capability, answered through the one predicate the status feed and the settings page read too.
   private hasCapability(capability: string | readonly string[]): boolean {
 
-    return Array.isArray(capability) ? capability.some((c: string) => this.uda.capabilities.includes(c)) : this.uda.capabilities.includes(capability as string);
+    return deviceHasCapability(this.uda, capability);
   }
 
   /* Apply a door's reported state to HomeKit: the one place a door's position and lock reach their services, their MQTT tails, and their log lines.

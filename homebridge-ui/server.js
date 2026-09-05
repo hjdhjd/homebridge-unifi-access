@@ -10,7 +10,7 @@
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { composeConnectIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
+import { accessMethodChoices, composeConnectIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import util from "node:util";
@@ -64,12 +64,15 @@ const officialUsers = async (official) => {
  * The payload arrives grouped by the door each device serves. That grouping is real information the library deliberately preserves, and it is not information this
  * page uses, so it is flattened here rather than upstream. The official record carries a hardware type and no display model at all, so the display model comes from
  * the plugin's own policy mapping - reached through the same dist import that carries the identity composition - and a type the mapping does not name answers itself.
- * The door guard picker's list is attached here too, from the users census alone, because this surface names no door's guards.
+ * The door guard picker's list and the access methods the reader supports are attached here too, from the users census alone, because this surface names no door's
+ * guards.
  *
  * There is no address on this surface, so the rendered IP row is empty for these devices. That is the honest answer: the official API does not report one.
  */
 const officialDevices = (grouped, users) => grouped.flat().filter(device => device.is_managed).map(device => ({
 
+  // The methods this reader supports, as the settings page offers them, from the one catalog the switches themselves read.
+  accessMethods: accessMethodChoices(device),
   alias: device.alias,
   // A record arriving without a capability list is stored carrying an empty one, which is the same accommodation the library's own reducer makes for the topology
   // path. The browser reads this array to group the sidebar and to gate options, so an absent one would throw rather than degrade.
@@ -248,12 +251,13 @@ class PluginUiServer extends HomebridgePluginUiServer {
           /* The devices this plugin projects into HomeKit, listed through the same statement the runtime's own membership comes from: an Enterprise hub's ports are
            * listed as the devices they become, and the building-hosted parent, which never becomes an accessory, is not. Each is decorated with the plugin's
            * device identity, computed by the function the runtime keys every read on, so what the webUI writes an option entry against is what the plugin reads
-           * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list, joined here from the
-           * door the device serves and the users census, because the browser can reach neither.
+           * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list and the access methods
+           * the reader supports, joined here from the door the device serves and the users census, because the browser can reach neither.
            */
           const doors = client.state.snapshot().doors;
           const devices = [...membershipRecords(client.state.snapshot())].sort(byName).map(device => ({ ...device,
-            doorGuards: doorGuardChoices({ guardIds: doors.get(device.location_id)?.door_guard, users }), serialNumber: deviceSerial(device) }));
+            accessMethods: accessMethodChoices(device), doorGuards: doorGuardChoices({ guardIds: doors.get(device.location_id)?.door_guard, users }),
+            serialNumber: deviceSerial(device) }));
 
           // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
           return { devices: [ controllerRecord, ...devices ], kind: "connected" };

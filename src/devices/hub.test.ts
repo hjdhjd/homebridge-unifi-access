@@ -24,6 +24,7 @@ import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
 import type { AccessStateDevice } from "unifi-access";
 import { TestMqttClient } from "homebridge-plugin-utils/testing";
+import { accessMethods } from "../policy.ts";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
@@ -415,6 +416,15 @@ function makeTravellingOpener(options: HubOptions = {}): HubHarness {
   return makeOpener({ ...options, options: [ "Enable.Hub.Door.TransitionDuration." + HUB_SERIAL + "." + TRAVEL_SECONDS.toString(), ...options.options ?? [] ] });
 }
 
+// Every access method selected, which is what a reader arm about the model rather than the selection stands up: its switches then follow its capabilities alone.
+const EVERY_ACCESS_METHOD = "Enable.AccessMethod.Switches=" + accessMethods.map(method => method.choice).join(",");
+
+// A reader with every access method selected for a switch, so what its record and the controller say about each method is what its switches show.
+function makeReader(options: HubOptions = {}): HubHarness {
+
+  return makeHub({ ...options, options: [ EVERY_ACCESS_METHOD, ...options.options ?? [] ] });
+}
+
 // Hand a hub the door reading the controller's own door-state loop would deliver.
 function deliverDoorState(harness: HubHarness, entry: AccessDoorStateEntry): void {
 
@@ -778,7 +788,7 @@ test("a doorbell call that ended on this hub's reader is logged, and one on anot
 
 test("a record's configuration rows create the switches its capabilities call for, and a capability with no row of its own reads off", async () => {
 
-  const harness = makeHub({ record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ],
+  const harness = makeReader({ record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ],
     configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
 
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "a row the record carries is what the switch reads");
@@ -792,7 +802,7 @@ test("a record's configuration rows create the switches its capabilities call fo
 
 test("a reader whose record carries no configuration rows takes its switches from the official settings read", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code", "support_apple_pass" ], configs: undefined }),
@@ -818,7 +828,7 @@ test("a reader whose record carries no configuration rows takes its switches fro
 
 test("a settings read the controller refused keeps every switch the accessory carries, creates none, and says so", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     official: true,
@@ -841,7 +851,7 @@ test("a settings read the controller refused keeps every switch the accessory ca
 
 test("a rowless record on a client with no official surface keeps what it has and creates nothing", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined })
@@ -875,7 +885,7 @@ test("a rowless record on a client with no official surface keeps what it has an
 test("a seeded device retires the switch of a method that has left the reader, in both client identities", async () => {
 
   // The credential identity: the record's rows seed the model synchronously, so the sweep runs in the very pass that configures the device.
-  const credential = makeHub({
+  const credential = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
@@ -886,7 +896,7 @@ test("a seeded device retires the switch of a method that has left the reader, i
   assert.ok(hasSwitch(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and the method it still carries keeps its own");
 
   // The token identity: the same sweep, reached through the settings read instead of the rows, which is what makes retirement reach a rowless record at all.
-  const token = makeHub({
+  const token = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     official: true,
@@ -906,7 +916,7 @@ test("a v2 access method event moves the switch and the model behind it, in both
 
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
 
-  const credential = makeHub({ record: hubRecord({ ...reader, configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
+  const credential = makeReader({ record: hubRecord({ ...reader, configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
   const service = switchService(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
 
   // The wire echoes key names back as values, and the handler's own filter is what keeps one out of the model as surely as out of the switch.
@@ -919,7 +929,7 @@ test("a v2 access method event moves the switch and the model behind it, in both
   assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the event is pushed to the switch");
   assert.equal(await switchReads(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model it reads from moved with it");
 
-  const token = makeHub({ official: true, record: hubRecord({ ...reader, configs: undefined }),
+  const token = makeReader({ official: true, record: hubRecord({ ...reader, configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
   await settle();
@@ -1018,7 +1028,7 @@ test("a door command refuses locally whenever the composition reads unreachable,
 
 test("a completed recovery refreshes a rowless reader's access methods and restates the switch behind them", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
@@ -1078,7 +1088,7 @@ test("a reader whose record carries configuration rows reads no settings on a co
   /* The official surface is present deliberately. Without one the refresh would exit on its absence instead, and this arm would pass without ever putting the row
    * predicate under test.
    */
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
@@ -1100,7 +1110,7 @@ test("rows landing while a refresh is out outrank the answer that refresh comes 
 
   let landing: (() => void) | undefined;
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
@@ -1137,7 +1147,7 @@ test("rows landing while a refresh is out outrank the answer that refresh comes 
 
 test("a refused refresh keeps the values already held, retires nothing, and never warns", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     options: ["Enable.Log.Debug"],
@@ -1176,7 +1186,7 @@ test("a settings read that lands after the device was torn down materializes not
   // The seed's read, held open by the arm rather than settled on a schedule, so the teardown below lands while the read is genuinely still out.
   let answerSettings: (settings: unknown) => void = (): void => undefined;
 
-  const landing = makeHub({
+  const landing = makeReader({
 
     official: true,
     options: ["Enable.Log.Debug"],
@@ -1200,7 +1210,7 @@ test("a settings read that lands after the device was torn down materializes not
 
   // The other exit the same teardown can take: the read is refused rather than answered. A device that will never project these settings has nothing to say about
   // being unable to read them, so the seed's own warning is not borrowed for it.
-  const refusal = makeHub({
+  const refusal = makeReader({
 
     official: true,
     options: ["Enable.Log.Debug"],
@@ -1221,7 +1231,7 @@ test("a settings read that lands after the device was torn down materializes not
 
 test("a recovery arriving after the device was torn down reads nothing, changes nothing, and says nothing", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     options: ["Enable.Log.Debug"],
@@ -1345,7 +1355,7 @@ test("a gate close overtaken by the device's removal announces nothing", async (
 
 test("a completed recovery gives the startup seed of a reader nothing has answered for another attempt", async () => {
 
-  const harness = makeHub({
+  const harness = makeReader({
 
     official: true,
     record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
@@ -1382,7 +1392,7 @@ test("a confirmed access method write answers from the model before the controll
   const readBack = (enabled: string): unknown => ({ access_methods: { pin_code: { enabled: enabled, pin_code_shuffle: "no" } } });
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "no" }] };
 
-  const confirmed = makeHub({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("yes") });
+  const confirmed = makeReader({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("yes") });
 
   await switchService(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
 
@@ -1393,7 +1403,7 @@ test("a confirmed access method write answers from the model before the controll
   assert.equal(await switchReads(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
   // The negative control: the controller answered success while leaving the setting where it was. Nothing was confirmed, so nothing is folded.
-  const declined = makeHub({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("no") });
+  const declined = makeReader({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("no") });
 
   await switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
 
@@ -1409,7 +1419,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
 
   // A refresh carrying genuine news moves what the switch answers, with no v2 event involved anywhere.
-  const refreshed = makeHub({ record: hubRecord({ ...reader, configs: row("no") }) });
+  const refreshed = makeReader({ record: hubRecord({ ...reader, configs: row("no") }) });
 
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false);
 
@@ -1423,7 +1433,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "a row the record dropped leaves nothing standing");
 
   // The recency guard: a confirmed write moves the model ahead of the rows, and the rows restating what they said before must not drag it back.
-  const written = makeHub({ official: true, record: hubRecord({ ...reader, configs: row("no") }),
+  const written = makeReader({ official: true, record: hubRecord({ ...reader, configs: row("no") }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
   await switchService(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
@@ -2370,4 +2380,39 @@ test("the door service choice resolves end to end: an explicit service, the auto
 
   assert.ok(carries(hub, Service.LockMechanism));
   assert.ok(!carries(hub, Service.GarageDoorOpener));
+});
+
+test("a reader with no access method selected creates no switch and retires one the accessory carried", () => {
+
+  const harness = makeHub({
+
+    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ],
+      configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
+  });
+
+  // The model seeded from the rows, so the pass ran; with nothing selected it materialized nothing and retired the switch a previous run left.
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "no switch is created for a method nobody selected");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "and a switch nobody selects any longer is retired");
+});
+
+test("a selection creates exactly the selected switches, at the device's own scope over the global one, in any case the entry spelled them", async () => {
+
+  const record = hubRecord({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code", "qr_code" ],
+    configs: [ { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }, { device_id: HUB_ID, key: "nfc", tag: "open_door_mode", value: "no" } ] });
+
+  // The global selection names two methods; the device's own names one, spelled in lower case, and it is the device's that counts.
+  const scoped = makeHub({ options: [ "Enable.AccessMethod.Switches=PIN,QR", "Enable.AccessMethod.Switches." + HUB_SERIAL + "=nfc" ], record });
+
+  assert.ok(hasSwitch(scoped, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "the device's own selection is materialized");
+  assert.ok(!hasSwitch(scoped, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and the global selection is not read past it");
+  assert.ok(!hasSwitch(scoped, AccessReservedNames.SWITCH_ACCESSMETHOD_QR));
+  assert.equal(await switchReads(scoped, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), false, "the switch still answers from the model");
+
+  // The same reader with the global selection alone materializes exactly the two it names, and nothing for the method it leaves out.
+  const global = makeHub({ options: ["Enable.AccessMethod.Switches=PIN,QR"], record });
+
+  assert.ok(hasSwitch(global, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN));
+  assert.ok(hasSwitch(global, AccessReservedNames.SWITCH_ACCESSMETHOD_QR));
+  assert.ok(!hasSwitch(global, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC));
 });

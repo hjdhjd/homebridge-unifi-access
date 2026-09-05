@@ -894,12 +894,12 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
   return (deviceType === "UGT") ? "GarageDoorOpener" : "Lock";
 }
 
-/* Access methods available to us for readers. The `key` column is the configs vocabulary the access method state model is keyed by, and every switch read
- * answers from that model - the record's configuration rows, the official settings read, and the v2 access method events all feed it in this vocabulary. The
- * `officialKeys` column is the official update map's vocabulary, primary key first, and the switch writes go out under it. Mobile's one switch spans the Bluetooth
- * family, and writing a key a hardware class does not offer is a documented no-effect, so naming the family carries that intent on every class; TouchPass is the one
- * vocabulary rename between the two surfaces. The `satisfies` clause compile-checks the column against the library's update map while `as const` keeps
- * the literal inference the key union below is derived from.
+/* Access methods available to us for readers. The `key` column is the configs vocabulary the access method state model is keyed by, and every switch read answers from
+ * that model - the record's configuration rows, the official settings read, and the v2 access method events all feed it in this vocabulary. The `officialKeys` column is
+ * the official update map's vocabulary, primary key first, and the switch writes go out under it. The `choice` column is the spelling a user's selection stores, and with
+ * `name` it is what the settings page offers. Mobile's one switch spans the Bluetooth family, and writing a key a hardware class does not offer is a documented
+ * no-effect, so naming the family carries that intent on every class; TouchPass is the one vocabulary rename between the two surfaces. The `satisfies` clause
+ * compile-checks the column against the library's update map while `as const` keeps the literal inference the key union below is derived from.
  *
  * The catalog lives in this leaf rather than beside the switches it drives because two consumers need one definition of it: the hub's access method switches, and
  * the webUI status feed's access methods row. The feed runs inside the Config UI X child process, where the HomeKit device graph cannot be loaded at all, so a
@@ -908,25 +908,54 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
  */
 export const accessMethods = [
 
-  { capability: "identity_face_unlock", key: "face", name: "Face Unlock", officialKeys: ["face"], option: "AccessMethod.Face",
+  { capability: "identity_face_unlock", choice: "Face", key: "face", name: "Face Unlock", officialKeys: ["face"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_FACE },
-  { capability: "hand_wave", key: "wave", name: "Hand Wave", officialKeys: ["wave"], option: "AccessMethod.Hand",
+  { capability: "hand_wave", choice: "Hand", key: "wave", name: "Hand Wave", officialKeys: ["wave"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_HAND },
-  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], configsApiKeys: [ "bt", "bt_button", "bt_tap" ], key: "bt_button",
-    name: "Mobile", officialKeys: [ "bt_button", "bt_tap" ], option: "AccessMethod.Mobile", subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
-  { capability: "nfc_card_easy_provision", key: "nfc", name: "NFC", officialKeys: ["nfc"], option: "AccessMethod.NFC",
+  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], choice: "Mobile", configsApiKeys: [ "bt", "bt_button", "bt_tap" ], key: "bt_button",
+    name: "Mobile", officialKeys: [ "bt_button", "bt_tap" ], subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
+  { capability: "nfc_card_easy_provision", choice: "NFC", key: "nfc", name: "NFC", officialKeys: ["nfc"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_NFC },
-  { capability: "pin_code", key: "pin_code", name: "PIN", officialKeys: ["pin_code"], option: "AccessMethod.PIN",
+  { capability: "pin_code", choice: "PIN", key: "pin_code", name: "PIN", officialKeys: ["pin_code"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_PIN },
-  { capability: "qr_code", key: "qr_code", name: "QR Code", officialKeys: ["qr_code"], option: "AccessMethod.QR",
+  { capability: "qr_code", choice: "QR", key: "qr_code", name: "QR Code", officialKeys: ["qr_code"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_QR },
-  { capability: "support_apple_pass", key: "apple_pass", name: "TouchPass", officialKeys: ["touch_pass"], option: "AccessMethod.TouchPass",
+  { capability: "support_apple_pass", choice: "TouchPass", key: "apple_pass", name: "TouchPass", officialKeys: ["touch_pass"],
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS }
-] as const satisfies readonly { capability: string | readonly string[]; configsApiKeys?: readonly string[]; key: string; name: string;
-  officialKeys: readonly (keyof AccessOfficialAccessMethodsUpdate)[]; option: string; subtype: string; }[];
+] as const satisfies readonly { capability: string | readonly string[]; choice: string; configsApiKeys?: readonly string[]; key: string; name: string;
+  officialKeys: readonly (keyof AccessOfficialAccessMethodsUpdate)[]; subtype: string; }[];
 
 // Extract the key property values from the access methods array to create a union type of all possible keys for our supported access methods.
 export type AccessMethodKey = typeof accessMethods[number]["key"];
+
+/**
+ * Whether a device's capabilities carry a capability, stated in whichever form a catalog entry uses: a single flag, or a family where any member counts. The
+ * hub's own capability reads, the status feed's row, and the settings page's list all answer through it, so what a device offers is never decided three ways.
+ *
+ * @param device     - The device record.
+ * @param capability - The capability flag or family.
+ *
+ * @returns True when the device carries the capability.
+ */
+export function deviceHasCapability(device: AccessStateDevice, capability: string | readonly string[]): boolean {
+
+  return Array.isArray(capability) ? capability.some((entry: string) => device.capabilities.includes(entry)) : device.capabilities.includes(capability as string);
+}
+
+/**
+ * The access methods a reader's switches can be selected from, as the choices the settings page offers: every method the catalog knows, or only the ones a
+ * device reports the capability for. The value is the method's own choice spelling and the label its display name, both from the one catalog the switches and
+ * the status row read.
+ *
+ * @param device - The device whose capabilities narrow the list, or `undefined` for the whole catalog.
+ *
+ * @returns The choices, in the catalog's order.
+ */
+export function accessMethodChoices(device?: AccessStateDevice): FeatureOptionChoice[] {
+
+  return accessMethods.filter(method => (device === undefined) || deviceHasCapability(device, method.capability))
+    .map(method => ({ label: method.name, value: method.choice }));
+}
 
 /**
  * Translate a device's configuration rows into the access-method values a caller keys its own state by, in the rows' own vocabulary.
