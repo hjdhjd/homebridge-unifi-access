@@ -7,17 +7,17 @@ import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
+import type { AccessMethodKey, DoorServiceType } from "../policy.ts";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
   composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
-  dpsSensorEligible, lockCommandRule, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
+  dpsSensorEligible, lockCommandRule, resolveDoorService, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
-import type { AccessMethodKey } from "../policy.ts";
 import { AccessReservedNames } from "../types.ts";
 import { mqttTopics } from "../mqtt.ts";
 
@@ -126,9 +126,6 @@ type HkStateKey = KeyOf<AccessHub, "hk", "State">;
 type LogHintKey = KeyOf<AccessHints, "log">;
 type WiredKey = KeyOf<AccessHub, "is", "Wired">;
 
-// Valid door service types.
-type DoorServiceType = "Lock" | "GarageDoorOpener";
-
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
  * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
  */
@@ -234,16 +231,10 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Return the door service type from configuration. UA Gate devices default to GarageDoorOpener and can be overridden to Lock. Other hubs default to Lock and can be
-  // overridden to GarageDoorOpener.
+  // The HomeKit service the door is presented through, resolved from the configured choice against this hub's hardware on every read.
   private get doorServiceType(): DoorServiceType {
 
-    if(this.uda.device_type === "UGT") {
-
-      return this.hasFeature("Hub.Door.UseLock") ? "Lock" : "GarageDoorOpener";
-    }
-
-    return this.hasFeature("Hub.Door.UseGarageOpener") ? "GarageDoorOpener" : "Lock";
+    return resolveDoorService({ choice: this.getFeatureValue("Hub.Door.Service"), deviceType: this.uda.device_type });
   }
 
   // Convert lock string value to HomeKit LockCurrentState. The parameter is a plain string because the door state map's own vocabulary is deliberately open, and this

@@ -860,6 +860,40 @@ export function tamperState(device: AccessStateDevice): boolean | undefined {
   return (entry === undefined) ? undefined : (entry.value === "true");
 }
 
+/* How a hub's door is presented in HomeKit, as the choices the settings page offers. The service values are the HomeKit services the door is configured as,
+ * spelled exactly as the configuring log line spells them, and the automatic choice defers to the hardware: a UA Gate presents as a garage door opener and every
+ * other hub as a lock.
+ */
+export const doorServiceChoices = [
+
+  { label: "Automatic", value: "Automatic" },
+  { label: "Lock", value: "Lock" },
+  { label: "Garage door opener", value: "GarageDoorOpener" }
+] as const satisfies readonly FeatureOptionChoice[];
+
+// The HomeKit service a hub's door is configured as, once the automatic choice has been resolved against the hardware.
+export type DoorServiceType = Exclude<typeof doorServiceChoices[number]["value"], "Automatic">;
+
+/**
+ * Resolve the configured door service choice against the hardware: an explicit service is taken as chosen, and anything else - the automatic choice, nothing
+ * configured, or text the catalog does not offer - defers to the hardware's own default, a garage door opener for the UA Gate and a lock for every other hub.
+ *
+ * @param options - The configured choice, or `null` or `undefined` where none resolves, and the hub's device type.
+ *
+ * @returns The service to configure the door as.
+ */
+export function resolveDoorService(options: { choice: Nullable<string | undefined>; deviceType: string }): DoorServiceType {
+
+  const { choice, deviceType } = options;
+
+  if((choice === "Lock") || (choice === "GarageDoorOpener")) {
+
+    return choice;
+  }
+
+  return (deviceType === "UGT") ? "GarageDoorOpener" : "Lock";
+}
+
 /* Access methods available to us for readers. The `key` column is the configs vocabulary the access method state model is keyed by, and every switch read
  * answers from that model - the record's configuration rows, the official settings read, and the v2 access method events all feed it in this vocabulary. The
  * `officialKeys` column is the official update map's vocabulary, primary key first, and the switch writes go out under it. Mobile's one switch spans the Bluetooth

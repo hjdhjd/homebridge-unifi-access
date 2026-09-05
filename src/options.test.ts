@@ -11,6 +11,7 @@ import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
 import { buildCatalogIndex } from "homebridge-plugin-utils";
+import { doorServiceChoices } from "./policy.ts";
 import test from "node:test";
 
 // The catalog entry a category and option name address, asserted to exist so each check below reads an entry rather than a nullable one.
@@ -186,4 +187,20 @@ test("the door guard filter is a device-scoped picker over a page-registered sou
 test("the catalog builds: every picker declaration is one the engine honors", () => {
 
   assert.doesNotThrow(() => buildCatalogIndex(featureOptionCategories, featureOptions));
+});
+
+test("the door service is one inline choice whose default is the automatic one, offered on every hub", () => {
+
+  const service = entryFor("Hub", "Door.Service");
+
+  assert.equal(service.choices, doorServiceChoices, "the catalog offers the policy's own list, never a copy of it");
+  assert.equal(service.default, true);
+  assert.equal(service.defaultValue, "Automatic");
+  assert.equal(service.meta, undefined, "every hub model has a door, so nothing narrows where the choice is offered");
+  assert.equal(service.scopes, undefined);
+
+  for(const name of [ "Door.UseLock", "Door.UseGarageOpener" ]) {
+
+    assert.equal(featureOptions["Hub"]?.find(option => option.name === name), undefined, "Hub." + name + " is not a catalog entry");
+  }
 });

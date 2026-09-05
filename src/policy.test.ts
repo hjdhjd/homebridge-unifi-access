@@ -13,10 +13,10 @@ import type { AccessBootstrapConfig, AccessDoorStateEntry, AccessEventPacket, Ac
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessoryOwnership,
   accessoryStranded, canTransition, composeAccessMethodUpdate,
   composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, describeUnlock, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations,
-  doorGuardChoices, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
-  isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations,
-  projectedRecords, reclaimFenceOpen, recordByMac, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
-  webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
+  doorGuardChoices, doorServiceChoices, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix,
+  hasDpsEvidence, isManagedRecord, isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations,
+  projectedRecords, reclaimFenceOpen, recordByMac, resolveDoorService, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh,
+  webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1389,4 +1389,23 @@ test("doorGuardChoices labels a door's guards by name where the census knows the
   // An empty door and an empty census each offer nothing.
   assert.deepEqual(doorGuardChoices({ guardIds: [], users }), []);
   assert.deepEqual(doorGuardChoices({ guardIds: undefined, users: [] }), []);
+});
+
+test("resolveDoorService takes an explicit service as chosen and defers everything else to the hardware", () => {
+
+  for(const deviceType of [ "UGT", "UAH", "UA-Ultra", "UAH-Ent" ]) {
+
+    assert.equal(resolveDoorService({ choice: "Lock", deviceType }), "Lock");
+    assert.equal(resolveDoorService({ choice: "GarageDoorOpener", deviceType }), "GarageDoorOpener");
+  }
+
+  // The automatic choice, nothing configured, and text the catalog does not offer all read as the hardware's own default.
+  for(const choice of [ "Automatic", undefined, null, "", "Sideways" ]) {
+
+    assert.equal(resolveDoorService({ choice, deviceType: "UGT" }), "GarageDoorOpener", "a gate defaults to an opener for " + String(choice));
+    assert.equal(resolveDoorService({ choice, deviceType: "UAH" }), "Lock", "a hub defaults to a lock for " + String(choice));
+  }
+
+  // The offered values are the two services and the automatic choice, spelled as the configuring log line spells the services.
+  assert.deepEqual(doorServiceChoices.map(choice => choice.value), [ "Automatic", "Lock", "GarageDoorOpener" ]);
 });

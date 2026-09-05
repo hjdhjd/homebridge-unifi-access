@@ -406,7 +406,7 @@ function makeGate(options: HubOptions = {}): HubHarness {
 // A door hub presenting its door as a garage door opener, which is the surface every momentary-operator arm drives.
 function makeOpener(options: HubOptions = {}): HubHarness {
 
-  return makeHub({ ...options, options: [ "Enable.Hub.Door.UseGarageOpener", ...options.options ?? [] ] });
+  return makeHub({ ...options, options: [ "Enable.Hub.Door.Service=GarageDoorOpener", ...options.options ?? [] ] });
 }
 
 // The same opener with a travel time configured for it, which is what puts the transition machine in play.
@@ -714,7 +714,7 @@ test("a UA Gate adopts its main door's lock from the door state map rather than 
    * A seed that stops at the backing field leaves the lock reading secured until the door next moves.
    */
   const gate = securedGate({ doorStates: new Map([[ MAIN_DOOR, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } ]]),
-    options: ["Enable.Hub.Door.UseLock"] });
+    options: ["Enable.Hub.Door.Service=Lock"] });
 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.UNSECURED);
@@ -747,7 +747,7 @@ test("a UA Gate whose door state map agrees with its record adopts silently and 
 
     [ MAIN_DOOR, { dps: "close", location_id: MAIN_DOOR, lock: "lock" } ],
     [ SIDE_DOOR, { dps: "close", location_id: SIDE_DOOR, lock: "lock" } ]
-  ]), options: ["Enable.Hub.Door.UseLock"] });
+  ]), options: ["Enable.Hub.Door.Service=Lock"] });
 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
   assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE).getCharacteristic(Characteristic.LockCurrentState).value,
@@ -1561,7 +1561,7 @@ test("a UA Gate's lock accessory closes the gate, reads secured afterward, and c
 
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
-  const gate = makeGate({ options: ["Enable.Hub.Door.UseLock"] });
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
   const tile = lockService(gate);
 
   // Unlock first: that is what arms the relock this close has to cancel, and what makes the relock below a genuine state change.
@@ -2277,7 +2277,7 @@ test("the travel time is read at the write, so a door reconfigured while it runs
   const opener = makeTravellingOpener();
   const service = openerService(opener);
 
-  opener.reconfigure([ "Enable.Hub.Door.UseGarageOpener", "Enable.Hub.Door.TransitionDuration." + HUB_SERIAL + ".30" ]);
+  opener.reconfigure([ "Enable.Hub.Door.Service=GarageDoorOpener", "Enable.Hub.Door.TransitionDuration." + HUB_SERIAL + ".30" ]);
 
   await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
   t.mock.timers.tick(TRAVEL_MS);
@@ -2355,4 +2355,19 @@ test("the door guard filter reads the selected guards at device scope and admits
   open.emit("access.remote_view", ringPacket([]));
 
   assert.equal(lineCount(open, "Doorbell ring detected."), 2);
+});
+
+test("the door service choice resolves end to end: an explicit service, the automatic choice, and a device-scoped choice over a global one", () => {
+
+  const carries = (harness: HubHarness, service: { UUID: string }): boolean => harness.services.some(entry => (entry.UUID === service.UUID) && !entry.subtype);
+
+  // A gate told to be a lock is one; a gate told to decide for itself is the opener its hardware defaults to.
+  assert.ok(carries(makeGate({ options: ["Enable.Hub.Door.Service=Lock"] }), Service.LockMechanism));
+  assert.ok(carries(makeGate({ options: ["Enable.Hub.Door.Service=Automatic"] }), Service.GarageDoorOpener));
+
+  // A hub told globally to be an opener but at its own scope to decide for itself is the lock its hardware defaults to.
+  const hub = makeHub({ options: [ "Enable.Hub.Door.Service=GarageDoorOpener", "Enable.Hub.Door.Service." + HUB_SERIAL + "=Automatic" ] });
+
+  assert.ok(carries(hub, Service.LockMechanism));
+  assert.ok(!carries(hub, Service.GarageDoorOpener));
 });

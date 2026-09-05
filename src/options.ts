@@ -5,6 +5,7 @@
 import { ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, ACCESS_DEVICE_UNLOCK_INTERVAL, ACCESS_GARAGE_TRANSITION_DURATION, ACCESS_MQTT_TOPIC,
   ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { FeatureCategoryEntry, FeatureOptionEntry } from "homebridge-plugin-utils";
+import { doorServiceChoices } from "./policy.ts";
 import { mqttFeatureOptions } from "homebridge-plugin-utils";
 
 // Plugin configuration options.
@@ -129,8 +130,7 @@ export const featureOptions: Record<string, AccessFeatureOption[]> = {
   // Hub options.
   "Hub": [
 
-    { default: false, description: "Use a lock accessory instead of a garage door opener accessory for the gate.", meta: { modelKey: ["UA Gate"] }, name: "Door.UseLock" },
-    { default: false, description: "Use a garage door opener accessory instead of a lock accessory. The opener is a momentary operator: opening and closing both pulse the door's relay, and the lock delay setting does not apply to it.", meta: { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ] }, name: "Door.UseGarageOpener" },
+    { choices: doorServiceChoices, default: true, defaultValue: "Automatic", description: "How the door is presented in HomeKit. Automatic presents a UA Gate as a garage door opener and every other hub as a lock; choose Lock or GarageDoorOpener to present the door that way whatever the hardware. The garage door opener is a momentary operator: opening and closing both pulse the door's relay, and the lock delay setting does not apply to it.", name: "Door.Service" },
     { default: false, defaultValue: ACCESS_GARAGE_TRANSITION_DURATION, description: "Duration, in seconds, the door takes to open or close. When set, the garage door opener shows opening and closing while the door travels, and stopped when it is operated mid-travel. This setting applies to the garage door opener accessory and has no effect when the door is presented as a lock accessory.", name: "Door.TransitionDuration" },
     { default: false, defaultValue: ACCESS_DEVICE_UNLOCK_INTERVAL, description: "Delay, in minutes, before locking the door lock relay once it's been unlocked by HomeKit. If set to 0, it will remain unlocked indefinitely. This setting applies to the lock accessory and has no effect when the garage door opener accessory is selected. By default, the door lock relay will lock five seconds after unlocking.", name: "LockDelayInterval" },
     { default: false, description: "Add a switch accessory to control the door lock relay. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions and trigger events when a lock or unlock event occurs. This works with both lock and garage door opener accessories.", name: "Lock.Trigger" },
