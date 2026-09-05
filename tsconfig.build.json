@@ -1,12 +1,25 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * tsconfig.build.json: The emit configuration, which is the base configuration less everything that exists only to be run in place.
- *
- * The base tsconfig keeps the test files so the typechecker and the editor cover them - the type-level assertions are only enforced by a typecheck, since the test runner
- * strips types without checking them. This configuration is what emits, so it excludes them and dist carries the plugin alone.
+ * tsconfig.build.json: The TypeScript project `tsc` uses to emit the published `dist/` output. Narrowed to `src` and excludes the colocated test, fixtures, and helpers
+ * files so they are never compiled into the package; type-checking those still happens through tsconfig.json (`npm run typecheck`), which is the only place the suite's
+ * type-level assertions are enforced, since the test runner strips types without checking them. The IDE-and-lint project declaration lives in tsconfig.json (broad
+ * include + `noEmit`), and both projects extend homebridge-plugin-utils' plugin profile.
  */
 {
-  "exclude": [ "src/**/*.fixtures.ts", "src/**/*.helpers.ts", "src/**/*.test.ts" ],
-  "extends": "./tsconfig.json",
-  "include": ["src"]
+  "compilerOptions": {
+
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+
+  "exclude": [
+
+    "dist",
+    "node_modules",
+    "src/**/*.fixtures.cts", "src/**/*.fixtures.mts", "src/**/*.fixtures.ts",
+    "src/**/*.helpers.cts", "src/**/*.helpers.mts", "src/**/*.helpers.ts",
+    "src/**/*.test.cts", "src/**/*.test.mts", "src/**/*.test.ts"
+  ],
+  "extends": "./node_modules/homebridge-plugin-utils/build/tsconfig.plugin.json",
+  "include": [ "src" ]
 }
