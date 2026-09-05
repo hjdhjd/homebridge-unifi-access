@@ -2,10 +2,9 @@
  *
  * events.ts: Events class for UniFi Access.
  */
+import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import type { AccessController } from "./controller.ts";
-import type { AccessEventPacket } from "unifi-access";
-import type { AccessWebhookEvent } from "unifi-access";
 import { EventEmitter } from "node:events";
 import { mqttTopic } from "homebridge-plugin-utils";
 import { mqttTopics } from "../mqtt.ts";

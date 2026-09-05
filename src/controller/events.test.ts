@@ -4,10 +4,9 @@
  */
 /* eslint-disable camelcase */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
+import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessController } from "./controller.ts";
-import type { AccessEventPacket } from "unifi-access";
-import type { AccessWebhookEvent } from "unifi-access";
 import assert from "node:assert/strict";
 import test from "node:test";
 

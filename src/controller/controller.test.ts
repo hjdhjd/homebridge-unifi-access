@@ -6,12 +6,12 @@
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
-import type { AccessBootstrapConfig, AccessEventPacket } from "unifi-access";
+import type { AccessBootstrapConfig, AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
 import { AccessController, createRemovalQueue } from "./controller.ts";
-import type { AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
 import type { AccessWebhookListener, AccessWebhookRoute } from "../webhooks.ts";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
+import { FeatureOptions, retry } from "homebridge-plugin-utils";
 import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { mock, test } from "node:test";
@@ -21,14 +21,12 @@ import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
-import { FeatureOptions } from "homebridge-plugin-utils";
 import type { MqttClient } from "homebridge-plugin-utils";
 import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { format } from "node:util";
-import { retry } from "homebridge-plugin-utils";
 
 // The topology root the Enterprise hub below is recognized as building-hosted by.
 const ROOT_ID = "root1";

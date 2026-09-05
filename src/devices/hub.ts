@@ -5,8 +5,8 @@
 import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient } from "unifi-access";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
-import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
-import type { AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, AccessStateDoor, OfficialApi } from "unifi-access";
+import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
+  AccessStateDoor, OfficialApi } from "unifi-access";
 import type { AccessMethodKey, DoorServiceType } from "../policy.ts";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";

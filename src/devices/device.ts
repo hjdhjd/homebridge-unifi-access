@@ -4,8 +4,7 @@
  */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { API, Characteristic, CharacteristicValue, HAP, WithUUID } from "homebridge";
-import type { AccessDevice as AccessDeviceProjection, AccessHub as AccessHubProjection } from "unifi-access";
-import type { AccessEventPacket, AccessStateDevice } from "unifi-access";
+import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
@@ -15,7 +14,6 @@ import type { AccessController } from "../controller/controller.ts";
 import type { AccessListener } from "../controller/events.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
-import type { AccessWebhookEvent } from "unifi-access";
 import type { DecoratedSerial } from "../policy.ts";
 
 /* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the

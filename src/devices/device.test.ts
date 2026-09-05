@@ -3,6 +3,7 @@
  * device.test.ts: Tests for the per-device observe loop and the debug gate every device composes.
  */
 /* eslint-disable camelcase */
+import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { FeatureOptions, mqttTopic } from "homebridge-plugin-utils";
 import { deviceModel, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -11,9 +12,6 @@ import { ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
-import type { AccessDevice as AccessDeviceProjection } from "unifi-access";
-import type { AccessEventPacket } from "unifi-access";
-import type { AccessStateDevice } from "unifi-access";
 import type { DecoratedSerial } from "../policy.ts";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
