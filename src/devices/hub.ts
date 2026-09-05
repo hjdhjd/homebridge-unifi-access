@@ -134,6 +134,13 @@ type DoorTravel = { phase: "opening" | "closing" } | { lastDirection: "opening" 
 // Where a garage door stands: still, or running one of the travels above.
 type DoorTransition = { phase: "idle" } | DoorTravel;
 
+/* What a door command needs before it can dispatch: the verb its lines name, the door as the user hears it, and the control surface the command goes through.
+ * Carrying the surface here is what makes it non-optional where the command dispatches, so a command body cannot express a state the preamble already refused.
+ * A gate's commands address a door by identity as well, which the gate form adds, so a gate path receives that identity by type and re-checks nothing.
+ */
+interface DoorCommandTarget { action: string; doorName: string; hub: AccessHubProjection }
+interface GateDoorTarget extends DoorCommandTarget { doorId: string }
+
 // Constants for timing.
 const AUTO_LOCK_DELAY_MS = 5000;
 // How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the controller
@@ -1860,8 +1867,8 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  /* The name a door goes by mid-sentence in the lines its commands write. It is stated on its own rather than inside the shared preamble below because a command
-   * carrying a refusal of its own names the door before that preamble runs, which is what keeps each command's refusals in the order it has always reported them.
+  /* The name a door goes by mid-sentence in the lines its commands and its window helpers write. It stands on its own rather than inside the shared preamble below
+   * because the announce identity reads it too, so the name a user hears in a refusal and in a window's lines can never disagree.
    *
    * @param isSideDoor - Whether the side door of a UA Gate is the target.
    *
@@ -1872,14 +1879,25 @@ export class AccessHub extends AccessDevice {
     return isSideDoor ? "side door" : ((this.uda.device_type === "UGT") ? "gate" : "door");
   }
 
-  /* The preamble every door command shares: name the door, resolve the location identity a UA Gate's commands address it by, and refuse outright when the device
-   * is not reachable.
+  /* The one shape a door command's refusal takes: the verb, the door as the user hears it, and the reason the command cannot be carried. Every refusal a door
+   * command makes is spoken here, so the voice cannot drift as commands are added.
+   *
+   * @param options - The verb the refusal names, the door's rendered name, and the reason, which carries its own terminal punctuation.
+   */
+  #refuseDoorCommand(options: { action: string; doorName: string; reason: string }): void {
+
+    this.log.error("Unable to %s the %s. %s", options.action, options.doorName, options.reason);
+  }
+
+  /* The preamble every door command shares: name the door, resolve the control surface the command dispatches through, and refuse outright when the device cannot
+   * be reached or carries no such surface. The surface travels in the answer rather than being re-checked by each caller, because TypeScript cannot carry a
+   * narrowing of the optional handle across a function boundary...holding it in the target is what makes it non-optional where the command dispatches.
    *
    * @param options - The verb a refusal names, and whether the side door of a UA Gate is the target.
    *
-   * @returns The resolved door, or `null` when the hub cannot be reached and the caller has nothing left to do.
+   * @returns The resolved door, or `null` when the command was refused and the caller has nothing left to do.
    */
-  #resolveDoorCommand(options: { action: string; isSideDoor: boolean }): { doorId: string | undefined; doorName: string } | null {
+  #resolveDoorCommand(options: { action: string; isSideDoor: boolean }): DoorCommandTarget | null {
 
     const { action, isSideDoor } = options;
     const doorName = this.#doorCommandName(isSideDoor);
@@ -1890,12 +1908,78 @@ export class AccessHub extends AccessDevice {
      */
     if(!this.isReachable) {
 
-      this.log.error("Unable to %s the %s. The device cannot be reached.", action, doorName);
+      this.#refuseDoorCommand({ action, doorName, reason: "The device cannot be reached." });
 
       return null;
     }
 
-    return { doorId: isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId, doorName };
+    /* The commands are only reachable through the hub view of this device. An absent one cannot happen through the adoption path, which resolves the hub view first
+     * and falls back to the plain device view only for hardware carrying no hub capability - the same capability this class's lock service is gated on - but the
+     * handle is optional at construction, so this is the honest boundary rather than dead code.
+     */
+    if(!this.hubProjection) {
+
+      this.#refuseDoorCommand({ action, doorName, reason: "This device has no door control surface." });
+
+      return null;
+    }
+
+    return { action, doorName, hub: this.hubProjection };
+  }
+
+  /* The preamble a UA Gate's commands take: the shared one above with the door's own identity added to it.
+   *
+   * The door is always named explicitly. A gate drives two doors and the handle's own resolution answers with whichever port binding the controller happened to
+   * deliver first, so a command leaving the door unnamed would address whichever door that ordering put in front.
+   *
+   * @param options - The verb a refusal names, and whether the side door is the target.
+   *
+   * @returns The resolved door carrying its identity, or `null` when the command was refused.
+   */
+  #resolveGateDoor(options: { action: string; isSideDoor: boolean }): GateDoorTarget | null {
+
+    const target = this.#resolveDoorCommand(options);
+
+    if(!target) {
+
+      return null;
+    }
+
+    const doorId = options.isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId;
+
+    if(!doorId) {
+
+      this.#refuseDoorCommand({ action: target.action, doorName: target.doorName, reason: "No door record was found for it." });
+
+      return null;
+    }
+
+    return { ...target, doorId };
+  }
+
+  /* Every failed dispatch a door command makes, reported in one sentence shape so the verb and the door read the same way whichever command sent it.
+   *
+   * The attribution fallback is not one of these. It stays inside #dispatchUnlock because the refusal it answers is a retry rather than a failure, and nothing
+   * arrives here until that retry has had its turn.
+   *
+   * @param target - The resolved door this command is addressed to.
+   * @param send - The library call to make, given the control surface the target carries.
+   *
+   * @returns `true` when the controller accepted the command.
+   */
+  async #dispatchDoorCommand(target: DoorCommandTarget, send: (hub: AccessHubProjection) => Promise<void>): Promise<boolean> {
+
+    try {
+
+      await send(target.hub);
+    } catch(error) {
+
+      this.log.error("Unable to %s the %s: %s.", target.action, target.doorName, formatErrorMessage(error));
+
+      return false;
+    }
+
+    return true;
   }
 
   /* Every unlock this plugin sends, naming itself as the actor behind it so the controller's activity history records the automation rather than the account the
@@ -1930,9 +2014,6 @@ export class AccessHub extends AccessDevice {
   /* Close a UA Gate's door through the library's own close command, the verb that hardware answers for the closing direction. The unlock this hub's opening
    * direction sends opens a two-button gate whichever direction it was asked for, so every surface that asks a gate to lock arrives here instead.
    *
-   * The door is always named explicitly. A gate drives two doors and the handle's own resolution answers with the first port binding the controller happened to
-   * deliver, so the side door would otherwise be closed by asking about whichever door that ordering put first.
-   *
    * The controller reports nothing back over the event stream for a command of ours, so an accepted close hands the door to the window helper below rather than
    * waiting on an event that never arrives: without that, the write that asked for the close would push the door's stale unlocked state straight back at HomeKit.
    *
@@ -1942,26 +2023,14 @@ export class AccessHub extends AccessDevice {
    */
   private async hubDoorCloseCommand(isSideDoor = false): Promise<boolean> {
 
-    const target = this.#resolveDoorCommand({ action: "close", isSideDoor });
+    const target = this.#resolveGateDoor({ action: "close", isSideDoor });
 
     if(!target) {
 
       return false;
     }
 
-    if(!this.hubProjection || !target.doorId) {
-
-      this.log.error("Unable to close the %s. Door not found.", target.doorName);
-
-      return false;
-    }
-
-    try {
-
-      await this.hubProjection.close({ doorId: target.doorId });
-    } catch(error) {
-
-      this.log.error("Unable to close the %s: %s.", target.doorName, formatErrorMessage(error));
+    if(!(await this.#dispatchDoorCommand(target, hub => hub.close({ doorId: target.doorId })))) {
 
       return false;
     }
@@ -1984,7 +2053,7 @@ export class AccessHub extends AccessDevice {
    * both directions of a HomeKit write dispatch this same pulse. No lock rule of any kind is involved: the configured lock delay governs the lock accessory, and
    * a rule that held the relay open would leave the door open rather than move it.
    *
-   * No door is named. A door hub drives one door and its handle resolves that door for itself.
+   * A door hub drives one door and its handle resolves that door for itself, so the command carries no identity of its own while its lines still name the door.
    *
    * @returns `true` when the controller accepted the pulse.
    */
@@ -1997,27 +2066,16 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    if(!this.hubProjection) {
-
-      this.log.error("Unable to operate. This device has no door control surface.");
-
-      return false;
-    }
-
-    try {
-
-      await this.#dispatchUnlock(this.hubProjection);
-    } catch(error) {
-
-      this.log.error("Unable to operate: %s.", formatErrorMessage(error));
-
-      return false;
-    }
-
-    return true;
+    return this.#dispatchDoorCommand(target, hub => this.#dispatchUnlock(hub));
   }
 
-  // Unified utility function to execute lock and unlock actions on a hub door.
+  /* Lock or unlock a hub's door: the one command every surface asking for either direction arrives at, whatever hardware stands behind it.
+   *
+   * @param isLocking - Whether the door is being locked rather than unlocked.
+   * @param isSideDoor - Whether the side door of a UA Gate is the target.
+   *
+   * @returns `true` when the controller accepted the command.
+   */
   private async hubDoorLockCommand(isLocking: boolean, isSideDoor = false): Promise<boolean> {
 
     /* A UA Gate answers the locking direction with a close. Routing it here rather than at each surface that asks for it means the lock accessory, the automation
@@ -2029,46 +2087,20 @@ export class AccessHub extends AccessDevice {
     }
 
     const action = isLocking ? "lock" : "unlock";
-    // What this command should carry. A UA Gate never consults it: that hardware is unlocked outright and relocks on a timer of our own.
-    const decision = lockCommandRule({ delayInterval: this.lockDelayInterval, isLocking });
-
-    // Only allow relocking if we are able to do so. A UA Gate is exempt because its locking direction is the close command above, and a garage door opener never
-    // arrives here at all because its writes are the momentary pulse...so this is the lock accessory's own refusal to make.
-    if((this.uda.device_type !== "UGT") && (decision.kind === "refuse")) {
-
-      this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", this.#doorCommandName(isSideDoor));
-
-      return false;
-    }
-
-    const target = this.#resolveDoorCommand({ action, isSideDoor });
-
-    if(!target) {
-
-      return false;
-    }
 
     /* A UA Gate is opened through the library's own unlock, which chooses the rail the client's identity can carry it on and absorbs the wire shape on our behalf.
      * Only the unlock direction reaches here, the close command above having taken the other one.
-     *
-     * The door is always named explicitly, for the same reason the close command names it: a gate drives two doors, and the handle's own resolution answers with
-     * whichever port binding the controller happened to deliver first.
      */
     if(this.uda.device_type === "UGT") {
 
-      if(!this.hubProjection || !target.doorId) {
+      const target = this.#resolveGateDoor({ action, isSideDoor });
 
-        this.log.error("Unable to %s the %s. Door not found.", action, target.doorName);
+      if(!target) {
 
         return false;
       }
 
-      try {
-
-        await this.#dispatchUnlock(this.hubProjection, { doorId: target.doorId });
-      } catch(error) {
-
-        this.log.error("Unable to %s the %s: %s.", action, target.doorName, formatErrorMessage(error));
+      if(!(await this.#dispatchDoorCommand(target, hub => this.#dispatchUnlock(hub, { doorId: target.doorId })))) {
 
         return false;
       }
@@ -2087,38 +2119,29 @@ export class AccessHub extends AccessDevice {
 
     // For hub types other than UA Gate, we use the standard device unlock API. This is the lock accessory's own path: a garage door opener on this hardware is the
     // momentary pulse instead.
+    const target = this.#resolveDoorCommand({ action, isSideDoor });
 
-    /* The commands are only reachable through the hub view of this device. An absent one cannot happen through the adoption path, which resolves the hub view first
-     * and falls back to the plain device view only for hardware carrying no hub capability - the same capability this class's lock service is gated on - but the
-     * handle is optional at construction, so this is the honest boundary rather than dead code.
-     */
-    if(!this.hubProjection) {
-
-      this.log.error("Unable to %s. This device has no door control surface.", action);
+    if(!target) {
 
       return false;
     }
 
-    /* Execute the action the policy decided on. A refusal cannot arrive here: the guard above returned on one, and a UA Gate - the only hardware exempt from that
-     * guard - has already returned through the location path. An unconfigured delay issues the plain momentary unlock; anything else goes as a lock rule.
+    // What this command should carry. Only a door hub consults it: a UA Gate is unlocked outright and relocked on a timer of our own, and it has already returned.
+    const decision = lockCommandRule({ delayInterval: this.lockDelayInterval, isLocking });
+
+    /* A relock is only ours to make where the relay carries a rule to reset, so a door on the default settings is told so rather than left to wonder. A garage door
+     * opener never arrives here at all, its writes being the momentary pulse...this is the lock accessory's own refusal. It follows the preamble, so a door that
+     * cannot be reached or carries no control surface is refused for the reason a user can act on rather than for its relay settings.
      */
-    try {
+    if(decision.kind === "refuse") {
 
-      if(decision.kind === "unlock") {
-
-        await this.#dispatchUnlock(this.hubProjection);
-      } else if(decision.kind === "rule") {
-
-        await this.hubProjection.setLockRule(decision.rule);
-      }
-    } catch(error) {
-
-      this.log.error("Unable to %s: %s.", action, formatErrorMessage(error));
+      this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", target.doorName);
 
       return false;
     }
 
-    return true;
+    // Execute the action the policy decided on: an unconfigured delay issues the plain momentary unlock, and every other decision goes as a lock rule.
+    return this.#dispatchDoorCommand(target, hub => (decision.kind === "unlock") ? this.#dispatchUnlock(hub) : hub.setLockRule(decision.rule));
   }
 
   // Wrapper for door lock command.

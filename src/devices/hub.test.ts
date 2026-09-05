@@ -166,6 +166,8 @@ interface HubOptions {
   doors?: { name: string; unique_id: string }[];
   // The switch subtypes the accessory already carries when the hub is stood up, standing in for what a previous run left on it.
   existing?: string[];
+  // A hub stood up with no door control surface at all, which is the state the base class admits through its optional handle.
+  hubless?: boolean;
   official?: boolean;
   options?: string[];
   record?: AccessStateDevice & { mac: string };
@@ -345,7 +347,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   controller.platform.featureOptions = featureEngine;
 
   const hub = new AccessHub(controller as unknown as AccessController, projection as unknown as AccessDeviceProjection, makeAccessory(services), record,
-    hubProjection as unknown as AccessHubProjection);
+    options.hubless ? undefined : hubProjection as unknown as AccessHubProjection);
 
   // Construction narrates itself, and every arm below is about what a delivery or a write does rather than about what adoption said.
   debugs.length = 0;
@@ -1111,6 +1113,97 @@ test("a door command refuses locally whenever the composition reads unreachable,
 
   assert.deepEqual(offline.commands, [], "a device its own record calls offline is refused the same way");
   assert.ok(offline.errors.includes(refusal));
+});
+
+test("a hub with no door control surface refuses every door command with the one sentence that says so", async () => {
+
+  const hub = makeHub({ hubless: true });
+
+  await writeLock(lockService(hub), Characteristic.LockTargetState.UNSECURED);
+
+  assert.deepEqual(hub.commands, [], "a hub with nothing to dispatch on is refused here rather than dispatched into");
+  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door. This device has no door control surface."]);
+
+  /* The locking direction reaches the command through MQTT rather than through the tile: the lock service's write handler suppresses a lock write on a hub whose
+   * reading is already secured, so the topic is the surface that drives that direction here.
+   */
+  await hub.mqttSet("lock", "true");
+  await settle();
+
+  assert.deepEqual(hub.commands, []);
+  assert.deepEqual(hub.errors, [ LOG_PREFIX + "Unable to unlock the door. This device has no door control surface.",
+    LOG_PREFIX + "Unable to lock the door. This device has no door control surface." ]);
+
+  // The garage door opener's momentary pulse names the same door for the same reason.
+  const opener = makeOpener({ hubless: true });
+
+  await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  assert.deepEqual(opener.commands, []);
+  assert.deepEqual(opener.errors, [LOG_PREFIX + "Unable to operate the door. This device has no door control surface."]);
+
+  // A UA Gate hears it on both directions, its locking one arriving through the close command.
+  const gate = makeGate({ hubless: true });
+
+  await gate.mqttSet("lock", "true");
+  await settle();
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. This device has no door control surface.",
+    LOG_PREFIX + "Unable to unlock the gate. This device has no door control surface." ]);
+  assert.deepEqual(gate.commands, []);
+});
+
+test("a UA Gate whose door was never discovered refuses its commands for the record it has no identity from", async () => {
+
+  /* A gate holding a control surface over an empty topology. Both of the preamble's own refusals are behind it, so the only reason left is the one the door
+   * resolution could not answer.
+   */
+  const gate = makeHub({ credentials: true, doors: [], record: hubRecord({ device_type: "UGT" }) });
+
+  await gate.mqttSet("lock", "true");
+  await settle();
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. No door record was found for it.",
+    LOG_PREFIX + "Unable to unlock the gate. No door record was found for it." ]);
+  assert.deepEqual(gate.commands, []);
+});
+
+test("a door that cannot be reached is refused for that reason before its relock policy is consulted", async () => {
+
+  const hub = makeHub();
+
+  // A door the controller reports unlocked, so the write below is a genuine relock rather than a sync from an event, which is how the relock arm sets it up too.
+  hub.setDoorState({ dps: "none", location_id: MAIN_DOOR, lock: "unlock" });
+  hub.hub.refreshDoorState();
+  hub.health.isHealthy = false;
+
+  await writeLock(lockService(hub), Characteristic.LockTargetState.SECURED);
+
+  assert.deepEqual(hub.commands, [], "an unreachable door dispatches nothing whatever its relay is configured for");
+
+  // Exactly one line, which is where the relock sentence's absence is asserted: an outage is what the user can act on.
+  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to lock the door. The device cannot be reached."]);
+});
+
+test("a door hub's failure lines name the door the command was addressed to", async () => {
+
+  const opener = makeOpener({ reject: ["unlock"] });
+
+  await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  assert.equal(opener.commands.length, 1, "the pulse reached the controller, so this line reports a failure rather than a refusal");
+  assert.deepEqual(opener.errors, [LOG_PREFIX + "Unable to operate the door: The controller refused this command."]);
+
+  const hub = makeHub({ reject: ["unlock"] });
+
+  await writeLock(lockService(hub), Characteristic.LockTargetState.UNSECURED);
+
+  assert.equal(hub.commands.length, 1);
+  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door: The controller refused this command."]);
 });
 
 test("a completed recovery refreshes a rowless reader's access methods and restates the switch behind them", async () => {
