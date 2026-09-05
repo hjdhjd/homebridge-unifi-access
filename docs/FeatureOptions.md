@@ -89,10 +89,10 @@ These option(s) apply to: Access controllers.
 | <A NAME="Hub.Doorbell"></A>`Hub.Doorbell`                                        | Add a doorbell accessory to handle doorbell ring events in HomeKit. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
 | <A NAME="Hub.Doorbell.Trigger"></A>`Hub.Doorbell.Trigger`                        | Add a switch accessory for automation scenarios that reflects doorbell ring events, and rings or cancels the doorbell through the official Access API when an API token is configured. **(default: disabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
 | <A NAME="Hub.Doorbell.DoorGuards"></A>`Hub.Doorbell.DoorGuards=<value>`          | Restrict doorbell ring events to the selected door guards, the Access users assigned to answer this door's calls; rings for any other door guard are ignored. Guards are listed by name when the controller is configured with an API token and by identifier otherwise, and a controller reached by its token alone lists every user. Each ring's door guard IDs are logged when debug logging is enabled. **(default: none)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| <A NAME="Hub.DPS"></A>`Hub.DPS`                                                  | Add a contact sensor accessory for the door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Hub.DPS"></A>`Hub.DPS`                                                  | Add a contact sensor accessory for the door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, UniFi Access Hub Door Mini, and UniFi Access Gate.*
 | <A NAME="Hub.REL"></A>`Hub.REL`                                                  | Add a contact sensor accessory for the remote release. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
 | <A NAME="Hub.REN"></A>`Hub.REN`                                                  | Add a contact sensor accessory for the request to enter sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
-| <A NAME="Hub.REX"></A>`Hub.REX`                                                  | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Hub.REX"></A>`Hub.REX`                                                  | Add a contact sensor accessory for the request to exit sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, and UniFi Access Hub Door Mini.*
 | <A NAME="Hub.SideDoor"></A>`Hub.SideDoor`                                        | Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices. **(default: enabled)**. <BR>*Supported on UniFi Access Gate.*
 | <A NAME="Hub.SideDoor.DPS"></A>`Hub.SideDoor.DPS`                                | Add a contact sensor accessory for the side door position sensor. **(default: enabled)**. <BR>*Supported on UniFi Access Gate.*
 | <A NAME="Hub.SideDoor.Lock.Trigger"></A>`Hub.SideDoor.Lock.Trigger`              | Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks. **(default: disabled)**. <BR>*Supported on UniFi Access Gate.*
@@ -108,10 +108,10 @@ These option(s) apply to: Access controllers.
 | Option                                     | Description
 |--------------------------------------------|-------------------------------------------------------------
 | <A NAME="Log.Doorbell"></A>`Log.Doorbell`  | Log doorbell ring events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs that have a doorbell.*
-| <A NAME="Log.DPS"></A>`Log.DPS`            | Log door position sensor events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Log.DPS"></A>`Log.DPS`            | Log door position sensor events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, UniFi Access Hub Door Mini, and UniFi Access Gate.*
 | <A NAME="Log.REL"></A>`Log.REL`            | Log door remote release events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
 | <A NAME="Log.REN"></A>`Log.REN`            | Log door request to enter events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Hub.*
-| <A NAME="Log.REX"></A>`Log.REX`            | Log door request to exit events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra.*
+| <A NAME="Log.REX"></A>`Log.REX`            | Log door request to exit events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, and UniFi Access Hub Door Mini.*
 | <A NAME="Log.Lock"></A>`Log.Lock`          | Log lock events in Homebridge. **(default: enabled)**. <BR>*Supported on UniFi Access hubs.*
 
 #### <A NAME="mqtt"></A>MQTT

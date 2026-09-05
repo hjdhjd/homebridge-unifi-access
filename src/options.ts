@@ -230,9 +230,10 @@ export function describeCategoryScope(category: AccessFeatureCategory): string |
 }
 
 /**
- * Documentation hook: returns the "Supported on ..." suffix appended to an option's description cell, naming the capability or device model the option is gated on,
- * or `undefined` when the option declares no scope worth naming. The capability gate is read first and the device model is the catch-all behind it, because an
- * option gated on both is gated on the capability in the narrower sense.
+ * Documentation hook: returns the "Supported on ..." suffix appended to an option's description cell, naming every capability or every device model the option
+ * is gated on, or `undefined` when the option declares no scope worth naming. The capability gate is read first and the model list is the catch-all behind it,
+ * because an option gated on both is gated on the capability in the narrower sense. Each list is read whole, so an option scoped to several models names every
+ * one of them, and two flags sharing one description name it once.
  *
  * @param option - The option entry whose `meta` scope to describe.
  *
@@ -240,21 +241,9 @@ export function describeCategoryScope(category: AccessFeatureCategory): string |
  */
 export function describeOptionScope(option: AccessFeatureOption): string | undefined {
 
-  const capability = option.meta?.hasCapability?.[0];
+  const capabilities = [...new Set((option.meta?.hasCapability ?? []).map(flag => capabilityMap[flag] ?? flag))];
+  const models = (option.meta?.modelKey ?? []).map(key => modelMap[key]).filter(model => model.length > 0);
+  const named = capabilities.length ? capabilities : models;
 
-  if(capability !== undefined) {
-
-    return " <BR>*Supported on " + (capabilityMap[capability] ?? capability) + ".*";
-  }
-
-  const model = option.meta?.modelKey?.[0];
-
-  if(model === undefined) {
-
-    return undefined;
-  }
-
-  const named = modelMap[model];
-
-  return named.length ? (" <BR>*Supported on " + named + ".*") : undefined;
+  return named.length ? (" <BR>*Supported on " + lf.format(named) + ".*") : undefined;
 }

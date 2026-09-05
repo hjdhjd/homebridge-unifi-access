@@ -222,3 +222,19 @@ test("the access methods are one selection over a page-registered source, none s
   // The domain the page offers where no reader is in view is the catalog's own list, so the two can never disagree about a method's spelling.
   assert.deepEqual(switches.meta?.choiceDomain, accessMethodChoices());
 });
+
+test("an option scoped to several models or several flags names every one in its suffix, and repeated prose is named once", () => {
+
+  assert.equal(describeOptionScope(entryFor("Hub", "DPS")),
+    " <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, UniFi Access Hub Door Mini, and UniFi Access Gate.*", "every model the option is scoped to is named");
+  assert.equal(describeOptionScope(entryFor("Log", "REX")), " <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, and UniFi Access Hub Door Mini.*");
+
+  // Two capability flags that share one description are named once, and a capability list outranks a model list beside it.
+  const probe: AccessFeatureOption = { default: true, description: "", meta: { hasCapability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], modelKey: ["UA Hub"] },
+    name: "Probe" };
+
+  assert.equal(describeOptionScope(probe), " <BR>*Supported on UniFi Access readers that support mobile authentication.*");
+
+  // A model list carrying only the every-device sentinel names nothing.
+  assert.equal(describeOptionScope({ default: true, description: "", meta: { modelKey: ["all"] }, name: "Probe" }), undefined);
+});
