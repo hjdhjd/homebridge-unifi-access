@@ -173,6 +173,8 @@ interface HubOptions {
   record?: AccessStateDevice & { mac: string };
   reject?: string[];
   rejectFrom?: number;
+  // The error a doorbell ring or cancel rejects with, standing in for a controller that refuses the dispatch. The ring is recorded before it is thrown.
+  ringRefusal?: Error;
   // What the official settings read answers, called with the ordinal of the read so an arm can answer a retry differently from the attempt that failed.
   settings?: (fetch: number) => Promise<unknown>;
   // The error an unlock naming an actor rejects with, standing in for a client that cannot carry the attribution. An unlock naming none is answered normally.
@@ -287,7 +289,15 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
         return options.settings?.(fetches.length) ?? { access_methods: {}, device_id: deviceId };
       },
-      triggerDoorbell: async (readerId: string, opts?: { cancel?: boolean }): Promise<void> => void rings.push({ cancel: opts?.cancel === true, readerId }),
+      triggerDoorbell: async (readerId: string, opts?: { cancel?: boolean }): Promise<void> => {
+
+        rings.push({ cancel: opts?.cancel === true, readerId });
+
+        if(options.ringRefusal) {
+
+          throw options.ringRefusal;
+        }
+      },
       updateSettings: async (deviceId: string, update: unknown): Promise<void> => void updates.push(update)
     }
   } : null;
@@ -797,16 +807,6 @@ function securedGate(options: HubOptions = {}): HubHarness {
     { device_id: HUB_ID, key: "output_oper2_relay", tag: "relay", value: "off" } ], device_type: "UGT" }) });
 }
 
-// The side door position sensor a UA Gate configures for itself.
-function sideDpsSensor(harness: HubHarness): Service {
-
-  const sensor = harness.services.find(service => (service.UUID === Service.ContactSensor.UUID) && (service.subtype === AccessReservedNames.CONTACT_DPS_SIDE));
-
-  assert.ok(sensor, "the gate should have configured its side door position sensor");
-
-  return sensor;
-}
-
 test("a UA Gate adopts its main door's lock from the door state map rather than leaving the record's reading in HomeKit", () => {
 
   /* The distinguishing input: the relay row every service is built from says secured, and the controller's own door state map says the gate is standing open.
@@ -832,7 +832,7 @@ test("a UA Gate adopts its side door's lock and position from the door state map
 
   assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE).getCharacteristic(Characteristic.LockCurrentState).value,
     Characteristic.LockCurrentState.UNSECURED);
-  assert.equal(sideDpsSensor(gate).getCharacteristic(Characteristic.ContactSensorState).value,
+  assert.equal(contactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_NOT_DETECTED);
 
   assert.deepEqual(gate.publishes, []);
@@ -851,7 +851,8 @@ test("a UA Gate whose door state map agrees with its record adopts silently and 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
   assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE).getCharacteristic(Characteristic.LockCurrentState).value,
     Characteristic.LockCurrentState.SECURED);
-  assert.equal(sideDpsSensor(gate).getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED);
+  assert.equal(contactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
+    Characteristic.ContactSensorState.CONTACT_DETECTED);
 
   assert.deepEqual(gate.publishes, [], "an adoption that told HomeKit nothing new must publish nothing");
   assert.deepEqual(gate.lines, []);
@@ -1071,9 +1072,7 @@ test("a v2 access method event retries a settings read that failed, and only whi
 test("a dressed sensor answers availability from the live composition rather than from what was last pushed to it", async () => {
 
   const harness = makeGate();
-  const sensor = harness.services.find(service => (service.UUID === Service.ContactSensor.UUID) && (service.subtype === AccessReservedNames.CONTACT_DPS));
-
-  assert.ok(sensor, "the gate should have configured its door position sensor");
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_DPS);
 
   const availability = sensor.getCharacteristic(Characteristic.StatusActive);
 
@@ -2854,6 +2853,52 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
   assert.equal(lineCount(quiet, "Remote release open."), 0, "while the sentence the user turned off is not written");
 });
 
+test("a UA Hub reads each terminal input from its own row, so no input can answer with another's reading", () => {
+
+  /* Every other arm drives a UA Hub's three rows to one value together, which cannot tell the rows apart: a table naming the wrong row for an input would answer
+   * identically. Here each restate moves exactly one row, so each sensor is read against the two that did not move.
+   */
+  const harness = makeHub({ record: wiredHub("off") });
+  const readings = (): unknown[] => TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype).getCharacteristic(Characteristic.ContactSensorState).value);
+  const closed = Characteristic.ContactSensorState.CONTACT_DETECTED;
+  const open = Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "on" }, { key: "input_state_ren", value: "off" },
+    { key: "input_state_rex", value: "off" } ]) ]);
+
+  assert.deepEqual(readings(), [ closed, open, open ], "the remote release row alone reads on, and the remote release alone answers closed");
+
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "off" }, { key: "input_state_ren", value: "on" },
+    { key: "input_state_rex", value: "off" } ]) ]);
+
+  assert.deepEqual(readings(), [ open, closed, open ], "the request to enter row alone reads on, and only that sensor follows it");
+
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "off" }, { key: "input_state_ren", value: "off" },
+    { key: "input_state_rex", value: "on" } ]) ]);
+
+  assert.deepEqual(readings(), [ open, open, closed ], "and the request to exit row alone reads on");
+});
+
+test("a terminal input whose wiring falls silent keeps its sensor, reads closed, and announces nothing", () => {
+
+  const harness = makeHub({ record: hubRecord({ configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "off" }]) ] }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
+
+  assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+    "a wired input whose row reads off is open");
+
+  /* The wiring rows go away while the reading row stays exactly where it was. The service survives, because the gate keeps one already standing through a wiring
+   * silence, and the reading falls back to the closed default an input carrying no wiring evidence has.
+   */
+  refreshRecord(harness, inputRows([{ key: "input_state_rel", value: "off" }]));
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the sensor already standing survives the silence");
+  assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
+    "and an input with no wiring evidence reads closed whatever its row still says");
+  assert.deepEqual(topicPayloads(harness, "rel"), [], "the closed default is not a reading to publish");
+  assert.equal(lineCount(harness, "Remote release closed."), 0, "and not a change to announce");
+});
+
 test("a hub's wiring table and the option catalog's model lists agree about which family drives which terminal input", () => {
 
   const families = [ "UAH", "UA-Hub-Door-Mini", "UA-ULTRA", "UGT", "UAH-Ent" ];
@@ -3027,4 +3072,22 @@ test("the doorbell trigger switch rings and cancels through the official API and
   t.mock.timers.tick(REVERT_DELAY_MS);
 
   assert.equal(tokenlessTrigger.getCharacteristic(Characteristic.On).value, false, "and the switch is put back where the mirror stands");
+});
+
+test("a doorbell ring the controller refuses says so and puts the switch back on the shorter pause", async (t) => {
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const harness = makeHub({ devices: [READER_RECORD], official: true, options: ["Enable.Hub.Doorbell.Trigger"],
+    ringRefusal: new Error("The controller refused the ring.") });
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
+
+  await trigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+
+  assert.deepEqual(harness.rings, [{ cancel: false, readerId: READER_ID }], "the ring reached the reader, so the refusal is the controller's answer to it");
+  assert.deepEqual(harness.errors, [LOG_PREFIX + "Unable to ring the doorbell: The controller refused the ring."]);
+
+  t.mock.timers.tick(REVERT_DELAY_MS);
+
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and a dispatch the controller refused keeps the shorter pause rather than the window");
 });

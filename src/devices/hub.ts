@@ -56,27 +56,24 @@ interface AccessEventDeviceUpdateV2 {
   }[];
 }
 
-/* The dry contact inputs that share one shape: a wiring-evidence gate, a generated state getter, and an MQTT tail of their own.
+/* The dry contact inputs that share one shape: a wiring-evidence gate, a state reading taken from one table, and an MQTT tail of their own. Each input's
+ * HomeKit-facing name and the catalog entry its MQTT topic tail comes from sit here together, so that configuration and live updates cannot drift on either. The
+ * entry is named rather than its tail spelled, so the catalog stays the one place a topic is written. The label is carried in the title case a service name wants;
+ * the log lines derive the other casings they need from it, so each input is spelled here exactly once.
  *
  * The door position sensor is deliberately not one of them. All three of the things that shape a terminal input differ for it - where its eligibility comes from,
  * where its state comes from, and how it reaches HomeKit - so it is configured and updated on its own rather than forced through a loop that would have to special
  * case it at every step.
  */
-const sensorInputs = [ "Rel", "Ren", "Rex" ] as const;
-
-// Create a union type based on our sensor inputs.
-type SensorInput = typeof sensorInputs[number];
-
-/* Each input's HomeKit-facing name and the catalog entry its MQTT topic tail comes from, in one table so that configuration and live updates cannot drift on either.
- * The entry is named here rather than its tail spelled, so the catalog stays the one place a topic is written. The label is carried in the title case a service name
- * wants; the log lines derive the other casings they need from it, so each input is spelled here exactly once.
- */
-const terminalInputs: { input: SensorInput; label: string; topic: MqttTopicEntry }[] = [
+const terminalInputs = [
 
   { input: "Rel", label: "Remote Release", topic: mqttTopics.rel },
   { input: "Ren", label: "Request to Enter Sensor", topic: mqttTopics.ren },
   { input: "Rex", label: "Request to Exit Sensor", topic: mqttTopics.rex }
-];
+] as const satisfies readonly { input: string; label: string; topic: MqttTopicEntry }[];
+
+// The inputs themselves, derived from the table so the names are spelled in one place and every table keyed by them stays complete.
+type SensorInput = typeof terminalInputs[number]["input"];
 
 // The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
 const DPS_LABEL = "Door Position Sensor";
@@ -107,24 +104,29 @@ const sensorWiring: Record<SensorInput, Record<string, string[]>> = {
   }
 };
 
-// Create a mapped type of our HomeKit terminal input state check.
-export type AccessHubHKProps = Record<`hk${SensorInput}State`, CharacteristicValue>;
+// The configuration row each model reports an input's live reading under. The per-device-type inconsistency is the controller's own, exactly as it is for the wiring
+// table above, and a model naming no row for an input simply offers no reading of it.
+const sensorStateRows: Record<SensorInput, Record<string, string>> = {
 
-// Create a mapped type of our wiring checks.
-export type AccessHubWiredProps = Record<`is${SensorInput}Wired`, boolean>;
+  Rel: {
 
-// Merge the declarations into the definition of the class, so TypeScript knows that these properties will exist.
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-export interface AccessHub extends AccessHubHKProps, AccessHubWiredProps { }
+    UAH: "input_state_rel"
+  },
+  Ren: {
 
-// Utility to assist us in constructing typing for the properties we will be using.
-type KeyOf<T, Prefix extends string, Suffix extends string = ""> = Extract<keyof T, `${Prefix}${SensorInput}${Suffix}`>;
+    UAH: "input_state_ren"
+  },
+  Rex: {
 
-// Finally, define our key-unions types so we can satisfy our typing needs.
-type HubStateKey = KeyOf<AccessHub, "hub", "State">;
-type HkStateKey = KeyOf<AccessHub, "hk", "State">;
-type LogHintKey = KeyOf<AccessHints, "log">;
-type WiredKey = KeyOf<AccessHub, "is", "Wired">;
+    "UA-Hub-Door-Mini": "input_d1_button",
+    "UA-ULTRA": "input_d1_button",
+    UAH: "input_state_rex"
+  }
+};
+
+// The hint that says whether an input's readings are announced in the log, named from the same input list the tables above are keyed by so a new input cannot be
+// added without a hint to go with it.
+type LogHintKey = Extract<keyof AccessHints, `log${SensorInput}`>;
 
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
  * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
@@ -155,7 +157,6 @@ const GATE_TRANSITION_DURATION_MS = 5000;
 // The key the main door's transition timer is tracked under. It is stated once so the arm, the re-arm, and the cancel can never name different timers.
 const DOOR_TRANSITION_TIMER_KEY = "door-transition";
 
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class AccessHub extends AccessDevice {
 
   private _hkDpsState: CharacteristicValue;
@@ -941,8 +942,7 @@ export class AccessHub extends AccessDevice {
     for(const { input, label } of terminalInputs) {
 
       const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
-      const state = ("hub" + input + "State") as HubStateKey;
-      const gate = capabilityGate({ capability: this[("is" + input + "Wired") as WiredKey], toggle: this.hasFeature("Hub." + input.toUpperCase()) });
+      const gate = capabilityGate({ capability: this.isWired(input), toggle: this.hasFeature("Hub." + input.toUpperCase()) });
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
@@ -972,7 +972,7 @@ export class AccessHub extends AccessDevice {
       }
 
       // Initialize the sensor state.
-      service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this[state]);
+      service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this.terminalInputState(input));
       this.dressAvailability(service);
       this.dressTamperState(service);
     }
@@ -2449,97 +2449,23 @@ export class AccessHub extends AccessDevice {
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
   }
 
-  // Return the current state of the REL on the hub.
-  private get hubRelState(): CharacteristicValue {
+  /* What a terminal input reads: closed unless the input is wired and the row its model reports it under says anything but on. A model naming no row offers no
+   * reading of that input at all, which renders as the same closed answer, so nothing downstream has to tell the two apart.
+   *
+   * @param input - The terminal input to read.
+   *
+   * @returns The contact sensor state the input's live reading renders as.
+   */
+  private terminalInputState(input: SensorInput): CharacteristicValue {
 
-    // If we don't have the wiring connected for the REL, we report our default closed state.
-    if(!this.isRelWired) {
+    const row = sensorStateRows[input][this.uda.device_type];
 
-      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    let relayType;
-
-    switch(this.uda.device_type) {
-
-      case "UAH":
-
-        relayType = "input_state_rel";
-
-        break;
-
-      default:
-
-        return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    // Return our REL state. If it's anything other than on, we assume it's open.
-    return (this.uda.configs?.find(relay => relay.key === relayType)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
-      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
-  }
-
-  // Return the current state of the REN on the hub.
-  private get hubRenState(): CharacteristicValue {
-
-    // If we don't have the wiring connected for the REN, we report our default closed state.
-    if(!this.isRenWired) {
+    if(!row || !this.isWired(input)) {
 
       return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
     }
 
-    let relayType;
-
-    switch(this.uda.device_type) {
-
-      case "UAH":
-
-        relayType = "input_state_ren";
-
-        break;
-
-      default:
-
-        return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    // Return our REN state. If it's anything other than on, we assume it's open.
-    return (this.uda.configs?.find(relay => relay.key === relayType)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
-      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
-  }
-
-  // Return the current state of the REX on the hub.
-  private get hubRexState(): CharacteristicValue {
-
-    // If we don't have the wiring connected for the REX, we report our default closed state.
-    if(!this.isRexWired) {
-
-      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    let relayType;
-
-    switch(this.uda.device_type) {
-
-      case "UA-Hub-Door-Mini":
-      case "UA-ULTRA":
-
-        relayType = "input_d1_button";
-
-        break;
-
-      case "UAH":
-
-        relayType = "input_state_rex";
-
-        break;
-
-      default:
-
-        return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    // Return our REX state. If it's anything other than on, we assume it's open.
-    return (this.uda.configs?.find(relay => relay.key === relayType)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
+    return (this.uda.configs?.find(relay => relay.key === row)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
       this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
   }
 
@@ -2761,21 +2687,19 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
-      const hkKey = ("hk" + input + "State") as HkStateKey;
-      const hubKey = ("hub" + input + "State") as HubStateKey;
       const logKey = ("log" + input) as LogHintKey;
-      const wiredKey = ("is" + input + "Wired") as WiredKey;
+      const reading = this.terminalInputState(input);
 
-      if(this[hubKey] === this[hkKey]) {
+      if(reading === this.getContactSensorState(reservedId)) {
 
         continue;
       }
 
-      this[hkKey] = this[hubKey];
+      this.setContactSensorState(reservedId, reading);
 
-      if(this[wiredKey]) {
+      if(this.isWired(input)) {
 
-        const contactDetected = this.isClosed(this[hkKey]);
+        const contactDetected = this.isClosed(reading);
 
         this.mqttPublish(topic, contactDetected ? "false" : "true");
 
@@ -3118,47 +3042,6 @@ export class AccessHub extends AccessDevice {
       default:
 
         break;
-    }
-  }
-
-  // We dynamically define our getters and setters for terminal inputs so we can streamline redundancies. Yes, this is fancy...but it's meant to future-proof a bit
-  // against whatever Ubiquiti may do in the future given the inconsistencies in their API implementation for Access across devices of even similar types.
-  static {
-
-    // We define the specific sensor input properties we need.
-    for(const input of sensorInputs) {
-
-      let propName = "hk" + input + "State";
-      const enumKey = "CONTACT_" + input.toUpperCase();
-
-      Object.defineProperty(AccessHub.prototype, propName, {
-
-        configurable: true,
-        enumerable: true,
-        get(this: AccessHub) {
-
-          // Delegate to our individual helper functions.
-          return this.getContactSensorState(AccessReservedNames[enumKey as keyof typeof AccessReservedNames]);
-        },
-
-        set(this: AccessHub, value: CharacteristicValue) {
-
-          this.setContactSensorState(AccessReservedNames[enumKey as keyof typeof AccessReservedNames], value);
-        }
-      });
-
-      // Now define our wiring getters.
-      propName = "is" + input + "Wired";
-
-      Object.defineProperty(AccessHub.prototype, propName, {
-
-        configurable: true,
-        enumerable: true,
-        get(this: AccessHub) {
-
-          return this.isWired(input);
-        }
-      });
     }
   }
 }
