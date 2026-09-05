@@ -43,17 +43,6 @@ const ACCESS_METHOD_UNSEEDED: AccessMethodState = { phase: "unseeded" };
 interface AccessEventDeviceUpdateV2 {
 
   access_method?: Partial<Record<AccessMethodKey, string>>;
-
-  // Location states for UA Gate hubs which contain the lock state per door.
-  location_states?: {
-
-    dps: "open" | "close";
-    dps_connected: boolean;
-    enable: boolean;
-    is_unavailable: boolean;
-    location_id: string;
-    lock: "locked" | "unlocked";
-  }[];
 }
 
 /* The dry contact inputs that share one shape: a wiring-evidence gate, a state reading taken from one table, and an MQTT tail of their own. Each input's
@@ -142,6 +131,12 @@ type DoorTransition = { phase: "idle" } | DoorTravel;
  */
 interface DoorCommandTarget { action: string; doorName: string; hub: AccessHubProjection }
 interface GateDoorTarget extends DoorCommandTarget { doorId: string }
+
+/* One door this hub drives: the identity the client's door-state map keys its reading by, and whether it is the side door of a UA Gate. Carrying the two together
+ * is what lets one enumeration answer for hardware that drives a single door and for hardware that drives two, so every reader takes the side-door question from
+ * the same place it took the identity.
+ */
+interface DrivenDoor { isSideDoor: boolean; locationId: string }
 
 // Constants for timing.
 const AUTO_LOCK_DELAY_MS = 5000;
@@ -305,12 +300,10 @@ export class AccessHub extends AccessDevice {
    */
   private initializeDoorStates(): void {
 
-    const doorStates = this.controller.client.doorStates;
-
     // Find and initialize main door state.
     if(this.mainDoorLocationId) {
 
-      const mainDoor = doorStates.get(this.mainDoorLocationId);
+      const mainDoor = this.#doorEntry(this.mainDoorLocationId);
 
       this.hkDpsState = this.toDpsState(mainDoor?.dps ?? "close");
       this.hkLockState = this.toLockState(mainDoor?.lock ?? "lock");
@@ -323,9 +316,9 @@ export class AccessHub extends AccessDevice {
     }
 
     // Find and initialize side door state.
-    if(this.sideDoorLocationId && this.hints.hasSideDoor) {
+    if(this.sideDoorLocationId) {
 
-      const sideDoor = doorStates.get(this.sideDoorLocationId);
+      const sideDoor = this.#doorEntry(this.sideDoorLocationId);
 
       this._hkSideDoorDpsState = this.toDpsState(sideDoor?.dps ?? "close");
       this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, this._hkSideDoorDpsState);
@@ -1673,30 +1666,30 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  /* This hub's own door-state entry, or `undefined` when nothing about its door has been established.
+  // The client's live entry for one door, absent only where neither source had anything to say about that door.
+  #doorEntry(locationId: string): AccessDoorStateEntry | undefined {
+
+    return this.controller.client.doorStates.get(locationId);
+  }
+
+  /* The main door's own door-state entry, or `undefined` when nothing about that door has been established. The position evidence reads it, and so does the
+   * construction seed of a hub that drives a single door.
    *
-   * The one guarded home for the read, so no later call site can drop the guard. The library's handle raises a ReferenceError when the device has left controller
-   * state, which is the ordinary shape of a removal window rather than a fault; anything else it raises is a real fault and must surface rather than disappear into
-   * that disguise. Hardware that drives no door at all - a reader alongside a hub - has no handle here and short-circuits with no throw involved.
+   * The removal-window guard lives in the door identity read alone, because a lookup on the client's map cannot throw: once the enumeration has answered there is
+   * nothing left here for a departing device to raise, and a hub inside that window enumerates no doors at all. Hardware that drives no door - a reader alongside
+   * a hub - enumerates none either and answers undefined for the same reason.
    */
   get #doorStateEntry(): AccessDoorStateEntry | undefined {
 
-    try {
+    const mainDoor = this.#drivenDoors.find(door => !door.isSideDoor);
 
-      return this.hubProjection?.doorState;
-    } catch(error) {
-
-      if(error instanceof ReferenceError) {
-
-        return undefined;
-      }
-
-      throw error;
-    }
+    return mainDoor ? this.#doorEntry(mainDoor.locationId) : undefined;
   }
 
-  // The identity of the door this hub drives, read through the same removal-window guard the door-state read uses and for the same reason: the library's handle
-  // raises a ReferenceError once the device has left controller state, which is the ordinary shape of a removal rather than a fault.
+  /* The identity of the door this hub drives, read through a removal-window guard because the library's handle raises a ReferenceError once the device has left
+   * controller state, which is the ordinary shape of a removal rather than a fault. This is the one place that guard lives, because a lookup on the client's
+   * door-state map cannot throw once an identity has been resolved to read it under.
+   */
   get #doorId(): string | undefined {
 
     try {
@@ -1713,25 +1706,53 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  /* Which of this hub's doors a location identifies, or null when it identifies none of them.
+  /* Every door this hub drives, each under the identity the client's door-state map keys its reading by. This is the one statement of which doors a hub is
+   * answerable for: the door-state refresh, the ownership check, and the construction seed all take their doors from here.
    *
    * A UA Gate answers from the two doors it discovered for itself, because the library derives no per-door facts for hardware whose doors it cannot tell apart.
-   * Every other hub answers from the library's own published door resolution. A hub inside its removal grace answers null rather than throwing, which matters
-   * because every hub on a controller sees every delivery and one hub's throw would otherwise cost its siblings theirs.
+   * A side door is enumerated wherever discovery resolved one, and discovery consults the user's side-door preference once, at construction, so no reader here
+   * asks it again. Every other hub answers from the library's own published door resolution. A hub inside its removal grace enumerates nothing at all rather
+   * than throwing, which is what the guarded identity read above makes true and which matters because every hub on a controller sees every delivery.
    */
-  #ownedDoor(locationId: string): Nullable<"main" | "side"> {
+  get #drivenDoors(): readonly DrivenDoor[] {
 
     if(this.uda.device_type === "UGT") {
 
-      if(locationId === this.mainDoorLocationId) {
+      const doors: DrivenDoor[] = [];
 
-        return "main";
+      if(this.mainDoorLocationId) {
+
+        doors.push({ isSideDoor: false, locationId: this.mainDoorLocationId });
       }
 
-      return (locationId === this.sideDoorLocationId) ? "side" : null;
+      if(this.sideDoorLocationId) {
+
+        doors.push({ isSideDoor: true, locationId: this.sideDoorLocationId });
+      }
+
+      return doors;
     }
 
-    return (locationId === this.#doorId) ? "main" : null;
+    const doorId = this.#doorId;
+
+    return doorId ? [{ isSideDoor: false, locationId: doorId }] : [];
+  }
+
+  /* Which of this hub's doors a location identifies, or null when it identifies none of them.
+   *
+   * A hub inside its removal grace answers null rather than throwing, which matters because every hub on a controller sees every delivery and one hub's throw
+   * would otherwise cost its siblings theirs.
+   */
+  #ownedDoor(locationId: string): Nullable<"main" | "side"> {
+
+    const door = this.#drivenDoors.find(driven => driven.locationId === locationId);
+
+    if(!door) {
+
+      return null;
+    }
+
+    return door.isSideDoor ? "side" : "main";
   }
 
   /* Whether this hub has positive evidence of a wired door position sensor - the one predicate every consumer of that question reads. The family-by-family answer
@@ -1748,30 +1769,34 @@ export class AccessHub extends AccessDevice {
   /* Project this hub's live door state into HomeKit. The controller's door-state loop calls this once from what it finds on arrival, and again on every change the
    * client's model records.
    *
-   * A UA Gate returns immediately. It drives two doors, and the library's read resolves the one door a hub drives, so there is no answer here for that hardware -
-   * its own handlers carry its state instead.
+   * Every door the hub drives is read from the client's map under its own identity, which is how a UA Gate's two doors arrive through the same delivery as every
+   * other hub's one, applied to the doors that discovery resolved for it rather than through a second resolution of their own.
    *
-   * The entry we read updates live from the notification stream: the wiring keys behind it are live circuit detection, and the stream reports a wiring transition
-   * as it happens. A refresh only ever seeds a door it has never seen, so the stream is the sole corrector of an established entry once we are running.
+   * The entries we read update live from the notification stream: the wiring keys behind them are live circuit detection, and the stream reports a wiring
+   * transition as it happens. A refresh only ever seeds a door it has never seen, so the stream is the sole corrector of an established entry once we are running.
    */
   public refreshDoorState(): void {
 
-    if(this.uda.device_type === "UGT") {
+    for(const door of this.#drivenDoors) {
 
-      return;
+      const entry = this.#doorEntry(door.locationId);
+
+      // Nothing established is nothing to project.
+      if(!entry) {
+
+        continue;
+      }
+
+      /* Re-gate the sensor before applying state, so a change in wiring evidence reaches HomeKit on this rail too rather than waiting on a device update. The
+       * evidence that gates it is the main door's, which is the door the re-gate belongs to.
+       */
+      if(!door.isSideDoor) {
+
+        this.configureDpsSensor();
+      }
+
+      this.applyDoorState(entry, door.isSideDoor);
     }
-
-    const entry = this.#doorStateEntry;
-
-    // Nothing established is nothing to project.
-    if(!entry) {
-
-      return;
-    }
-
-    // Re-gate the sensor before applying state, so a change in wiring evidence reaches HomeKit on this rail too rather than waiting on a device update.
-    this.configureDpsSensor();
-    this.applyDoorState({ dps: entry.dps, lock: entry.lock }, false);
   }
 
   /* The registry key a door's pending auto-relock is tracked under. One door, one relock intent: a HomeKit unlock and a remote unlock arrive under the same key, so
@@ -2790,80 +2815,6 @@ export class AccessHub extends AccessDevice {
         this.#dispatchAccessMethodSeed();
       }
     }
-
-    // Process location_states for UA Gate hubs - this contains lock state per door.
-    if(data.location_states && (this.uda.device_type === "UGT")) {
-
-      const locationStates = data.location_states;
-
-      // Process main door state.
-      const mainDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port1");
-      const mainDoorId = mainDoorExtension?.target_value ?? this.mainDoorLocationId;
-
-      if(mainDoorId) {
-
-        const mainDoorState = locationStates.find(state => state.location_id === mainDoorId);
-
-        if(mainDoorState) {
-
-          this.applyDoorState(mainDoorState, false);
-        }
-      }
-
-      // Process side door state.
-      if(this.hints.hasSideDoor) {
-
-        const sideDoorExtension = this.uda.extensions?.find(ext => ext.source_id === "port2");
-        const sideDoorId = sideDoorExtension?.target_value ?? this.sideDoorLocationId;
-
-        if(sideDoorId) {
-
-          const sideDoorState = locationStates.find(state => state.location_id === sideDoorId);
-
-          if(sideDoorState) {
-
-            this.applyDoorState(sideDoorState, true);
-          }
-        }
-      }
-    }
-  }
-
-  // Handle location update events (v2 API).
-  private handleLocationUpdate(packet: AccessEventPacket): void {
-
-    // Only process for UA Gate hubs.
-    if(this.uda.device_type !== "UGT") {
-
-      return;
-    }
-
-    const locationData = packet.data as {
-      id: string;
-      name: string;
-      state?: {
-        lock: "locked" | "unlocked";
-        dps: "open" | "close";
-        dps_connected?: boolean;
-        enable?: boolean;
-        is_unavailable?: boolean;
-      };
-    };
-
-    if(!locationData.state) {
-
-      return;
-    }
-
-    const door = this.#ownedDoor(locationData.id);
-
-    if(door === "main") {
-
-      this.applyDoorState(locationData.state, false);
-    } else if((door === "side") && this.hints.hasSideDoor) {
-
-      this.applyDoorState(locationData.state, true);
-    }
   }
 
   // Handle doorbell ring events.
@@ -3018,12 +2969,6 @@ export class AccessHub extends AccessDevice {
       case "access.data.v2.device.update":
 
         this.handleDeviceUpdateV2(packet);
-
-        break;
-
-      case "access.data.v2.location.update":
-
-        this.handleLocationUpdate(packet);
 
         break;
 

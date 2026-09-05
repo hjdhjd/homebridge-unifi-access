@@ -145,7 +145,7 @@ interface HubHarness {
   // Every doorbell ring or cancel the hub dispatched through the official API, in the order it dispatched them.
   rings: { cancel: boolean; readerId: string }[];
   services: Service[];
-  setDoorState: (entry: AccessDoorStateEntry | undefined) => void;
+  setDoorState: (entry: AccessDoorStateEntry) => void;
   updates: unknown[];
 }
 
@@ -159,8 +159,8 @@ interface HubOptions {
   devices?: AccessStateDevice[];
   doorId?: string | (() => never);
   doorState?: AccessDoorStateEntry;
-  /* The client's door state map, keyed by location id, which is what a UA Gate seeds each of its two doors from at adoption. An arm names it to put the
-   * controller's reading at odds with the relay rows its record carries, which is the only way an adoption-time disagreement can be expressed.
+  /* The client's door state map, keyed by location id, which is the map every hub reads the doors it drives from. An arm names it to put the controller's
+   * reading at odds with the relay rows its record carries, which is the only way an adoption-time disagreement can be expressed.
    */
   doorStates?: Map<string, AccessDoorStateEntry>;
   doors?: { name: string; unique_id: string }[];
@@ -201,7 +201,16 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const rings: { cancel: boolean; readerId: string }[] = [];
   const handlers = new Map<string, (payload: unknown) => void>();
   const record = options.record ?? hubRecord();
-  let doorState = options.doorState;
+
+  /* The client's door state map, which is where a hub reads every door it drives. An arm that named one door's entry has it keyed here under that entry's own
+   * identity, so the single-door spelling and the whole-map spelling reach the hub through the one map the plugin actually reads.
+   */
+  const doorStates = options.doorStates ?? new Map<string, AccessDoorStateEntry>();
+
+  if(options.doorState) {
+
+    doorStates.set(options.doorState.location_id, options.doorState);
+  }
 
   /* Every door command the hub dispatched, recorded before it answers. A verb the arm named as deferred hands back its own resolver rather than settling, which is
    * what lets an arm see what HomeKit was shown before the command behind it came back; a verb the arm named as refused rejects the way the library does.
@@ -241,10 +250,6 @@ function makeHub(options: HubOptions = {}): HubHarness {
       }
 
       return options.doorId ?? MAIN_DOOR;
-    },
-    get doorState(): AccessDoorStateEntry | undefined {
-
-      return doorState;
     },
     setLockRule: async (rule: unknown, opts?: { doorId?: string }): Promise<void> => dispatch({ options: opts, rule, verb: "setLockRule" }),
     stop: async (opts?: { doorId?: string }): Promise<void> => dispatch({ options: opts, verb: "stop" }),
@@ -316,7 +321,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const controller = {
 
-    client: { connection, doorStates: options.doorStates ?? new Map(), official,
+    client: { connection, doorStates, official,
       state: { snapshot: (): unknown => ({ devices: new Map((options.devices ?? []).map(device => [ device.unique_id, device ])), doors }) }, transport },
     config: { address: "1.2.3.4" },
     events: {
@@ -416,7 +421,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     requests,
     rings,
     services,
-    setDoorState: (entry: AccessDoorStateEntry | undefined): void => void (doorState = entry),
+    setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry),
     updates
   };
 }
@@ -856,6 +861,17 @@ test("a UA Gate whose door state map agrees with its record adopts silently and 
 
   assert.deepEqual(gate.publishes, [], "an adoption that told HomeKit nothing new must publish nothing");
   assert.deepEqual(gate.lines, []);
+});
+
+test("a door hub adopts its own door's reading from the door state map at construction, and says nothing about it", () => {
+
+  // The record's relay row says secured while the controller's map says the door is standing unlocked, so a seed that read the record alone renders the wrong lock.
+  const hub = makeHub({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "unlock" }, options: ["Enable.Hub.Door.Service=Lock"] });
+
+  assert.equal(lockService(hub).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
+
+  // Adoption is not a transition anyone observed, so it reaches the characteristics and nothing else.
+  assert.deepEqual(hub.publishes, []);
 });
 
 test("a doorbell call that ended on this hub's reader is logged, and one on another hub's is not", () => {
@@ -1764,7 +1780,7 @@ test("a UA Gate's lock accessory closes the gate, reads secured afterward, and c
   /* The controller then reports the gate unlocked again. A relock that had survived the close would fire on top of that report and lock the tile behind the
    * controller's own reading, which is what makes this the observable half of the cancellation.
    */
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "close", lock: "unlocked" } }, event: "access.data.v2.location.update" });
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
   assert.equal(tile.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
   t.mock.timers.tick(RELOCK_DELAY_MS);
@@ -2016,7 +2032,7 @@ test("a gate the controller reports locked retires the relock our own unlock arm
   await settle();
 
   // The rail's own report of the gate secured, which settles and announces the door through the door-state path rather than through the window.
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "close", lock: "locked" } }, event: "access.data.v2.location.update" });
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Locked."), 1, "the rail announces the closing in its own words");
@@ -2044,14 +2060,104 @@ test("a rail-reported lock and re-unlock inside the window leave no stale relock
    * armed it fires against whatever the door has become by the time it expires. The reports below are what tell the retirement from its absence: with
    * the door reported unlocked again, a surviving relock would both flip the state and speak over the controller's fresher truth.
    */
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "close", lock: "locked" } }, event: "access.data.v2.location.update" });
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "open", lock: "unlocked" } }, event: "access.data.v2.location.update" });
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlocked" });
 
   t.mock.timers.tick(RELOCK_DELAY_MS);
 
   // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
   assert.deepEqual(lockPayloads(gate), [ "false", "true", "false" ]);
   assert.equal(lineCount(gate, "Gate locked."), 0);
+});
+
+test("a UA Gate reads both of the doors it drives from the door state map in one refresh", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  // Both doors reported unlocked at once, which is the shape a single fold of a report naming both of them leaves in the map.
+  gate.setDoorState({ dps: "open", location_id: MAIN_DOOR, lock: "unlocked" });
+  gate.setDoorState({ dps: "open", location_id: SIDE_DOOR, lock: "unlocked" });
+  gate.hub.refreshDoorState();
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
+  assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE).getCharacteristic(Characteristic.LockCurrentState).value,
+    Characteristic.LockCurrentState.UNSECURED);
+  assert.deepEqual(lockPayloads(gate), ["false"]);
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
+  assert.equal(lineCount(gate, "Unlocked."), 1);
+  assert.equal(lineCount(gate, "Side door unlocked."), 1);
+
+  // The same readings again tell the doors nothing they do not already hold, so the delivery costs a settled gate nothing.
+  gate.hub.refreshDoorState();
+
+  assert.deepEqual(lockPayloads(gate), ["false"]);
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
+  assert.equal(lineCount(gate, "Unlocked."), 1);
+  assert.equal(lineCount(gate, "Side door unlocked."), 1);
+});
+
+test("a UA Gate's side door reported locked retires the relock its own unlock armed", async (t) => {
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const gate = makeGate();
+
+  await gate.mqttSet("sidedoor/lock", "false");
+  await settle();
+
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
+  assert.equal(lineCount(gate, "Side door unlocked."), 1);
+
+  /* The controller's own reading outranks the window we model. A relock still pending when the rail reports the side door locked has nothing left to do, and
+   * left armed it fires against whatever the door has become by the time it expires. The re-unlock below is what tells the retirement from its absence: the
+   * close helper speaks only about a door standing unlocked, so a surviving relock is silent over a door already secured and shows itself only once the
+   * controller has reported the door open again.
+   */
+  deliverDoorState(gate, { dps: "close", location_id: SIDE_DOOR, lock: "locked" });
+
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true" ]);
+  assert.equal(lineCount(gate, "Side door locked."), 1);
+  assert.deepEqual(lockPayloads(gate), [], "the main door was not named by any of this, so nothing reached its topic");
+
+  deliverDoorState(gate, { dps: "open", location_id: SIDE_DOOR, lock: "unlocked" });
+
+  t.mock.timers.tick(RELOCK_DELAY_MS);
+
+  // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true", "false" ]);
+  assert.equal(lineCount(gate, "Side door locked."), 1, "the rail's own report of the closing is the only one anyone read");
+  assert.equal(lineCount(gate, "Side door unlocked."), 2, "the window's own opening and the rail's re-unlock, each announced once");
+  assert.deepEqual(lockPayloads(gate), [], "and the main door was never named, so nothing reached its topic");
+});
+
+test("a UA Gate whose side door is turned off delivers its main door alone", () => {
+
+  const gate = makeGate({ options: ["Disable.Hub.SideDoor"] });
+
+  // The map is told about both doors. Only the door this gate drives may be read out of it.
+  gate.setDoorState({ dps: "close", location_id: SIDE_DOOR, lock: "unlocked" });
+  gate.setDoorState({ dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+  gate.hub.refreshDoorState();
+
+  assert.deepEqual(lockPayloads(gate), ["false"]);
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), []);
+  assert.deepEqual(gate.lines.filter(line => line.startsWith(LOG_PREFIX + "Side door")), []);
+  assert.equal(gate.services.some(service => service.subtype === AccessReservedNames.LOCK_DOOR_SIDE), false);
+});
+
+test("a hub inside its removal window refreshes nothing and throws nothing at the delivery", () => {
+
+  /* Every hub on a controller sees every delivery, so a hub whose device has left controller state must not take its siblings down with it. The library's own
+   * handle raises a ReferenceError in exactly that window, which is what leaves this hub with no door to read.
+   */
+  const departing = makeHub({ doorId: (): never => { throw new ReferenceError("The device is no longer present in controller state."); } });
+
+  departing.setDoorState({ dps: "open", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.doesNotThrow(() => departing.hub.refreshDoorState());
+  assert.deepEqual(departing.publishes, []);
+  assert.deepEqual(departing.lines, []);
+  assert.equal(lockService(departing).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
 });
 
 test("an unlock the controller refuses says so and opens no window at all", async (t) => {
@@ -2415,11 +2521,11 @@ test("a UA Gate's MQTT position topic answers the state it holds, and a hub with
   const gate = makeGate();
 
   // Drive the gate's position away from the state it was born holding, so an answer that ignored the live state cannot pass.
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "open", lock: "locked" } }, event: "access.data.v2.location.update" });
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "locked" });
 
   assert.equal(await gate.mqttGet("dps"), "true");
 
-  gate.emit(MAIN_DOOR, { data: { id: MAIN_DOOR, name: "Main Gate", state: { dps: "close", lock: "locked" } }, event: "access.data.v2.location.update" });
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
 
   assert.equal(await gate.mqttGet("dps"), "false");
 
