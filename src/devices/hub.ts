@@ -1822,6 +1822,64 @@ export class AccessHub extends AccessDevice {
     return { doorName: doorName.charAt(0).toUpperCase() + doorName.slice(1), topic: isSideDoor ? mqttTopics.sidedoorLock : mqttTopics.lock };
   }
 
+  /* The one voice a door's lock state is announced in: the topic a subscriber reads, and the line a user reads where they asked for it, both under the door's own
+   * name. Every writer of that state speaks here, so whichever side observed a transition - the controller reporting it, a window of ours opening or ending, or a
+   * remote unlock arriving - a user reads one vocabulary and a subscriber one topic.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the door being announced.
+   * @param locked - Whether the door is being announced as locked.
+   */
+  #announceLockState(isSideDoor: boolean, locked: boolean): void {
+
+    const { doorName, topic } = this.#doorAnnounceIdentity(isSideDoor);
+
+    this.mqttPublish(topic, locked ? "true" : "false");
+
+    if(this.hints.logLock) {
+
+      this.log.info("%s %s.", doorName, locked ? "locked" : "unlocked");
+    }
+  }
+
+  /* Settle a door on a reported lock state and announce the move, answering whether the door moved at all.
+   *
+   * A reported state moves the door only when it differs from what the door already reads, which is what lets two rails report one event and have it announced
+   * once: whichever reaches here first settles the door and speaks, and the one behind it finds the door settled and stays silent. A report of a door locked
+   * retires that door's pending relock as well.
+   *
+   * @param isSideDoor - Whether the side door of a UA Gate is the door being settled.
+   * @param lockState - The lock state the door has been reported in.
+   *
+   * @returns Whether the door moved.
+   */
+  #applyLockState(isSideDoor: boolean, lockState: CharacteristicValue): boolean {
+
+    if(lockState === (isSideDoor ? this.hkSideDoorLockState : this.hkLockState)) {
+
+      return false;
+    }
+
+    /* A door the controller reports locked has nothing left for a pending relock of ours to do. Letting one survive would announce a close of our own over the
+     * controller's fresher reading, so the rail's report of a closing retires the window the same way our own close command does.
+     */
+    if(this.isLocked(lockState)) {
+
+      this.timers.clear(this.#relockTimerKey(isSideDoor));
+    }
+
+    if(isSideDoor) {
+
+      this.hkSideDoorLockState = lockState;
+    } else {
+
+      this.hkLockState = lockState;
+    }
+
+    this.#announceLockState(isSideDoor, this.isLocked(lockState));
+
+    return true;
+  }
+
   /* Open a gate door's unlock window: the unlocked state, the announcement of it, and the relock that will end it.
    *
    * The controller reports nothing back over the event stream for a location command of ours, and a remote unlock is that same hardware window begun on the
@@ -1830,11 +1888,11 @@ export class AccessHub extends AccessDevice {
    * Opening is deliberately unconditional on the state we hold. Each unlock act is its own announcement and arms the window afresh, so a door unlocked again while
    * its window stands extends that window rather than being swallowed by the state it is already in.
    *
+   * The announcement goes through the shared helper, so a window of ours speaks about the door in the same voice the controller's own reports are spoken in.
+   *
    * @param isSideDoor - Whether the side door of a UA Gate is the door unlocked.
    */
   #openGateLockWindow(isSideDoor: boolean): void {
-
-    const { doorName, topic } = this.#doorAnnounceIdentity(isSideDoor);
 
     if(isSideDoor) {
 
@@ -1844,12 +1902,7 @@ export class AccessHub extends AccessDevice {
       this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
     }
 
-    this.mqttPublish(topic, "false");
-
-    if(this.hints.logLock) {
-
-      this.log.info("%s unlocked.", doorName);
-    }
+    this.#announceLockState(isSideDoor, false);
 
     this.timers.setTimeout(this.#relockTimerKey(isSideDoor), () => this.#closeGateLockWindow(isSideDoor), AUTO_LOCK_DELAY_MS);
   }
@@ -1863,6 +1916,8 @@ export class AccessHub extends AccessDevice {
    * The gate reads for UNSECURED rather than against SECURED because the lock services are reconfigured through a sentinel value that no reading equals, and a
    * "not secured" test would announce on that sentinel. Nothing is awaited between the read and the writes, so no other arrival can settle the door in between.
    *
+   * The announcement goes through the shared helper, so a window of ours speaks about the door in the same voice the controller's own reports are spoken in.
+   *
    * @param isSideDoor - Whether the side door of a UA Gate is the door whose window is ending.
    */
   #closeGateLockWindow(isSideDoor: boolean): void {
@@ -1874,8 +1929,6 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    const { doorName, topic } = this.#doorAnnounceIdentity(isSideDoor);
-
     if(isSideDoor) {
 
       this.hkSideDoorLockState = this.hap.Characteristic.LockCurrentState.SECURED;
@@ -1884,12 +1937,7 @@ export class AccessHub extends AccessDevice {
       this.hkLockState = this.hap.Characteristic.LockCurrentState.SECURED;
     }
 
-    this.mqttPublish(topic, "true");
-
-    if(this.hints.logLock) {
-
-      this.log.info("%s locked.", doorName);
-    }
+    this.#announceLockState(isSideDoor, true);
   }
 
   /* The name a door goes by mid-sentence in the lines its commands and its window helpers write. It stands on its own rather than inside the shared preamble below
@@ -2560,7 +2608,6 @@ export class AccessHub extends AccessDevice {
    */
   private applyDoorState(doorState: { dps?: string; lock?: string }, isSideDoor: boolean): void {
 
-    const doorName = isSideDoor ? "Side door" : "";
     // Whether this delivery moved anything at all, which is what the opener's own update below reads.
     let changed = false;
 
@@ -2568,50 +2615,23 @@ export class AccessHub extends AccessDevice {
     if(doorState.lock !== undefined) {
 
       const newLockState = this.toLockState(doorState.lock);
-      const currentLockState = isSideDoor ? this.hkSideDoorLockState : this.hkLockState;
 
-      if(newLockState !== currentLockState) {
+      if(isSideDoor) {
 
-        changed = true;
+        changed = this.#applyLockState(true, newLockState) || changed;
+      } else {
 
-        /* A door the controller reports locked has nothing left for a pending relock of ours to do. Letting one survive would announce a close of our own over the
-         * controller's fresher reading, so the rail's report of a closing retires the window the same way our own close command does.
+        /* The opener renders from the position sensor and the relay together, so this delivery holds its update until the position reading below has landed as
+         * well. Rendering from a half-applied pair would announce a state the door was never in, and would settle a running travel on the stale half of it.
          */
-        if(this.isLocked(newLockState)) {
+        this.#doorStateApplying = true;
 
-          this.timers.clear(this.#relockTimerKey(isSideDoor));
-        }
+        try {
 
-        if(isSideDoor) {
+          changed = this.#applyLockState(false, newLockState) || changed;
+        } finally {
 
-          this.hkSideDoorLockState = newLockState;
-          this.mqttPublish(mqttTopics.sidedoorLock, this.isLocked(newLockState) ? "true" : "false");
-
-          if(this.hints.logLock) {
-
-            this.log.info("%s %s.", doorName, this.isLocked(newLockState) ? "locked" : "unlocked");
-          }
-        } else {
-
-          /* The opener renders from the position sensor and the relay together, so this delivery holds its update until the position reading below has landed as
-           * well. Rendering from a half-applied pair would announce a state the door was never in, and would settle a running travel on the stale half of it.
-           */
-          this.#doorStateApplying = true;
-
-          try {
-
-            this.hkLockState = newLockState;
-          } finally {
-
-            this.#doorStateApplying = false;
-          }
-
-          this.mqttPublish(mqttTopics.lock, this.isLocked(newLockState) ? "true" : "false");
-
-          if(this.hints.logLock) {
-
-            this.log.info(this.isLocked(newLockState) ? "Locked." : "Unlocked.");
-          }
+          this.#doorStateApplying = false;
         }
       }
     }
@@ -2677,14 +2697,11 @@ export class AccessHub extends AccessDevice {
       this.#openGateLockWindow(door === "side");
     } else {
 
-      // Non-UA Gate hubs: default behavior.
-      this.hkLockState = this.hap.Characteristic.LockCurrentState.UNSECURED;
-      this.mqttPublish(mqttTopics.lock, "false");
-
-      if(this.hints.logLock) {
-
-        this.log.info("Unlocked.");
-      }
+      /* A hub other than a gate has no window of its own to open: its relock is the controller's own relay, reported back over the door-state rail. So the unlock
+       * is applied here as one more reported reading, and an unlock the door-state rail has already delivered finds the door settled and stays silent rather than
+       * announcing the same unlock a second time.
+       */
+      this.#applyLockState(false, this.hap.Characteristic.LockCurrentState.UNSECURED);
     }
   }
 

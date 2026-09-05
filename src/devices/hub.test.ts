@@ -2031,12 +2031,11 @@ test("a gate the controller reports locked retires the relock our own unlock arm
   await gate.mqttSet("lock", "false");
   await settle();
 
-  // The rail's own report of the gate secured, which settles and announces the door through the door-state path rather than through the window.
+  // The rail's own report of the gate secured, which settles the door and announces it in the same voice the window speaks in.
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
-  assert.equal(lineCount(gate, "Locked."), 1, "the rail announces the closing in its own words");
-  assert.equal(lineCount(gate, "Gate locked."), 0, "and the window does not announce the same closing a second time");
+  assert.equal(lineCount(gate, "Gate locked."), 1, "the rail announces the closing in the gate's own voice");
 
   /* A relock has nothing left to do once the controller has reported the door secured. Left armed it would fire here and announce a closing of its own on top of
    * the controller's fresher reading, which is a state the door had already left.
@@ -2044,7 +2043,7 @@ test("a gate the controller reports locked retires the relock our own unlock arm
   t.mock.timers.tick(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
-  assert.equal(lineCount(gate, "Gate locked."), 0);
+  assert.equal(lineCount(gate, "Gate locked."), 1, "and the retired relock announced nothing on top of it");
 });
 
 test("a rail-reported lock and re-unlock inside the window leave no stale relock to announce over them", async (t) => {
@@ -2067,7 +2066,8 @@ test("a rail-reported lock and re-unlock inside the window leave no stale relock
 
   // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
   assert.deepEqual(lockPayloads(gate), [ "false", "true", "false" ]);
-  assert.equal(lineCount(gate, "Gate locked."), 0);
+  assert.equal(lineCount(gate, "Gate locked."), 1, "the rail's own report of the closing is the only one anyone read");
+  assert.equal(lineCount(gate, "Gate unlocked."), 2, "the window's own opening and the rail's re-unlock, each announced once");
 });
 
 test("a UA Gate reads both of the doors it drives from the door state map in one refresh", () => {
@@ -2084,7 +2084,7 @@ test("a UA Gate reads both of the doors it drives from the door state map in one
     Characteristic.LockCurrentState.UNSECURED);
   assert.deepEqual(lockPayloads(gate), ["false"]);
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
-  assert.equal(lineCount(gate, "Unlocked."), 1);
+  assert.equal(lineCount(gate, "Gate unlocked."), 1);
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
 
   // The same readings again tell the doors nothing they do not already hold, so the delivery costs a settled gate nothing.
@@ -2092,7 +2092,7 @@ test("a UA Gate reads both of the doors it drives from the door state map in one
 
   assert.deepEqual(lockPayloads(gate), ["false"]);
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
-  assert.equal(lineCount(gate, "Unlocked."), 1);
+  assert.equal(lineCount(gate, "Gate unlocked."), 1);
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
 });
 
@@ -2158,6 +2158,86 @@ test("a hub inside its removal window refreshes nothing and throws nothing at th
   assert.deepEqual(departing.publishes, []);
   assert.deepEqual(departing.lines, []);
   assert.equal(lockService(departing).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
+});
+
+test("a door hub announces what the controller reports under its own door's name, once per transition", () => {
+
+  const hub = makeHub();
+
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.deepEqual(lockPayloads(hub), ["false"]);
+  assert.equal(lineCount(hub, "Door unlocked."), 1);
+
+  // The same reading again is nothing the door does not already hold, so it neither publishes nor speaks.
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.deepEqual(lockPayloads(hub), ["false"]);
+  assert.equal(lineCount(hub, "Door unlocked."), 1);
+
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
+
+  assert.deepEqual(lockPayloads(hub), [ "false", "true" ]);
+  assert.equal(lineCount(hub, "Door locked."), 1);
+
+  // Every lock line names the door it describes, so none of them is the subject-less sentence a reader cannot place.
+  assert.deepEqual(hub.lines.filter(line => line.endsWith(": Unlocked.") || line.endsWith(": Locked.")), []);
+});
+
+test("a door hub announces one remote unlock once, whichever of its two rails reports it first", () => {
+
+  /* The controller reports an unlock on its remote-unlock rail and reports the door unlocked on the door-state rail, and either can arrive first. One physical
+   * event is one announcement whichever ordering this hub sees.
+   */
+  const first = makeHub();
+
+  first.emit(HUB_ID, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+  deliverDoorState(first, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.deepEqual(lockPayloads(first), ["false"]);
+  assert.equal(lineCount(first, "Door unlocked."), 1);
+  assert.equal(lockService(first).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
+
+  // The same pair in the other order, which is the ordering the field's own same-second duplicate was read in.
+  const second = makeHub();
+
+  deliverDoorState(second, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+  second.emit(HUB_ID, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+
+  assert.deepEqual(lockPayloads(second), ["false"]);
+  assert.equal(lineCount(second, "Door unlocked."), 1);
+  assert.equal(lockService(second).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
+
+  // And the door still moves on the next genuine transition rather than being left settled by the pair that reached it.
+  deliverDoorState(second, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
+
+  assert.deepEqual(lockPayloads(second), [ "false", "true" ]);
+  assert.equal(lineCount(second, "Door locked."), 1);
+  assert.equal(lockService(second).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
+});
+
+test("the lock logging preference silences a door's lock lines and never its topic", async (t) => {
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const hub = makeHub({ options: ["Disable.Log.Lock"] });
+
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
+
+  // The lock lines alone are read: a first delivery also gives the position sensor its evidence, which the sensor announces on its own account.
+  assert.deepEqual(lockPayloads(hub), [ "false", "true" ]);
+  assert.deepEqual(hub.lines.filter(line => line.endsWith(" locked.") || line.endsWith(" unlocked.")), []);
+
+  // A gate's own window speaks through the same helper, so the preference silences the window exactly as it silences the rail.
+  const gate = makeGate({ options: ["Disable.Log.Lock"] });
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+  t.mock.timers.tick(RELOCK_DELAY_MS);
+
+  assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
+  assert.deepEqual(gate.lines.filter(line => line.endsWith(" locked.") || line.endsWith(" unlocked.")), []);
 });
 
 test("an unlock the controller refuses says so and opens no window at all", async (t) => {
