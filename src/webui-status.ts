@@ -899,9 +899,8 @@ export class AccessStatusFeed {
 
       try {
 
-        for await (const value of loop) {
+        for await (const _value of loop) {
 
-          void value;
           refreshRows();
         }
       } catch(error) {

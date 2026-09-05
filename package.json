@@ -57,18 +57,18 @@
   },
   "main": "dist/index.js",
   "dependencies": {
-    "@homebridge/plugin-ui-utils": "2.2.5",
+    "@homebridge/plugin-ui-utils": "2.2.6",
     "homebridge-plugin-utils": "file:../homebridge-plugin-utils",
     "unifi-access": "file:../unifi-access"
   },
   "devDependencies": {
     "@stylistic/eslint-plugin": "5.10.0",
-    "@types/node": "26.2.0",
+    "@types/node": "26.4.1",
     "eslint": "9.39.2",
     "homebridge": "2.4.0",
     "shx": "0.4.0",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.67.0"
+    "typescript-eslint": "8.69.0"
   },
   "overrides": {
     "@types/readable-stream": "4.0.23"
