@@ -10,6 +10,7 @@ import { describeCategoryScope, describeOptionScope, featureOptionCategories, fe
 import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
+import { buildCatalogIndex } from "homebridge-plugin-utils";
 import test from "node:test";
 
 // The catalog entry a category and option name address, asserted to exist so each check below reads an entry rather than a nullable one.
@@ -166,4 +167,23 @@ test("the webhook options declare the defaults and the scope the listener and th
   assert.equal(port.defaultValue, ACCESS_WEBHOOK_PORT);
   assert.deepEqual(port.scopes, ["global"]);
   assert.equal(port.group, "Webhooks", "the port renders beneath the option that turns the feature on");
+});
+
+test("the door guard filter is a device-scoped picker over a page-registered source", () => {
+
+  const guards = entryFor("Hub", "Doorbell.DoorGuards");
+
+  // A picker over the guards the door in view lists, storing the selection as a list, offered only where a door is in view.
+  assert.equal(guards.choices, "doorGuards");
+  assert.equal(guards.multiple, true);
+  assert.deepEqual(guards.scopes, ["device"]);
+
+  // Offered as soon as the row renders, with nothing selected, which the filter reads as no filtering.
+  assert.equal(guards.default, true);
+  assert.equal(guards.defaultValue, "");
+});
+
+test("the catalog builds: every picker declaration is one the engine honors", () => {
+
+  assert.doesNotThrow(() => buildCatalogIndex(featureOptionCategories, featureOptions));
 });

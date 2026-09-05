@@ -10,7 +10,7 @@
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { composeConnectIdentity, deviceSerial, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
+import { composeConnectIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import util from "node:util";
@@ -34,15 +34,41 @@ const byName = (a, b) => {
   return (aCase > bCase) ? 1 : ((bCase > aCase) ? -1 : 0);
 };
 
+// The page the official users listing answers by, large enough that a typical site's census arrives in one round trip.
+const USERS_PAGE_SIZE = 100;
+
+/* The official users census, every page the endpoint answers in one list, for labeling the door guard picker. The first page says how many there are, and the
+ * rest are read together rather than one after another. A failure answers the empty list rather than the probe's failure: the census only labels a picker, so a
+ * token without the users permission still lists every device, and the guards those devices list carry their identifiers as labels.
+ */
+const officialUsers = async (official) => {
+
+  try {
+
+    const first = await official.users.fetchAll({ pageNum: 1, pageSize: USERS_PAGE_SIZE });
+    const pagination = first.pagination;
+    const pages = (pagination && (pagination.page_size > 0)) ? Math.ceil(pagination.total / pagination.page_size) : 1;
+    const rest = await Promise.all(Array.from({ length: Math.max(pages - 1, 0) },
+      (_, index) => official.users.fetchAll({ pageNum: index + 2, pageSize: USERS_PAGE_SIZE })));
+
+    return [ ...first.data, ...rest.flatMap(page => page.data) ];
+  } catch {
+
+    // The census is a courtesy for the labels, and the device list never fails on its account.
+    return [];
+  }
+};
+
 /* The adopted devices as the OFFICIAL API answers them, decorated into the same shape a topology device carries so the browser renders both through one path.
  *
  * The payload arrives grouped by the door each device serves. That grouping is real information the library deliberately preserves, and it is not information this
  * page uses, so it is flattened here rather than upstream. The official record carries a hardware type and no display model at all, so the display model comes from
  * the plugin's own policy mapping - reached through the same dist import that carries the identity composition - and a type the mapping does not name answers itself.
+ * The door guard picker's list is attached here too, from the users census alone, because this surface names no door's guards.
  *
  * There is no address on this surface, so the rendered IP row is empty for these devices. That is the honest answer: the official API does not report one.
  */
-const officialDevices = (grouped) => grouped.flat().filter(device => device.is_managed).map(device => ({
+const officialDevices = (grouped, users) => grouped.flat().filter(device => device.is_managed).map(device => ({
 
   alias: device.alias,
   // A record arriving without a capability list is stored carrying an empty one, which is the same accommodation the library's own reducer makes for the topology
@@ -52,6 +78,8 @@ const officialDevices = (grouped) => grouped.flat().filter(device => device.is_m
   connected_uah_id: device.connected_uah_id,
   /* eslint-disable-next-line camelcase */
   display_model: officialDeviceModel(device.type),
+  // The official listing carries no door guards, so the picker offers the whole census; a guard the ring names is always among them.
+  doorGuards: doorGuardChoices({ guardIds: undefined, users }),
   /* eslint-disable-next-line camelcase */
   is_online: device.is_online,
   name: device.name,
@@ -178,6 +206,9 @@ class PluginUiServer extends HomebridgePluginUiServer {
 
           const controllerInfo = client.controllerInfo;
 
+          // The users census, read once per probe and only where a token reaches it, so every record below labels its guards from one list.
+          const users = client.official ? await officialUsers(client.official) : [];
+
           /* No controller information document means a token-only client: that document and the device topology both live behind the Access application's own
            * endpoints, which a token never reaches. The official API answers the adopted inventory regardless, so this arm lists the REAL devices rather than an
            * empty set - which is what lets a token-only user configure per-device options in the very keyspace the runtime resolves, ready the moment credentials
@@ -188,7 +219,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
            */
           if(!controllerInfo) {
 
-            return { devices: officialDevices(await client.official.devices.fetchAll()), kind: "token-only" };
+            return { devices: officialDevices(await client.official.devices.fetchAll(), users), kind: "token-only" };
           }
 
           const host = controllerInfo.host;
@@ -217,9 +248,12 @@ class PluginUiServer extends HomebridgePluginUiServer {
           /* The devices this plugin projects into HomeKit, listed through the same statement the runtime's own membership comes from: an Enterprise hub's ports are
            * listed as the devices they become, and the building-hosted parent, which never becomes an accessory, is not. Each is decorated with the plugin's
            * device identity, computed by the function the runtime keys every read on, so what the webUI writes an option entry against is what the plugin reads
-           * it back by...the browser can reach neither statement to derive one for itself.
+           * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list, joined here from the
+           * door the device serves and the users census, because the browser can reach neither.
            */
-          const devices = [...membershipRecords(client.state.snapshot())].sort(byName).map(device => ({ ...device, serialNumber: deviceSerial(device) }));
+          const doors = client.state.snapshot().doors;
+          const devices = [...membershipRecords(client.state.snapshot())].sort(byName).map(device => ({ ...device,
+            doorGuards: doorGuardChoices({ guardIds: doors.get(device.location_id)?.door_guard, users }), serialNumber: deviceSerial(device) }));
 
           // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
           return { devices: [ controllerRecord, ...devices ], kind: "connected" };

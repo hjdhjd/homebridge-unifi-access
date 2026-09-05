@@ -17,12 +17,12 @@ import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, AccessAuthEr
   normalizeMacAddress, selectAccessPoints } from "unifi-access";
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
-  AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, AccessState,
-  AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
+  AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
+  AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
+import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import type { AccessControllerTokens } from "./options.ts";
 import { AccessReservedNames } from "./types.ts";
-import type { Nullable } from "homebridge-plugin-utils";
 import { isIP } from "node:net";
 
 // The device type the controller reports for an Enterprise Access Hub, and the type whose per-port records carry a source_id that participates in accessory identity.
@@ -1083,19 +1083,38 @@ export function doorbellTriggerAction(options: { officialAvailable: boolean; rin
 }
 
 /**
- * Parse the configured door guard filter into the list of ids it names: split on commas, trim each id, and drop empties.
+ * The door guards a doorbell's ring filter can name, as the choices the settings page offers: one per guard the door lists, labeled by the user's name where the
+ * official users census carries it and by the bare identifier otherwise. A door whose guards are unknown - the official listing carries no door guards, so a
+ * token-only client knows none - offers every user the census carries instead, since any of them may be the guard a ring will name; a deactivated user is left
+ * out there, because the controller no longer calls one, while a guard the door itself lists is offered whatever their status.
  *
- * Null, undefined, and effectively-empty input all produce the empty list, and the empty list means no filtering by contract. That contract is the footgun guard:
- * a user enabling the option while leaving its value blank keeps every ring rather than silencing the doorbell, because an option toggled on with nothing filled
- * in is far more plausibly an unfinished configuration than a request to hear nothing.
+ * The value is always the user's identifier, which is what a ring's guard list carries and what the filter matches; the label is only ever what the user reads.
  *
- * @param value - The configured option value, or `null` or `undefined` where none is configured.
+ * @param options - The guard identifiers the door lists, or `undefined` where no census carries them, and the official users census, empty where no token reaches it.
  *
- * @returns The ids the filter names, or the empty list for no filtering.
+ * @returns The choices, in the door's order where the door named them and by label otherwise.
  */
-export function parseDoorbellGuardFilter(value: Nullable<string | undefined>): readonly string[] {
+export function doorGuardChoices(options: { guardIds: readonly string[] | undefined; users: readonly AccessOfficialUser[] }): FeatureOptionChoice[] {
 
-  return value?.split(",").map(id => id.trim()).filter(id => id.length > 0) ?? [];
+  const { guardIds, users } = options;
+
+  // What a user is called on the settings page: the first name the census carries, falling back to the identifier the ring will name.
+  const labelFor = (user: AccessOfficialUser): string => [ user.full_name, user.alias, user.username ].find(name => name.length > 0) ?? user.id;
+
+  if(guardIds === undefined) {
+
+    return users.filter(user => user.status !== "DEACTIVATED").map(user => ({ label: labelFor(user), value: user.id }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  const byId = new Map(users.map(user => [ user.id, user ]));
+
+  return [...new Set(guardIds)].filter(id => id.length > 0).map(id => {
+
+    const user = byId.get(id);
+
+    return { label: user ? labelFor(user) : id, value: id };
+  });
 }
 
 /**

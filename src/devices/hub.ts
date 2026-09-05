@@ -11,7 +11,7 @@ import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessMethods,
   composeAccessMethodUpdate, describeUnlock, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction,
-  dpsSensorEligible, lockCommandRule, parseDoorbellGuardFilter, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
+  dpsSensorEligible, lockCommandRule, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -191,7 +191,7 @@ export class AccessHub extends AccessDevice {
     this._hkLockState = this.hubLockState;
     this._hkSideDoorDpsState = this.hubSideDoorDpsState;
     this._hkSideDoorLockState = this.hubSideDoorLockState;
-    this.doorbellGuardFilter = parseDoorbellGuardFilter(this.getFeatureValue("Hub.Doorbell.DoorGuards"));
+    this.doorbellGuardFilter = this.getFeatureValueList("Hub.Doorbell.DoorGuards");
     this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
     this.mainDoorLocationId = undefined;
     this.sideDoorLocationId = undefined;

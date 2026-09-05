@@ -2320,3 +2320,39 @@ test("the opener shows the travel before the command behind it settles, and the 
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
+
+// A doorbell ring on this hub's reader, naming the door guards the controller called, in the shape the wire sends it.
+function ringPacket(guardIds: string[]): unknown {
+
+  return { data: { channel: "ring", connected_uah_id: HUB_ID, device_id: READER_ID, door_guard_ids: guardIds, request_id: "ring-1" }, event: "access.remote_view" };
+}
+
+test("the door guard filter reads the selected guards at device scope and admits or refuses a ring on them", () => {
+
+  // Debug logging is turned on for this harness alone, because the refusal is said at debug and the device's debug lines are gated on Log.Debug.
+  const filtered = makeHub({ options: [ "Enable.Hub.Doorbell.DoorGuards." + HUB_SERIAL + "=guard-a,guard-b", "Enable.Log.Debug" ] });
+
+  // A ring naming a selected guard reaches HomeKit and MQTT; one naming only another guard is refused at debug and reaches neither.
+  filtered.emit("access.remote_view", ringPacket(["guard-b"]));
+  filtered.emit("access.remote_view", ringPacket(["guard-c"]));
+
+  assert.deepEqual(filtered.mqtt.published.filter(entry => entry.topic === HUB_SERIAL + "/doorbell"), [{ payload: "true", topic: HUB_SERIAL + "/doorbell" }]);
+  assert.equal(lineCount(filtered, "Doorbell ring detected."), 1);
+  assert.deepEqual(filtered.debugs.filter(line => line.startsWith(LOG_PREFIX + "Doorbell ring ignored")),
+    [LOG_PREFIX + "Doorbell ring ignored: no door guard matched the configured filter."]);
+
+  // The same selection written at global scope is not read, because the option is offered at device scope alone, so every ring is admitted.
+  const global = makeHub({ options: ["Enable.Hub.Doorbell.DoorGuards=guard-a"] });
+
+  global.emit("access.remote_view", ringPacket(["guard-c"]));
+
+  assert.equal(lineCount(global, "Doorbell ring detected."), 1);
+
+  // Nothing selected is no filtering, exactly as an unattributed ring is: both are admitted.
+  const open = makeHub();
+
+  open.emit("access.remote_view", ringPacket(["guard-c"]));
+  open.emit("access.remote_view", ringPacket([]));
+
+  assert.equal(lineCount(open, "Doorbell ring detected."), 2);
+});

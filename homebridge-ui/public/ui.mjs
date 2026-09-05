@@ -1173,6 +1173,15 @@ const featureOptionsParams = {
   },
   ui: {
 
+    /* The choice sources our catalog names, each answering the list its picker offers for the device in view. The lists are attached to the device records the
+     * server answers, because deriving them needs what only the server reaches - the topology's door guards and the official users census - so a resolver here
+     * reads what its record carries and nothing more. Each runs on every projection recompute and must stay pure and cheap.
+     */
+    choices: {
+
+      // The door guards the door in view lists. The option is offered at device scope alone, so a resolver with no device in view answers a list nothing renders.
+      doorGuards: ({ device }) => device?.doorGuards ?? []
+    },
     // The copy the framework's boot affordance shows while a controller connection is in flight, in place of its generic default.
     connectingMessage: "Connecting to your UniFi Access controller...",
     // The guidance line for a controller the page has no device list for, pointing at the connection editor mounted beneath the error rather than at a tab the

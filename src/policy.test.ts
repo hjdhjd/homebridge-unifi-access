@@ -8,13 +8,13 @@
 /* eslint-disable camelcase */
 import { ACCESS_DOORBELL_REASON_CODES, AccessAuthError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
-import type { AccessBootstrapConfig, AccessDoorStateEntry, AccessEventPacket, AccessOfficialWebhookEndpoint, AccessStateDevice,
+import type { AccessBootstrapConfig, AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice,
   AccessStateDoor } from "unifi-access";
 import { accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict, accessoryOwnership,
   accessoryStranded, canTransition, composeAccessMethodUpdate,
   composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, describeUnlock, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations,
-  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
-  isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, parseDoorbellGuardFilter,
+  doorGuardChoices, doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
+  isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations,
   projectedRecords, reclaimFenceOpen, recordByMac, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
 import assert from "node:assert/strict";
@@ -711,23 +711,6 @@ test("doorbellTriggerAction rings and cancels only through an official path and 
   assert.equal(doorbellTriggerAction({ officialAvailable: true, ringing: false, value: false }), "none");
 });
 
-test("parseDoorbellGuardFilter turns every shape of empty into no filtering and trims what it keeps", () => {
-
-  // Null, undefined, and effectively-empty input all mean no filtering, so a user enabling the option with no value keeps every ring rather than silencing the
-  // doorbell.
-  assert.deepEqual(parseDoorbellGuardFilter(undefined), []);
-  assert.deepEqual(parseDoorbellGuardFilter(null), []);
-  assert.deepEqual(parseDoorbellGuardFilter(""), []);
-  assert.deepEqual(parseDoorbellGuardFilter("   "), []);
-  assert.deepEqual(parseDoorbellGuardFilter("  ,  ,"), []);
-
-  // A spaced comma list trims down to exactly its ids.
-  assert.deepEqual(parseDoorbellGuardFilter(" guard1 , guard2 "), [ "guard1", "guard2" ]);
-
-  // An embedded empty segment drops out rather than surviving as an empty id, which is a different failure from the wholly-empty shapes above.
-  assert.deepEqual(parseDoorbellGuardFilter("a,,b"), [ "a", "b" ]);
-});
-
 test("doorbellRingAllowed passes everything an empty filter or an unclassifiable ring offers and drops only a disjoint match", () => {
 
   // An empty filter means no filtering, whatever the ring carries.
@@ -1378,4 +1361,32 @@ test("doorbellOutcome reads the library's own glosses and still says something h
 
   // A code the table does not carry still reports that the call ended, and what the controller called it.
   assert.equal(doorbellOutcome(999), "The call ended (reason code 999).");
+});
+
+test("doorGuardChoices labels a door's guards by name where the census knows them and offers the whole census where no door names them", () => {
+
+  const users = [
+
+    { alias: "", full_name: "Zed Guard", id: "guard-z", status: "ACTIVE", username: "zed" },
+    { alias: "Annie", full_name: "", id: "guard-a", status: "PENDING", username: "annie" },
+    { alias: "", full_name: "", id: "guard-d", status: "DEACTIVATED", username: "" }
+  ] as unknown as AccessOfficialUser[];
+
+  // A door naming guards keeps the door's order, labels a known guard by the first name the census carries, and falls back to the identifier for an unknown one.
+  assert.deepEqual(doorGuardChoices({ guardIds: [ "guard-z", "guard-x", "guard-z", "guard-d", "" ], users }), [
+
+    { label: "Zed Guard", value: "guard-z" },
+    { label: "guard-x", value: "guard-x" },
+    { label: "guard-d", value: "guard-d" }
+  ]);
+
+  // No census at all leaves every guard labeled by its identifier, which is what a credentialed controller without a token offers.
+  assert.deepEqual(doorGuardChoices({ guardIds: ["guard-z"], users: [] }), [{ label: "guard-z", value: "guard-z" }]);
+
+  // A door whose guards nothing lists offers every active or pending user, sorted by label, and never a deactivated one.
+  assert.deepEqual(doorGuardChoices({ guardIds: undefined, users }), [ { label: "Annie", value: "guard-a" }, { label: "Zed Guard", value: "guard-z" } ]);
+
+  // An empty door and an empty census each offer nothing.
+  assert.deepEqual(doorGuardChoices({ guardIds: [], users }), []);
+  assert.deepEqual(doorGuardChoices({ guardIds: undefined, users: [] }), []);
 });

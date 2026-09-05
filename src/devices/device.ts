@@ -393,6 +393,13 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }
 
+  // Utility function to return the values a list-valued configuration parameter selects on a device, read through the shared engine's own list grammar. A domain
+  // narrows the read to what this device offers and answers in the domain's own spelling; without one the stored entries answer as the user named them.
+  public getFeatureValueList(option: string, domain?: readonly string[]): readonly string[] {
+
+    return this.platform.featureOptions.valueList({ controller: this.controller.id, device: this.id, domain, option });
+  }
+
   // Utility for checking whether a feature option is enabled on a device.
   public hasFeature(option: string): boolean {
 
