@@ -3,10 +3,10 @@
  * device.ts: Base class for all UniFi Access devices.
  */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
-import type { API, Characteristic, CharacteristicValue, HAP, WithUUID } from "homebridge";
+import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName } from "homebridge-plugin-utils";
+import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, updateServices } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -233,7 +233,7 @@ export abstract class AccessDevice extends AccessBase {
    */
   public refreshReachability(): void {
 
-    this.updateServices(this.hap.Characteristic.StatusActive, this.isReachable);
+    updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isReachable);
   }
 
   /* Refresh whatever per-device state a broken notification stream may have left stale. The controller's connection observer calls this on every completed recovery,
@@ -245,21 +245,6 @@ export abstract class AccessDevice extends AccessBase {
   public onConnectionRestored(): void {
 
     // Deliberately empty rather than unimplemented: there is nothing at this layer the recovery could have staled.
-  }
-
-  /* Write a value to every service on this accessory that reports the given characteristic. The one sweep-and-write statement in the plugin: the observe loop above
-   * projects availability through it, and a device's own delivery paths project whatever else is a property of the device rather than of one service. Filtering on
-   * the characteristic rather than on a service list is what keeps a service added mid-run dressed without anyone maintaining a roster.
-   *
-   * The parameter is an intersection because the two HAP calls below ask for different halves of the same class: the lookup wants the static UUID and the write
-   * wants a zero-argument constructor. A concrete characteristic satisfies both, and naming both is what lets one parameter reach both calls without a cast.
-   */
-  protected updateServices(characteristic: WithUUID<typeof Characteristic> & (new () => Characteristic), value: CharacteristicValue): void {
-
-    for(const service of this.accessory.services.filter(x => x.testCharacteristic(characteristic))) {
-
-      service.updateCharacteristic(characteristic, value);
-    }
   }
 
   // The update packet this device delivers to its own handlers once its record has folded. The two trailing members are what the packet type requires, and both carry

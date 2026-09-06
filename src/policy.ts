@@ -839,28 +839,6 @@ export function lockCommandRule(options: { delayInterval: number | undefined; is
   return { kind: "rule", rule: { interval: delayInterval, type: "custom" } };
 }
 
-/**
- * What a device's record says about tampering, or `undefined` when it says nothing at all.
- *
- * Whether the hardware can report tampering is a capability question its owner already answers, so this answers exactly one thing: what the record states. The
- * condition is carried by an ordinary configuration row, which is what makes tampering a property of the record rather than of a notification, and lets a caller see it
- * change through the same delivery every other record change arrives on.
- *
- * A record carrying no tamper row has reported nothing, which is deliberately distinct from reporting that there is no tampering. A caller needs the two apart to
- * tell a first-ever observation from a genuine change, and only the latter is worth announcing. A record carrying no configuration rows at all reads the same way,
- * for the same reason: a census that never listed the hardware's configuration has said nothing about tampering.
- *
- * @param device - The device record to read.
- *
- * @returns `true` when the record reports tampering, `false` when it reports none, and `undefined` when it carries no tamper row.
- */
-export function tamperState(device: AccessStateDevice): boolean | undefined {
-
-  const entry = device.configs?.find(config => config.key === "tamper_event");
-
-  return (entry === undefined) ? undefined : (entry.value === "true");
-}
-
 /* How a hub's door is presented in HomeKit, as the choices the settings page offers. The service values are the HomeKit services the door is configured as,
  * spelled exactly as the configuring log line spells them, and the automatic choice defers to the hardware: a UA Gate presents as a garage door opener and every
  * other hub as a lock.

@@ -645,6 +645,18 @@ function lineCount(harness: HubHarness, sentence: string): number {
   return harness.lines.filter(line => line === (LOG_PREFIX + sentence)).length;
 }
 
+/* The same reading of a warning, which the log double keeps in the debug sink beside the debug lines rather than in the info one.
+ *
+ * @param harness  - The hub to read.
+ * @param sentence - The sentence as a user reads it, without the logger's own prefix.
+ *
+ * @returns The number of times the hub warned it.
+ */
+function warnCount(harness: HubHarness, sentence: string): number {
+
+  return harness.debugs.filter(line => line === (LOG_PREFIX + sentence)).length;
+}
+
 // Write a target door state the way HomeKit does, and wait on the handler behind it.
 async function writeTarget(harness: HubHarness, target: number): Promise<void> {
 
@@ -2780,6 +2792,28 @@ function ultraRecord(mode: string): AccessStateDevice & { mac: string } {
     target_config: [{ config_key: "rex_button_mode", config_tag: "", config_value: mode }], target_type: "device", unique_id: "extension-1" }] });
 }
 
+// The rows a record carries its tamper reading and its tampering-alert setting through, which is what the tamper arms vary against each other.
+function tamperRows(rows: Record<string, string>): AccessDeviceEntryConfig[] {
+
+  return configRows({ deviceId: HUB_ID, entries: rows });
+}
+
+/* A UA Ultra whose hardware detects tampering, reporting whatever tamper rows the arm names. The Ultra is the hub family carrying that capability today, and its
+ * multiplexed terminal input is what gives the record a contact sensor to carry the characteristic at all.
+ *
+ * @param rows - The tamper rows the record reports.
+ * @param mode - What the multiplexed terminal input is configured for, which is what decides whether the request to exit sensor exists.
+ *
+ * @returns The record.
+ */
+function tamperUltra(rows: Record<string, string>, mode = "rex"): AccessStateDevice & { mac: string } {
+
+  return testHub({ capabilities: [ "is_hub", "tamper_proofing" ], configs: tamperRows(rows), device_type: "UA-ULTRA", extensions: ultraRecord(mode).extensions });
+}
+
+// What a hub says when the controller's tampering alert is switched off, spelled once here so every arm counts the sentence a user actually reads.
+const TAMPER_WITHDRAWN = "Tampering alerts are turned off on the controller, so the tamper status reads normal until they are turned on again.";
+
 // A doorbell-capable reader hanging off this hub, as the client's device snapshot carries it, which is the device a dispatched ring is addressed to.
 const READER_RECORD = testHub({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: HUB_ID, device_type: "UA-G2-PRO", unique_id: READER_ID });
 
@@ -3031,6 +3065,234 @@ test("a hub's wiring table and the option catalog's model lists agree about whic
       assert.equal(hasContactSensor(harness, subtype), supported, "the " + name + " sensor on a " + deviceType + " follows the catalog's own model list");
     }
   }
+});
+
+test("a tamper-capable hub dresses its sensors from the reading it adopted and publishes nothing for that adoption", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "true" }) });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "the Ultra's multiplexed input is what gives this hub a sensor to carry the reading");
+
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  // Presence is read through testCharacteristic because getCharacteristic adds an optional characteristic a service does not carry, so a read through it
+  // could never fail.
+  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "a contact sensor of tamper-capable hardware carries the tamper characteristic");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "and is dressed from the raised reading the record arrived with, which an implementation dressing normal whatever the record said would fail");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and an adoption is nothing anybody observed changing, so it publishes nothing");
+});
+
+test("a tamper-capable hub carries a raise to the characteristic, the warning, and the topic exactly once, and carries a restated raise nowhere", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "false" }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED, "the raise reaches the characteristic");
+  assert.equal(warnCount(harness, "Tampering detected."), 1, "and is warned exactly once");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
+
+  // The same reading restated is not a change, so it reaches none of them.
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "a restated raise leaves the characteristic where it stands");
+  assert.equal(warnCount(harness, "Tampering detected."), 1, "warns no second time");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and publishes no second payload");
+});
+
+test("a tamper-capable hub carries a clear to the characteristic, the note, and the topic exactly once, and carries a restated clear nowhere", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "true" }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "false" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED, "the clear reaches the characteristic");
+  assert.equal(lineCount(harness, "Tampering no longer detected."), 1, "and is noted exactly once");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["false"], "and published exactly once");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "false" }));
+
+  assert.equal(lineCount(harness, "Tampering no longer detected."), 1, "a restated clear is noted no second time");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["false"], "and publishes no second payload");
+});
+
+test("a reading the library withdraws clears the status, says why once, publishes unknown, and re-adopts on the log in silence while the topic says so", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "true" }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  /* The alert switched off with the input row deliberately left raised: the hardware has stopped revising that row, so what it holds is a stale reading rather
+   * than a quiet one, and an implementation reading the input row on its own would leave the status raised here.
+   */
+  refreshRecord(harness, tamperRows({ "tamper_event": "true", "tampering": "false" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED, "the withdrawn reading clears the status");
+  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 1, "and says why exactly once");
+  assert.equal(lineCount(harness, "Tampering no longer detected."), 0, "and is not announced as a clear, which is what tells a withdrawal from a quiet reading");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["unknown"], "and the topic says the reading is no longer established");
+
+  // The verdict is forgotten along with the reading, so the same rows restated are not a change to say or publish a second time.
+  refreshRecord(harness, tamperRows({ "tamper_event": "true", "tampering": "false" }));
+
+  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 1, "a restated withdrawal says nothing further");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["unknown"], "and publishes nothing further");
+
+  // The alert coming back on is a reading arriving over none, which is adopted on the log in silence and said on the topic.
+  refreshRecord(harness, tamperRows({ "tamper_event": "true", "tampering": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED, "the reading returning raises the status again");
+  assert.equal(warnCount(harness, "Tampering detected."), 0,
+    "and is not warned, which an implementation that kept the held verdict through the withdrawal would fail by warning here");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [ "unknown", "true" ], "while the topic tells a subscriber holding unknown that the reading came back");
+});
+
+test("a reading withdrawn from a quiet one still says why and publishes unknown, without moving the status it leaves normal", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "false" }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "false", "tampering": "false" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "the status stands where it stood, which is the control that the setting is what moved rather than the condition");
+  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 1, "the setting changing is worth saying once even where the status did not move");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["unknown"], "and the topic says the reading is no longer established");
+});
+
+test("a hub whose hardware cannot detect tampering carries the characteristic on no sensor, announces nothing, and publishes nothing", () => {
+
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...tamperRows({ "tamper_event": "true" }) ] }) });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the wired pair is what gives this hub a sensor at all");
+
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
+
+  assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "hardware without the capability carries the characteristic nowhere, whatever its rows say");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and publishes nothing for a reading it does not project");
+
+  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...tamperRows({ "tamper_event": "false" }) ]);
+
+  assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "a reading changing on such hardware still reaches no characteristic");
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "and neither sentence is written for it");
+  assert.equal(lineCount(harness, "Tampering no longer detected."), 0);
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and nothing is published for it");
+});
+
+test("a sensor of tamper-capable hardware carries the characteristic from creation, and a first reading over none is written, published, and not announced", () => {
+
+  const harness = makeHub({ record: tamperUltra({}) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered),
+    "a sensor created with nothing established carries the characteristic, which a design leaving it bare until a verdict is held would fail");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "and reads normal until a verdict says otherwise");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "the first reading to arrive reaches the sensor on that same delivery");
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "a reading seen for the first time is not one anybody observed changing, so it is not warned");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic carries every change of the held verdict, an adoption included");
+});
+
+test("a carried tamper status with nothing established behind it reads normal at its next dressing", () => {
+
+  const harness = makeHub({ record: tamperUltra({}) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  /* A status restored from the accessory cache with no reading behind it, written here through getCharacteristic for exactly the side effect the presence reads
+   * elsewhere avoid: this is the one arm that wants a value standing on a characteristic nothing projected.
+   */
+  sensor.getCharacteristic(Characteristic.StatusTampered).updateValue(Characteristic.StatusTampered.TAMPERED);
+
+  refreshRecord(harness, tamperRows({}));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "nothing established renders normal, which an implementation leaving an unestablished carrier alone would fail by reading raised");
+  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 0, "and nothing is said, because no reading was withdrawn");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and nothing is published, because the held verdict did not move");
+});
+
+test("a hub constructed while the tampering alert is off reads normal, and the alert returning is published and not announced", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "true", "tampering": "false" }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "the hardware detects tampering, so its sensor carries the characteristic from creation");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "and reads normal, which an ungated reading of the stale input row would fail by reading raised");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and an adoption publishes nothing");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true", "tampering": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "the alert coming back on establishes the reading");
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "which is a first sighting rather than a transition, so it is not warned");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic says it, so a subscriber holding unknown hears the reading return");
+});
+
+test("a first reading over none that reports no tampering is published and not announced", () => {
+
+  const harness = makeHub({ record: tamperUltra({}) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "false" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "the status stands where it stood, which is the control that a reading rather than a condition is what arrived");
+  assert.equal(lineCount(harness, "Tampering no longer detected."), 0,
+    "the silence follows from nothing having been held rather than from the reading being quiet, which an implementation gating on its truth would fail");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["false"], "while the topic carries a quiet first sighting the way it carries every other change");
+});
+
+test("a sensor the re-gate creates on the delivery that changes the verdict reads that verdict", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "false" }, "dps") });
+
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "an Ultra multiplexed onto its position sensor carries no request to exit sensor yet");
+
+  // One delivery carries both the input mode that creates the sensor and the reading that raises the verdict, so the two land together rather than in sequence.
+  restateRecord(harness, { configs: tamperRows({ "tamper_event": "true" }), extensions: ultraRecord("rex").extensions });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "the input mode changing is what creates the sensor on this delivery");
+
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+
+  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "the sensor carries the characteristic from its creation");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "and reads the verdict this delivery established, which a sensor dressed from the verdict held before it and never swept would fail");
+  assert.equal(warnCount(harness, "Tampering detected."), 1, "the raise is warned exactly once");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
+});
+
+test("a contact sensor only the sweep reaches follows a raise to the characteristic, the warning, and the topic", () => {
+
+  /* The side door position sensor is configured once and never re-dressed by the re-gate, which makes it the one contact sensor that tells a working sweep from
+   * none: every other sensor here is re-dressed from the updated verdict on the same delivery, so an implementation that wrote nothing would still read right.
+   * The capability pair on a Gate is a fixture for the mechanism and no claim about what this hardware detects.
+   */
+  const harness = makeGate({ record: testHub({ capabilities: [ "is_hub", "tamper_proofing" ], configs: tamperRows({ "tamper_event": "false" }),
+    device_type: "UGT" }) });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE), "the side door features default on, so the Gate carries its side position sensor");
+
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE);
+
+  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "which carries the tamper characteristic from its creation like every other contact sensor");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+    "reading normal from the quiet verdict the record arrived with");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "the raise reaches it through the sweep alone, which an implementation writing nothing would fail by leaving it normal");
+  assert.equal(warnCount(harness, "Tampering detected."), 1, "and the raise is warned exactly once");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
 });
 
 test("a hub delivers a doorbell ring to HomeKit, its trigger switch, the topic, and the log, and delivers a ring that is not its own nowhere", async () => {

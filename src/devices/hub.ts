@@ -2,7 +2,7 @@
  *
  * hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient } from "unifi-access";
+import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState } from "unifi-access";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
@@ -12,8 +12,8 @@ import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
-  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, tamperState, ultraInputMode, unlockAttribution } from "../policy.ts";
-import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, validService } from "homebridge-plugin-utils";
+  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, ultraInputMode, unlockAttribution } from "../policy.ts";
+import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, updateServices, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -351,7 +351,7 @@ export class AccessHub extends AccessDevice {
      * first time is not a transition anyone observed. This is deliberately the only place the record is consulted for a baseline - the configure blocks below read
      * the field rather than the record, so their re-runs on each delivered update cannot re-seed it and mask a genuine change.
      */
-    this.tamperVerdict = this.hasCapability("tamper_proofing") ? tamperState(this.uda) : undefined;
+    this.tamperVerdict = isTamperCapable(this.uda) ? tamperState(this.uda) : undefined;
 
     /* Clean out the context object in case it's been polluted somehow, then record what an accessory carries for the life of the pairing: the hardware it names,
      * the controller that created it, and the device identity it was minted under - the last being what tells a startup sweep that this accessory is the
@@ -468,7 +468,7 @@ export class AccessHub extends AccessDevice {
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.Switch,
-        this.hasCapability("is_reader") && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice), accessMethod.subtype)) {
+        isReader(this.uda) && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice), accessMethod.subtype)) {
 
         continue;
       }
@@ -653,7 +653,7 @@ export class AccessHub extends AccessDevice {
 
     const official = this.controller.client.official;
 
-    if((this.#accessMethodState.phase !== "unseeded") || !official || !this.hasCapability("is_reader")) {
+    if((this.#accessMethodState.phase !== "unseeded") || !official || !isReader(this.uda)) {
 
       return;
     }
@@ -798,7 +798,7 @@ export class AccessHub extends AccessDevice {
    */
   get #rowlessSeededReader(): boolean {
 
-    return (this.#accessMethodState.phase === "seeded") && (this.uda.configs === undefined) && this.hasCapability("is_reader");
+    return (this.#accessMethodState.phase === "seeded") && (this.uda.configs === undefined) && isReader(this.uda);
   }
 
   /* Re-read a rowless seeded reader's access methods and restate its switches from what comes back. A method the user changed while the notification channel was down
@@ -987,17 +987,18 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
   }
 
-  /* Dress a sensor service we have just acquired with the tamper reading we currently hold.
-   *
-   * This is what puts the characteristic on the service at all: HomeKit carries an optional characteristic only once something has written it, so a sensor created
-   * here - including one the mid-run re-gate creates - would otherwise be invisible to the sweep that keeps the reading current.
+  /* Dress a sensor service with the tamper characteristic, which is what puts the characteristic on the service at all: HomeKit carries an optional characteristic
+   * only once something has written it. Every configure path calls this for the sensor it acquired, so on tamper-capable hardware every contact sensor carries the
+   * characteristic from its creation - which is what lets the update handler's sweep reach all of them without keeping a roster - and reads normal until a verdict
+   * says otherwise. Nothing established renders normal here: HomeKit has no third value, a status restored from the accessory cache with no reading behind it is
+   * not one this plugin can assert, and the distinction between nothing said and no tampering lives in the held verdict and the status panel instead.
    *
    * It states the tracked verdict and never the record, so the per-update re-runs of the blocks that call it cannot move the baseline a genuine change is measured
    * against. Announcing a change is the update handler's job alone.
    */
   private dressTamperState(service: Service): void {
 
-    if(!this.hasCapability("tamper_proofing") || (this.tamperVerdict === undefined)) {
+    if(!isTamperCapable(this.uda)) {
 
       return;
     }
@@ -1120,7 +1121,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, selectedService, this.hasCapability("is_hub"))) {
+    if(!validService(this.accessory, selectedService, isHub(this.uda))) {
 
       return false;
     }
@@ -1391,7 +1392,7 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger(): boolean {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hasCapability("is_hub") && this.hasFeature("Hub.Lock.Trigger"),
+    if(!validService(this.accessory, this.hap.Service.Switch, isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger"),
       AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
 
       return false;
@@ -1516,7 +1517,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The remaining MQTT subscriptions are hub-specific (lock, DPS, side door).
-    if(!this.hasCapability("is_hub")) {
+    if(!isHub(this.uda)) {
 
       return true;
     }
@@ -2594,7 +2595,8 @@ export class AccessHub extends AccessDevice {
     this.accessory.getServiceById(this.hap.Service.ContactSensor, name)?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, value);
   }
 
-  // Whether this hub carries a capability, answered through the one predicate the status feed and the settings page read too.
+  // Whether this hub carries a capability the library names no predicate for - the doorbell and the access-method families - answered through the one predicate
+  // the status feed and the settings page read too.
   private hasCapability(capability: string | readonly string[]): boolean {
 
     return deviceHasCapability(this.uda, capability);
@@ -2752,47 +2754,79 @@ export class AccessHub extends AccessDevice {
       }
     }
 
+    // Project tampering ahead of the re-gate, so a sensor the re-gate creates on this delivery is dressed once, from the verdict this delivery established.
+    this.projectTamperState();
+
     /* Re-derive every input's eligibility from the evidence this update brought with it. Running it unconditionally is what lets a wiring change or a multiplex flip
      * re-gate its services mid-run on any hub family rather than only on the one that happened to be checked for it, and the call is cheap and silent on repeat by
      * construction.
      */
     this.configureTerminalInputs();
+  }
 
-    /* Project tampering. This is the only live writer of the characteristic - the configure path above adopts a baseline and never touches it again - so a change
-     * seen here is a real one, and it also dresses a sensor the re-gate above may have just created.
-     *
-     * A reading arriving over one we never had is adopted in silence rather than announced as a transition nobody observed. A raise and clear that both fall inside
-     * a connectivity gap is undetectable on any rail, since the controller keeps no tamper history and the notification frames name no device...so what we project
-     * after a gap is simply where the hardware stands now.
-     */
-    if(!this.hasCapability("tamper_proofing")) {
+  /* Project tampering. The condition lives on this rail alone: the configure path adopts a baseline and dresses the sensors from it, and every change after that
+   * arrives here, ahead of the delivery's re-gate. A reading that agrees with the one we hold is not a change, and nothing below describes anything but a change -
+   * the characteristic, the topic, and the log alike - so a restated record moves none of them. A reading that is a change lands in the held verdict before the
+   * re-gate runs, so a sensor the re-gate creates on this delivery is dressed once, from the verdict this delivery established.
+   *
+   * The characteristic and the topic both carry the condition itself, so each moves on every change, an adoption included. The characteristic reaches every
+   * contact sensor through the library's sweep because every one of them carries it from creation, and the topic spells the reading's three answers as they are,
+   * with unknown standing in for nothing established, so a subscriber holding unknown hears the reading return the moment it does. The log announces transitions
+   * alone, because a reading seen for the first time is not one anybody observed. A reading the library withdraws - the console's tampering alert switched off,
+   * so the hardware has stopped revising its tamper input - is a transition from a held verdict: a raised status clears, the change is said once, and the verdict
+   * is forgotten so that the next reading to arrive is adopted on the log in silence exactly as a first sighting is.
+   *
+   * A raise and clear that both fall inside a connectivity gap is undetectable on any rail, since the controller keeps no tamper history and the notification
+   * frames name no device...so what we project after a gap is simply where the hardware stands now.
+   */
+  private projectTamperState(): void {
+
+    if(!isTamperCapable(this.uda)) {
 
       return;
     }
 
     const verdict = tamperState(this.uda);
 
-    if(verdict === undefined) {
+    if(verdict === this.tamperVerdict) {
 
       return;
     }
 
-    this.updateServices(this.hap.Characteristic.StatusTampered, verdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
-      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
-
-    if((this.tamperVerdict !== undefined) && (this.tamperVerdict !== verdict)) {
-
-      // A security condition is worth a warning; its clearing is worth a note.
-      if(verdict) {
-
-        this.log.warn("Tampering detected.");
-      } else {
-
-        this.log.info("Tampering no longer detected.");
-      }
-    }
+    const held = this.tamperVerdict;
 
     this.tamperVerdict = verdict;
+    updateServices(this.accessory, this.hap.Characteristic.StatusTampered, verdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
+      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
+    this.mqttPublish(mqttTopics.tamper, String(verdict ?? "unknown"));
+
+    // A first sighting is adopted without a word.
+    if(held === undefined) {
+
+      return;
+    }
+
+    // A security condition is worth a warning, its clearing a note, and its withdrawal a note that says why the status reads normal.
+    switch(verdict) {
+
+      case undefined:
+
+        this.log.info("Tampering alerts are turned off on the controller, so the tamper status reads normal until they are turned on again.");
+
+        break;
+
+      case true:
+
+        this.log.warn("Tampering detected.");
+
+        break;
+
+      case false:
+
+        this.log.info("Tampering no longer detected.");
+
+        break;
+    }
   }
 
   // Handle device update v2 events.

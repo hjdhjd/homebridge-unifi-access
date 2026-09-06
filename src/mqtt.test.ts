@@ -127,6 +127,7 @@ test("the catalog declares the wire topics every subscriber already relies on", 
     sidedoorDps: "sidedoor/dps",
     sidedoorLock: "sidedoor/lock",
     sidedoorUnlock: "sidedoor/unlock",
+    tamper: "tamper",
     telemetry: "telemetry",
     unlock: "unlock"
   });

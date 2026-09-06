@@ -43,6 +43,9 @@ export const mqttTopics = mqttTopicCatalog({
   sidedoorUnlock: { devices: ["gate"], group: SIDE_DOOR_GROUP, label: "side door unlock",
     publish: "A JSON describing who unlocked the side door and how. See [Unlock Attribution](#unlock-attribution) for additional documentation. Published only when " +
       "`Controller.Webhooks` is enabled.", topic: "sidedoor/unlock" },
+  tamper: { devices: ["tamperHub"], group: DOOR_GROUP, label: "tamper",
+    publish: "`true` when tampering is detected, `false` when it is no longer detected, `unknown` when tampering alerts are turned off on the controller. The " +
+      "tamper status.", topic: "tamper" },
   telemetry: { devices: ["controller"], group: TELEMETRY_GROUP, label: "telemetry",
     publish: "All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be " +
       "interested in. This is published to the controller's identity rather than a device's: the controller's serial number in the same form as a device identity, " +
@@ -63,6 +66,7 @@ export const mqttTopics = mqttTopicCatalog({
     gate: "UA Gate",
     hub: "UA Hub",
     hubDoorMini: "UA Hub Door Mini",
+    tamperHub: "Hub with tamper detection",
     ultra: "UA Ultra"
   }
 });

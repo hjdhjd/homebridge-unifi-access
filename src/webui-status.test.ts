@@ -384,6 +384,15 @@ test("the row policy answers the tamper row all three ways", () => {
   assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "true" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "Detected" ] ]);
   assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "false" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "Normal" ] ]);
   assert.deepEqual(rowsFor(tamperHub({})), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "" ] ]);
+
+  /* The tampering alert setting gates the reading beside it: the hardware reports no tamper input while the alert is off, so its input row is stale rather than
+   * quiet and the row falls back to the dash. The raised input row is deliberately the same one that renders "Detected" with the alert on, so a reading that
+   * ignores the setting renders "Detected" here where this expects the dash. Any setting value but on gates, because a spelling the controller has not been
+   * observed to write is not guessed at.
+   */
+  assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "true", "tampering": "true" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "Detected" ] ]);
+  assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "true", "tampering": "false" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "" ] ]);
+  assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "false", "tampering": "off" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "" ] ]);
 });
 
 test("the row policy assigns a UA Gate's four rows to the doors their roles name", () => {

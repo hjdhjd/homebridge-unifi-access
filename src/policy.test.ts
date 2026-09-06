@@ -15,7 +15,7 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
   isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
-  recordByMac, resolveDoorService, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl,
+  recordByMac, resolveDoorService, serialForm, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl,
   webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -521,20 +521,6 @@ test("lockCommandRule maps every configured interval onto the verb that expresse
   assert.deepEqual(lockCommandRule({ delayInterval: 15, isLocking: false }), { kind: "rule", rule: { interval: 15, type: "custom" } });
 });
 
-test("tamperState reports what the record states and stays silent when it states nothing", () => {
-
-  // The captured shape: the condition is carried by an ordinary configuration row, which is what lets it reach us on the same delivery as every other record change.
-  const withTamper = (value: string): AccessStateDevice => hubRecord({ configs: configRows({ entries: { "tamper_event": value } }) });
-
-  assert.equal(tamperState(withTamper("true")), true);
-  assert.equal(tamperState(withTamper("false")), false);
-
-  /* A record with no tamper row has said nothing, which has to stay distinct from its having said there is no tampering: collapsing the two would turn a first-ever
-   * observation into a transition and announce a change nobody saw.
-   */
-  assert.equal(tamperState(hubRecord({ configs: [] })), undefined);
-});
-
 test("composeConnectIdentity accepts every whole identity and names every missing half", () => {
 
   assert.deepEqual(composeConnectIdentity({ password: "p", username: "u" }), { identity: { password: "p", username: "u" } });
@@ -1018,9 +1004,6 @@ test("discoverDoorLocations ranks the controller's own live binding above the na
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {
 
   const projected = coreRecord();
-
-  // No configuration rows means nothing has been reported about tampering, which stays deliberately distinct from a report of no tampering.
-  assert.equal(tamperState(projected), undefined);
 
   // No port extensions means no multiplex, so the position sensor answers from the door-state model in both directions.
   assert.equal(dpsSensorEligible({ device: projected, entry: undefined }), false);

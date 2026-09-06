@@ -30,6 +30,7 @@ I've provided MQTT support for those that are interested - I'm genuinely curious
   * Lock events, including triggering locks via MQTT.
   * Door position sensor (DPS) events.
   * Terminal input events (REL, REN, REX).
+  * Tamper status events for hubs with tamper detection.
   * Unlock attribution - who unlocked a door and how. See [unlock attribution](#unlock-attribution) for additional details.
   * Side door events for UA Gate devices.
   * Raw telemetry publishing.
@@ -75,6 +76,7 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 | `rel`       | UA Hub                                                                    | `true` when open, `false` when closed. The remote release sensor.
 | `ren`       | UA Hub                                                                    | `true` when open, `false` when closed. The request to enter sensor.
 | `rex`       | UA Hub, UA Hub Door Mini, UA Ultra                                        | `true` when open, `false` when closed. The request to exit sensor.
+| `tamper`    | Hub with tamper detection                                                 | `true` when tampering is detected, `false` when it is no longer detected, `unknown` when tampering alerts are turned off on the controller. The tamper status.
 | `unlock`    | All hubs                                                                  | A JSON describing who unlocked the door and how. See [Unlock Attribution](#unlock-attribution) for additional documentation. Published only when `Controller.Webhooks` is enabled.
 
 #### Side Door Topics (UA Gate Only)

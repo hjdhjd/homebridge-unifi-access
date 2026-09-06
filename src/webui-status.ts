@@ -17,11 +17,11 @@
  */
 import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions, ConnectionEvents,
   ConnectionState, StateStore } from "unifi-access";
-import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, selectController,
-  selectControllerUptime, selectDoorStates } from "unifi-access";
+import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, isTamperCapable, selectController,
+  selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
-  dpsSensorEligible, membershipRecords, serialForm, tamperState } from "./policy.ts";
+  dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
 import type { DecoratedSerial } from "./policy.ts";
 import { formatErrorMessage } from "homebridge-plugin-utils";
 
@@ -483,8 +483,8 @@ export function composeStatusRows(options: { kind: "controller"; mode: AccessApi
     rows.push(statusRow("sidelock", lockRowValue(entries.side.entry?.lock)), statusRow("sidedoor", dpsRowValue(entries.side.entry?.dps)));
   }
 
-  // The tamper row follows the hardware capability; the reading is the record's own, through the shared policy read.
-  if(device.capabilities.includes("tamper_proofing")) {
+  // The tamper row follows the hardware capability, and the capability and the reading behind it are both the library's own.
+  if(isTamperCapable(device)) {
 
     rows.push(statusRow("tamper", tamperRowValue(tamperState(device))));
   }
