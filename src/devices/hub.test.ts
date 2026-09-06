@@ -17,7 +17,7 @@ import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, A
 import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
 import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
-import { TestMqttClient, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { accessMethods, officialDeviceModel } from "../policy.ts";
 import { configRows, hubRecord } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -121,6 +121,8 @@ interface RecordedCommand {
 // What a stood-up hub looks like from a test's side: the hub itself, the deliveries and packets it can be handed, and what it commanded, published, and said.
 interface HubHarness {
 
+  // The time source every timer this hub arms is registered on, so an arm advances the hub's own timeline rather than the process's global timers.
+  clock: TestClock;
   commands: RecordedCommand[];
   debugs: string[];
   deliver: (event: string, delivery: unknown) => void;
@@ -186,6 +188,7 @@ interface HubOptions {
  */
 function makeHub(options: HubOptions = {}): HubHarness {
 
+  const clock = new TestClock();
   const commands: RecordedCommand[] = [];
   const debugs: string[] = [];
   const errors: string[] = [];
@@ -340,6 +343,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     platform: {
 
       api: { hap: { Characteristic, Service, uuid } },
+      /* The clock every timer this hub arms is registered on, stated here rather than left to the library's default, because a hub reading a clock no arm holds is
+       * a hub whose relocks and travels an advance would never reach.
+       */
+      clock,
       featureOptions: undefined as unknown as FeatureOptions,
       /* The lines are captured formatted, because what a user reads is the composed sentence rather than the format string and its arguments. The plugin's debug
        * output arrives on the warn sink, which is how the shared logger surfaces it without Homebridge's own debug flag, so that is where an arm reads it.
@@ -368,6 +375,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   return {
 
+    clock,
     commands,
     debugs,
     deliver: (event: string, delivery: unknown): void => {
@@ -1576,9 +1584,7 @@ test("a completed recovery gives the startup seed of a reader nothing has answer
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "and the switch it makes knowable reads what the controller answered");
 });
 
-test("a confirmed access method write answers from the model before the controller echoes it, and a declined one changes nothing", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a confirmed access method write answers from the model before the controller echoes it, and a declined one changes nothing", async () => {
 
   // What the controller answers when the write is read back, which is the only thing that tells a change it applied from one it silently refused.
   const readBack = (enabled: string): unknown => ({ access_methods: { pin_code: { enabled: enabled, pin_code_shuffle: "no" } } });
@@ -1603,9 +1609,7 @@ test("a confirmed access method write answers from the model before the controll
   assert.ok(declined.errors.some(line => line === LOG_PREFIX + "The controller declined the PIN access method change."), "and the decline is announced");
 });
 
-test("a record refresh moves the model, and a refresh restating rows already folded moves nothing", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a record refresh moves the model, and a refresh restating rows already folded moves nothing", async () => {
 
   const row = (value: string): unknown[] => [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value }];
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
@@ -1689,9 +1693,7 @@ test("a garage door opener never consults the lock delay, in either direction", 
   assert.deepEqual(await openerDispatch(held, Characteristic.TargetDoorState.OPEN), pulse, "and a configured interval never makes it a hold rule");
 });
 
-test("a refused close puts a gate's opener back and leaves the lock state and the pending relock exactly as they were", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a refused close puts a gate's opener back and leaves the lock state and the pending relock exactly as they were", async () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Lock.Trigger"], reject: ["close"] });
   const opener = openerService(gate);
@@ -1704,7 +1706,7 @@ test("a refused close puts a gate's opener back and leaves the lock state and th
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "the gate is unlocked after the trigger it opens on");
 
   await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  gate.clock.advance(REVERT_DELAY_MS);
 
   // Nothing settled, so the transitional state HomeKit was shown goes back to where the gate actually stands.
   assert.equal(opener.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.OPEN);
@@ -1718,7 +1720,7 @@ test("a refused close puts a gate's opener back and leaves the lock state and th
   assert.deepEqual(lockPayloads(gate), ["false"], "a refused close announces nothing");
 
   // And the relock the unlock armed is still pending, because only a close that succeeded has anything to cancel.
-  t.mock.timers.tick(RELOCK_DELAY_MS - REVERT_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS - REVERT_DELAY_MS);
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "the pending relock still runs its course");
 
   // The window ends on the relock instead, which is the announcement the refused close did not get to make.
@@ -1727,15 +1729,13 @@ test("a refused close puts a gate's opener back and leaves the lock state and th
 
 });
 
-test("a refused pulse puts a door hub's opener back", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a refused pulse puts a door hub's opener back", async () => {
 
   const opener = makeOpener({ reject: ["unlock"] });
   const service = openerService(opener);
 
   await writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  opener.clock.advance(REVERT_DELAY_MS);
 
   assert.deepEqual(opener.commands, [{ options: { actor: UNLOCK_ACTOR }, verb: "unlock" }]);
   assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.OPEN);
@@ -1759,9 +1759,7 @@ test("a door hub's lock accessory still refuses a manual relock at the default s
     "the refusal says why the door cannot be relocked");
 });
 
-test("a UA Gate's lock accessory closes the gate, reads secured afterward, and cancels the relock it no longer needs", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a UA Gate's lock accessory closes the gate, reads secured afterward, and cancels the relock it no longer needs", async () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
   const tile = lockService(gate);
@@ -1780,7 +1778,7 @@ test("a UA Gate's lock accessory closes the gate, reads secured afterward, and c
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
   assert.equal(tile.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
   assert.equal(tile.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED, "no relock is left pending after a close");
 
 });
@@ -1801,9 +1799,7 @@ test("a UA Gate's MQTT lock topic closes the gate and then answers locked", asyn
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
 });
 
-test("a UA Gate's side door relocks through the close command, on its own MQTT topic and on its own automation trigger", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a UA Gate's side door relocks through the close command, on its own MQTT topic and on its own automation trigger", async () => {
 
   const gate = makeGate({ options: ["Enable.Hub.SideDoor.Lock.Trigger"] });
 
@@ -1820,7 +1816,7 @@ test("a UA Gate's side door relocks through the close command, on its own MQTT t
   /* The close ended the window and said so, and the relock it cancelled would say the same thing again if it had survived. Counting the sentence rather than
    * looking for its absence is what tells the close's own announcement from a relock firing on top of it.
    */
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
   assert.equal(lineCount(gate, "Side door locked."), 1, "the close cancelled the side door's pending relock");
 
   // And the automation trigger reaches the same verb with the same door.
@@ -1877,9 +1873,7 @@ test("every unlock names Homebridge as the actor behind it, whether or not it na
     [{ options: { actor: { id: "homebridge-unifi-access", name: "Homebridge" } }, verb: "unlock" }]);
 });
 
-test("an unlock a client cannot attribute is sent again unattributed, and opens the gate exactly as it always has", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("an unlock a client cannot attribute is sent again unattributed, and opens the gate exactly as it always has", async () => {
 
   /* The refusal the library raises, and the sentence the plugin composes from it. The shared formatter drops the message's own full stop, so the composed line
    * ends with exactly one...spelling the expectation out rather than rebuilding it here is what makes that the assertion.
@@ -1910,7 +1904,7 @@ test("an unlock a client cannot attribute is sent again unattributed, and opens 
   assert.deepEqual(gate.debugs, [noted], "the fallback speaks once, at debug, and nothing louder is said beside it");
 
   // And the window still ends on the gate's own timer, which is the rest of the unlock behaving as it always has.
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false);
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
@@ -1935,9 +1929,7 @@ test("an unlock that fails for any reason but the attribution is reported as it 
   assert.equal(lineCount(gate, "Gate unlocked."), 0);
 });
 
-test("a gate unlocked from HomeKit announces the window it opened, and the relock announces the end of it exactly once", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a gate unlocked from HomeKit announces the window it opened, and the relock announces the end of it exactly once", async () => {
 
   const gate = makeGate();
 
@@ -1950,21 +1942,19 @@ test("a gate unlocked from HomeKit announces the window it opened, and the reloc
   assert.deepEqual(lockPayloads(gate), ["false"]);
   assert.equal(lineCount(gate, "Gate unlocked."), 1);
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1);
 
   // A second full delay finds nothing armed: a window ends once, and the relock that ended this one did not re-arm on its way out.
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1);
 });
 
-test("a close inside the window ends it once, and the relock it cancelled adds nothing behind it", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a close inside the window ends it once, and the relock it cancelled adds nothing behind it", async () => {
 
   const gate = makeGate();
 
@@ -1978,15 +1968,13 @@ test("a close inside the window ends it once, and the relock it cancelled adds n
   assert.equal(lineCount(gate, "Gate locked."), 1);
 
   // A relock the close failed to cancel would announce the same ending a second time.
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1);
 });
 
-test("a remote unlock opens the same window a command of ours does, on either of a gate's two doors", (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a remote unlock opens the same window a command of ours does, on either of a gate's two doors", () => {
 
   const gate = makeGate();
 
@@ -2002,7 +1990,7 @@ test("a remote unlock opens the same window a command of ours does, on either of
   assert.deepEqual(lockPayloads(gate), [ "false", "false" ]);
   assert.equal(lineCount(gate, "Gate unlocked."), 2);
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "false", "true" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1, "the replaced timer left exactly one relock to fire");
@@ -2013,15 +2001,13 @@ test("a remote unlock opens the same window a command of ours does, on either of
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Side door locked."), 1);
 });
 
-test("a gate the controller reports locked retires the relock our own unlock armed", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a gate the controller reports locked retires the relock our own unlock armed", async () => {
 
   const gate = makeGate();
 
@@ -2037,15 +2023,13 @@ test("a gate the controller reports locked retires the relock our own unlock arm
   /* A relock has nothing left to do once the controller has reported the door secured. Left armed it would fire here and announce a closing of its own on top of
    * the controller's fresher reading, which is a state the door had already left.
    */
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1, "and the retired relock announced nothing on top of it");
 });
 
-test("a rail-reported lock and re-unlock inside the window leave no stale relock to announce over them", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a rail-reported lock and re-unlock inside the window leave no stale relock to announce over them", async () => {
 
   const gate = makeGate();
 
@@ -2059,7 +2043,7 @@ test("a rail-reported lock and re-unlock inside the window leave no stale relock
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
   deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlocked" });
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
   assert.deepEqual(lockPayloads(gate), [ "false", "true", "false" ]);
@@ -2093,9 +2077,7 @@ test("a UA Gate reads both of the doors it drives from the door state map in one
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
 });
 
-test("a UA Gate's side door reported locked retires the relock its own unlock armed", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a UA Gate's side door reported locked retires the relock its own unlock armed", async () => {
 
   const gate = makeGate();
 
@@ -2118,7 +2100,7 @@ test("a UA Gate's side door reported locked retires the relock its own unlock ar
 
   deliverDoorState(gate, { dps: "open", location_id: SIDE_DOOR, lock: "unlocked" });
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true", "false" ]);
@@ -2213,9 +2195,7 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
   assert.equal(lockService(second).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
 });
 
-test("the lock logging preference silences a door's lock lines and never its topic", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("the lock logging preference silences a door's lock lines and never its topic", async () => {
 
   const hub = makeHub({ options: ["Disable.Log.Lock"] });
 
@@ -2231,15 +2211,13 @@ test("the lock logging preference silences a door's lock lines and never its top
 
   await gate.mqttSet("lock", "false");
   await settle();
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
   assert.deepEqual(gate.lines.filter(line => line.endsWith(" locked.") || line.endsWith(" unlocked.")), []);
 });
 
-test("an unlock the controller refuses says so and opens no window at all", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("an unlock the controller refuses says so and opens no window at all", async () => {
 
   const gate = makeGate({ reject: ["unlock"] });
 
@@ -2253,14 +2231,12 @@ test("an unlock the controller refuses says so and opens no window at all", asyn
   assert.deepEqual(lockPayloads(gate), []);
   assert.equal(lineCount(gate, "Gate unlocked."), 0);
 
-  t.mock.timers.tick(RELOCK_DELAY_MS);
+  gate.clock.advance(RELOCK_DELAY_MS);
 
   assert.deepEqual(lockPayloads(gate), []);
 });
 
-test("a write on a standing door starts the travel the opener renders, in the direction it was asked for", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a write on a standing door starts the travel the opener renders, in the direction it was asked for", async () => {
 
   // A door the sensor reports open, asked to close.
   const closing = makeTravellingOpener({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
@@ -2281,9 +2257,7 @@ test("a write on a standing door starts the travel the opener renders, in the di
   assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 });
 
-test("a travel nobody confirms ends on its own timer, showing whatever the door reports by then", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a travel nobody confirms ends on its own timer, showing whatever the door reports by then", async () => {
 
   /* Each door below reports the same position throughout, and it is the opposite of what the travel was heading for. A settle that rendered the destination
    * rather than the evidence would answer the other way in every one of them.
@@ -2291,19 +2265,19 @@ test("a travel nobody confirms ends on its own timer, showing whatever the door 
   const closing = makeTravellingOpener({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
 
   await writeTarget(closing, Characteristic.TargetDoorState.CLOSED);
-  t.mock.timers.tick(TRAVEL_MS - 1);
+  closing.clock.advance(TRAVEL_MS - 1);
 
   assert.equal(openerService(closing).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING,
     "the travel runs for the whole duration configured for it");
 
-  t.mock.timers.tick(1);
+  closing.clock.advance(1);
 
   assert.equal(openerService(closing).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN);
 
   const opening = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
 
   await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
-  t.mock.timers.tick(TRAVEL_MS);
+  opening.clock.advance(TRAVEL_MS);
 
   assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
@@ -2315,19 +2289,17 @@ test("a travel nobody confirms ends on its own timer, showing whatever the door 
 
   assert.equal(openerService(halted).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 
-  t.mock.timers.tick(TRAVEL_MS - 1);
+  halted.clock.advance(TRAVEL_MS - 1);
 
   assert.equal(openerService(halted).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED,
     "the halt re-arms the travel timer rather than inheriting what was left of the old one");
 
-  t.mock.timers.tick(1);
+  halted.clock.advance(1);
 
   assert.equal(openerService(halted).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
-test("a gate operated mid-travel is halted through the library's own stop, from either direction", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a gate operated mid-travel is halted through the library's own stop, from either direction", async () => {
 
   // Closing, then asked to open before it arrives.
   const closing = makeGate();
@@ -2349,9 +2321,7 @@ test("a gate operated mid-travel is halted through the library's own stop, from 
   assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 });
 
-test("a gate whose client cannot carry a stop is halted all the same, and says why once", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a gate whose client cannot carry a stop is halted all the same, and says why once", async () => {
 
   const gate = makeGate({ options: ["Enable.Log.Debug"], reject: ["stop"] });
 
@@ -2364,9 +2334,7 @@ test("a gate whose client cannot carry a stop is halted all the same, and says w
   assert.deepEqual(gate.errors, [], "and a halt the client cannot carry is not an error the user has to read");
 });
 
-test("a door hub's opener halts on its own pulse, and only once that pulse comes back", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a door hub's opener halts on its own pulse, and only once that pulse comes back", async () => {
 
   const opener = makeTravellingOpener();
 
@@ -2383,21 +2351,19 @@ test("a door hub's opener halts on its own pulse, and only once that pulse comes
 
   await writeTarget(refusing, Characteristic.TargetDoorState.CLOSED);
   await writeTarget(refusing, Characteristic.TargetDoorState.OPEN);
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  refusing.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
   assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED);
 
   // The timer the first write armed is still the live one, so the travel ends on its own schedule rather than on one the refusal re-armed.
-  t.mock.timers.tick(TRAVEL_MS - REVERT_DELAY_MS);
+  refusing.clock.advance(TRAVEL_MS - REVERT_DELAY_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
 test("a halted door resumes the direction its own hardware answers to: a gate the target written, a momentary operator the reverse of the interrupted travel",
-  async (t) => {
-
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+  async () => {
 
     /* A momentary operator takes one input that names no direction, so its pulse reverses whatever the halt interrupted. The write below is the target that
      * agrees with the interrupted travel, so an implementation honoring the literal write renders the direction the door was already going.
@@ -2442,9 +2408,7 @@ test("a halted door resumes the direction its own hardware answers to: a gate th
       { options: { doorId: MAIN_DOOR }, verb: "close" } ]);
   });
 
-test("a closed reading settles every travel, and an open reading settles only an opening one", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a closed reading settles every travel, and an open reading settles only an opening one", async () => {
 
   const open = { dps: "open", location_id: MAIN_DOOR, lock: "unlock" };
   const closed = { dps: "close", location_id: MAIN_DOOR, lock: "unlock" };
@@ -2481,15 +2445,13 @@ test("a closed reading settles every travel, and an open reading settles only an
 
   assert.equal(openerService(closingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
 
-  t.mock.timers.tick(TRAVEL_MS);
+  closingOpen.clock.advance(TRAVEL_MS);
 
   assert.equal(openerService(closingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN,
     "and the travel still ends on its own timer, on the evidence it finds there");
 });
 
-test("a halted door settles on a closed reading and waits out an open one", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a halted door settles on a closed reading and waits out an open one", async () => {
 
   // Halted, then told the door is closed: it arrived after all, so the halt is over.
   const settling = makeTravellingOpener({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
@@ -2514,9 +2476,7 @@ test("a halted door settles on a closed reading and waits out an open one", asyn
   assert.equal(openerService(waiting).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 });
 
-test("a halted door whose sensor says nothing new still comes to rest on its own timer", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a halted door whose sensor says nothing new still comes to rest on its own timer", async () => {
 
   const halted = makeTravellingOpener({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
 
@@ -2528,14 +2488,12 @@ test("a halted door whose sensor says nothing new still comes to rest on its own
 
   assert.equal(openerService(halted).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 
-  t.mock.timers.tick(TRAVEL_MS);
+  halted.clock.advance(TRAVEL_MS);
 
   assert.equal(openerService(halted).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN);
 });
 
-test("a door with no travel time to model renders instantly, and a UA Gate falls back to the window its hardware is given", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a door with no travel time to model renders instantly, and a UA Gate falls back to the window its hardware is given", async () => {
 
   const opener = makeOpener();
   const service = openerService(opener);
@@ -2547,7 +2505,7 @@ test("a door with no travel time to model renders instantly, and a UA Gate falls
   // Nothing transitional is shown and no timer is armed: the door goes on reporting where the evidence puts it.
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
-  t.mock.timers.tick(TRAVEL_MS);
+  opener.clock.advance(TRAVEL_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
@@ -2558,12 +2516,12 @@ test("a door with no travel time to model renders instantly, and a UA Gate falls
 
   assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
 
-  t.mock.timers.tick(GATE_TRAVEL_MS - 1);
+  gate.clock.advance(GATE_TRAVEL_MS - 1);
 
   assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING,
     "an unconfigured gate travels for the window that hardware is given");
 
-  t.mock.timers.tick(1);
+  gate.clock.advance(1);
 
   assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
@@ -2610,21 +2568,19 @@ test("a UA Gate's MQTT position topic answers the state it holds, and a hub with
   assert.equal(await makeHub().mqttGet("dps"), "unknown");
 });
 
-test("a command the controller refuses leaves the machine standing and puts the characteristics back", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a command the controller refuses leaves the machine standing and puts the characteristics back", async () => {
 
   const opener = makeTravellingOpener({ reject: ["unlock"] });
   const service = openerService(opener);
 
   await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  opener.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED);
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
   // Nothing was armed, so nothing is waiting to expire: a travel that never began cannot end.
-  t.mock.timers.tick(TRAVEL_MS);
+  opener.clock.advance(TRAVEL_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
@@ -2642,9 +2598,7 @@ test("the opener reports no obstruction, and a door is presented as one accessor
   assert.equal(lock.services.filter(entry => entry.UUID === Service.LockMechanism.UUID).length, 1);
 });
 
-test("the travel time is read at the write, so a door reconfigured while it runs travels for its new duration", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("the travel time is read at the write, so a door reconfigured while it runs travels for its new duration", async () => {
 
   const opener = makeTravellingOpener();
   const service = openerService(opener);
@@ -2652,19 +2606,17 @@ test("the travel time is read at the write, so a door reconfigured while it runs
   opener.reconfigure([ "Enable.Hub.Door.Service=GarageDoorOpener", "Enable.Hub.Door.TransitionDuration." + HUB_SERIAL + ".30" ]);
 
   await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
-  t.mock.timers.tick(TRAVEL_MS);
+  opener.clock.advance(TRAVEL_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING,
     "the duration the hub was built with is not the one in force");
 
-  t.mock.timers.tick(30000 - TRAVEL_MS);
+  opener.clock.advance(30000 - TRAVEL_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
-test("the opener shows the travel before the command behind it settles, and the machine takes only once it has", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("the opener shows the travel before the command behind it settles, and the machine takes only once it has", async () => {
 
   const opener = makeTravellingOpener({ defer: "unlock" });
   const service = openerService(opener);
@@ -2676,7 +2628,7 @@ test("the opener shows the travel before the command behind it settles, and the 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 
   // And nothing is armed behind it yet, so an expiry here would be the expiry of a travel that has not begun.
-  t.mock.timers.tick(TRAVEL_MS);
+  opener.clock.advance(TRAVEL_MS);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 
@@ -2684,11 +2636,11 @@ test("the opener shows the travel before the command behind it settles, and the 
   await writing;
 
   // Now that the command has come back, the travel is the machine's and its own expiry is what ends it.
-  t.mock.timers.tick(TRAVEL_MS - 1);
+  opener.clock.advance(TRAVEL_MS - 1);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 
-  t.mock.timers.tick(1);
+  opener.clock.advance(1);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
@@ -3158,9 +3110,7 @@ test("a hub ends a doorbell ring on the cancel that names it, and on no other", 
   assert.equal(lineCount(harness, "Doorbell ring cancelled."), 1, "and says nothing further");
 });
 
-test("the doorbell trigger switch rings and cancels through the official API and settles back onto the ring the controller reports", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("the doorbell trigger switch rings and cancels through the official API and settles back onto the ring the controller reports", async () => {
 
   const harness = makeHub({ devices: [READER_RECORD], official: true, options: ["Enable.Hub.Doorbell.Trigger"] });
   const trigger = harness.services.find(service => service.subtype === AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
@@ -3172,11 +3122,11 @@ test("the doorbell trigger switch rings and cancels through the official API and
   assert.deepEqual(harness.rings, [{ cancel: false, readerId: READER_ID }], "a write while the doorbell is quiet rings the reader that carries the call surface");
 
   // A dispatched ring earns the longer window, so the pause a refused write settles in passes without moving the switch.
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  harness.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "the switch stands while the controller still has time to confirm");
 
-  t.mock.timers.tick(DOORBELL_RECONCILE_DELAY_MS - REVERT_DELAY_MS);
+  harness.clock.advance(DOORBELL_RECONCILE_DELAY_MS - REVERT_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and settles back onto ring truth when no ring ever arrived");
 
@@ -3186,7 +3136,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
 
   await confirmedTrigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
   confirmed.emit("access.remote_view", ringPacket([]));
-  t.mock.timers.tick(DOORBELL_RECONCILE_DELAY_MS);
+  confirmed.clock.advance(DOORBELL_RECONCILE_DELAY_MS);
 
   assert.equal(confirmedTrigger.getCharacteristic(Characteristic.On).value, true, "the ring the controller confirmed is what the switch settles onto");
 
@@ -3212,7 +3162,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
   assert.deepEqual(unattached.rings, [], "a hub with no doorbell-capable reader dispatches nothing");
   assert.deepEqual(unattached.errors, [LOG_PREFIX + "Unable to ring the doorbell: no doorbell-capable reader is connected to this hub."]);
 
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  unattached.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(unattachedTrigger.getCharacteristic(Characteristic.On).value, false, "and the switch is put back on the shorter pause");
 
@@ -3225,14 +3175,12 @@ test("the doorbell trigger switch rings and cancels through the official API and
   assert.deepEqual(tokenless.rings, [], "a hub with no official path dispatches nothing");
   assert.deepEqual(tokenless.errors, [LOG_PREFIX + "Ringing the doorbell requires the official Access API, which needs an API token configured."]);
 
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  tokenless.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(tokenlessTrigger.getCharacteristic(Characteristic.On).value, false, "and the switch is put back where the mirror stands");
 });
 
-test("a doorbell ring the controller refuses says so and puts the switch back on the shorter pause", async (t) => {
-
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("a doorbell ring the controller refuses says so and puts the switch back on the shorter pause", async () => {
 
   const harness = makeHub({ devices: [READER_RECORD], official: true, options: ["Enable.Hub.Doorbell.Trigger"],
     ringRefusal: new Error("The controller refused the ring.") });
@@ -3243,7 +3191,7 @@ test("a doorbell ring the controller refuses says so and puts the switch back on
   assert.deepEqual(harness.rings, [{ cancel: false, readerId: READER_ID }], "the ring reached the reader, so the refusal is the controller's answer to it");
   assert.deepEqual(harness.errors, [LOG_PREFIX + "Unable to ring the doorbell: The controller refused the ring."]);
 
-  t.mock.timers.tick(REVERT_DELAY_MS);
+  harness.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and a dispatch the controller refused keeps the shorter pause rather than the window");
 });

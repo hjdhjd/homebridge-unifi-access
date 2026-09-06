@@ -13,14 +13,17 @@ import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
 import type { DecoratedSerial } from "../policy.ts";
+import { TestClock } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
-import { setTimeout as delay } from "node:timers/promises";
 import { format } from "node:util";
 import { hubRecord } from "../testing.helpers.ts";
 import test from "node:test";
 
 // The controller every device below belongs to, in the casing a controller's own identity carries.
 const CONTROLLER_ID = "112233445566";
+
+// The window the timer arm below arms against. Any value serves: what the arm is about is whether the deadline survives teardown, not how long it was.
+const TIMER_DELAY_MS = 10;
 
 /* The base carries no abstract members of its own, so a near-bare subclass is the whole harness the loop needs. The one wrapper exposes the protected hint
  * configuration, which is how an arm drives the real option reads and the real deviation log rather than a path it wrote itself.
@@ -76,6 +79,8 @@ function portRecord(sourceId: string): AccessStateDevice & { mac: string } {
 
 interface Harness {
 
+  // The time source every timer this device arms is registered on, so an arm reads and moves the device's own timeline rather than waiting on a real one.
+  clock: TestClock;
   // The admission record this device is constructed on - the narrowed record membership admits a device by, and the source of the identity a device captures once.
   construction: AccessStateDevice & { mac: string };
   controller: AccessController;
@@ -108,6 +113,7 @@ interface Harness {
  */
 function makeHarness(script: (AccessStateDevice | undefined)[], init: { construction?: AccessStateDevice & { mac: string }; options?: string[] } = {}): Harness {
 
+  const clock = new TestClock();
   const emissions: AccessEventPacket[] = [];
   const registrations: string[] = [];
   const removals: string[] = [];
@@ -164,6 +170,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
 
       api: { hap: { Characteristic: { FirmwareRevision: "FirmwareRevision", Manufacturer: "Manufacturer", Model: "Model", Name: "Name",
         SerialNumber: "SerialNumber", StatusActive: "StatusActive" }, Service: { AccessoryInformation: "AccessoryInformation" } } },
+      clock,
       featureOptions: engine,
       log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
         warn: (message: string): void => { warnings.push(message); } }
@@ -173,7 +180,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     spawnLoop: (title: string, body: () => Promise<void>): void => { loop = body; }
   };
 
-  return { construction, controller: controller as unknown as AccessController, emissions, featureOptions: engine, health, infoLines,
+  return { clock, construction, controller: controller as unknown as AccessController, emissions, featureOptions: engine, health, infoLines,
     loop: (): Promise<void> => loop(), projection: projection as unknown as AccessDeviceProjection, registrations, removals, statusWrites, warnings };
 }
 
@@ -324,27 +331,34 @@ test("a delivered update carrying an offline record drives availability false", 
   assert.deepEqual(harness.statusWrites[0], { characteristic: "StatusActive", value: false });
 });
 
-test("a timer armed on a device is drained by cleanup and can never arm again afterwards", async () => {
+test("a timer armed on a device is drained by cleanup and can never arm again afterwards", () => {
 
   const harness = makeHarness([]);
   const device = new TimerDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites), harness.construction);
   let fired = 0;
 
-  device.arm("relock-main", () => fired++, 10);
+  device.arm("relock-main", () => fired++, TIMER_DELAY_MS);
   assert.equal(device.isArmed("relock-main"), true, "an armed timer must be reported as armed");
+  assert.equal(harness.clock.nextDeadline, TIMER_DELAY_MS, "and it is armed on the platform's clock, which is what makes the drain below observable at all");
 
   // Ending the device's own lifetime is what drains the registry - the plumbing under test is that the two are composed at all, with no explicit dispose call.
   device.cleanup();
   assert.equal(device.isArmed("relock-main"), false, "cleanup must drain a pending timer through the composed lifetime");
 
-  await delay(40);
+  /* The drained timer is off the timeline rather than merely unreported. A registry that dropped its own record while leaving the timer armed would still answer a
+   * deadline here, and would fire it on the advance below - which a wait that watched nothing happen could never tell apart from a genuine drain.
+   */
+  assert.equal(harness.clock.nextDeadline, null, "a drained timer leaves no deadline behind it");
+
+  harness.clock.advance(TIMER_DELAY_MS);
   assert.equal(fired, 0, "a drained timer must never fire");
 
   // The far side of the same composition: a registration attempted after the lifetime ended is inert, so nothing can arm against a torn-down device.
-  device.arm("relock-main", () => fired++, 10);
+  device.arm("relock-main", () => fired++, TIMER_DELAY_MS);
   assert.equal(device.isArmed("relock-main"), false, "a registration after teardown must be inert");
+  assert.equal(harness.clock.nextDeadline, null, "and an inert registration puts nothing on the timeline either");
 
-  await delay(40);
+  harness.clock.advance(TIMER_DELAY_MS);
   assert.equal(fired, 0);
 });
 

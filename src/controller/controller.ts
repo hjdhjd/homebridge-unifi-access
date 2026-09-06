@@ -10,11 +10,11 @@ import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAcces
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
+import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, mqttConnectionSettings, onAbort, prefixedLog,
+  retry, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
   deviceSerial, isManagedRecord, isSupportedAccessDevice, membershipDelta, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
   webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "../policy.ts";
-import { createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, mqttConnectionSettings, onAbort, prefixedLog, retry,
-  sanitizeName, superviseLoop } from "homebridge-plugin-utils";
 import type { AccessControllerOptions } from "../options.ts";
 import { AccessDeliveryLedger } from "../webhooks.ts";
 import type { AccessDevice } from "../devices/device.ts";
@@ -37,81 +37,6 @@ export type AccessControllerConnect = (options: ConnectOptions) => Promise<Acces
 
 // The default port: the real client. Wrapped rather than referenced so the static's own this binding stays with its class.
 const defaultConnect: AccessControllerConnect = (options) => AccessClient.connect(options);
-
-// One accessory awaiting removal: when it was queued, and the timer that will act on it.
-interface QueuedRemoval {
-
-  queuedAt: number;
-  timer: NodeJS.Timeout;
-}
-
-/**
- * The delayed-removal queue's mechanics, with every read it depends on injected. A device the controller loses track of momentarily should not cost the user their
- * accessory, so a removal is armed on a timer and re-checked when that timer fires; a device that came back in the meantime simply drops out of the queue.
- *
- * The reads are injected rather than reached for because the queue is pure timer mechanics over two questions - is this accessory still gone, and how do I remove it
- * - and answering them is the controller's business, not the queue's. That separation is what lets the mechanics be exercised on their own.
- *
- * @param actions - How to remove an accessory, and how to ask whether it is still absent from the controller's membership.
- *
- * @returns The queue.
- */
-export function createRemovalQueue(actions: { remove: (accessory: AccessAccessory) => void; stillGone: (uuid: string) => boolean }): {
-  cancel: (uuid: string) => void;
-  clear: () => void;
-  isQueued: (uuid: string) => boolean;
-  queue: (accessory: AccessAccessory, delayMs: number) => void;
-} {
-
-  const pending = new Map<string, QueuedRemoval>();
-
-  return {
-
-    // Drop a pending removal without acting on it - what a readopted device's return calls for.
-    cancel: (uuid: string): void => {
-
-      const entry = pending.get(uuid);
-
-      if(!entry) {
-
-        return;
-      }
-
-      clearTimeout(entry.timer);
-      pending.delete(uuid);
-    },
-
-    // Clear every armed timer. Teardown calls this so no deferred removal survives the controller it belonged to.
-    clear: (): void => {
-
-      for(const entry of pending.values()) {
-
-        clearTimeout(entry.timer);
-      }
-
-      pending.clear();
-    },
-
-    isQueued: (uuid: string): boolean => pending.has(uuid),
-
-    // Arm a removal. The fire path re-asks whether the accessory is still gone before acting, so a device that reappeared during the delay is left alone and its
-    // entry simply drops.
-    queue: (accessory: AccessAccessory, delayMs: number): void => {
-
-      const timer = setTimeout(() => {
-
-        pending.delete(accessory.UUID);
-
-        if(actions.stillGone(accessory.UUID)) {
-
-          actions.remove(accessory);
-        }
-      }, delayMs);
-
-      pending.set(accessory.UUID, { queuedAt: Date.now(), timer });
-    }
-  };
-}
 
 export class AccessController {
 
@@ -139,7 +64,10 @@ export class AccessController {
   #name: string;
   // Lifecycle phase, mutated only through transition().
   #phase: AccessControllerPhase;
-  readonly #removals: ReturnType<typeof createRemovalQueue>;
+  /* The delayed removals of devices that have left this controller's membership, keyed by accessory UUID. It arms on the platform's clock and drains on this
+   * controller's terminal signal, so no deferred removal can survive the controller it belonged to.
+   */
+  readonly #removals: TimerRegistry;
   // The terminal plugin-shutdown abort, fired exactly once in transition("shuttingDown"). Every loop and every per-device controller composes against it, so shutdown
   // tears the whole tree down as one cascade.
   readonly #shutdownController: AbortController;
@@ -166,11 +94,8 @@ export class AccessController {
     this.#unsupportedDevices = {};
     this.#webhook = null;
 
-    this.#removals = createRemovalQueue({
-
-      remove: (accessory: AccessAccessory): void => this.removeHomeKitDevice(accessory, true),
-      stillGone: (uuid: string): boolean => !this.#membershipClaims(this.client.state.snapshot()).uuids.has(uuid)
-    });
+    // Built after the abort controller above, because the signal this registry drains on is that controller's and nothing else establishes it.
+    this.#removals = new TimerRegistry({ clock: platform.clock, signal: this.signal });
 
     /* Derive our logger from the platform's, prefixing every line with this controller's name so its output is attributable at a glance, and gating debug at this
      * controller's own scope so a controller-suffixed Log.Debug entry turns on this controller and everything it manages.
@@ -346,6 +271,9 @@ export class AccessController {
    * model, and brings the realtime channel up as one ready-or-throws operation, owning recovery and the periodic refresh failsafe internally. We wrap it in a
    * startup-resilient retry: authentication faults get a small consecutive budget so a controller still sorting out its own auth recovers, while genuinely-wrong
    * credentials fail fast rather than looping forever, and any non-auth fault resets the budget and retries unbounded until the controller appears or we shut down.
+   *
+   * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
+   * serving it out in real seconds.
    */
   async #connect(): Promise<boolean> {
 
@@ -354,7 +282,7 @@ export class AccessController {
     try {
 
       this.client = await retry((signal) => this.#connectClient({ host: this.config.address, log: this.#clientLog, signal,
-        verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, shouldRetry, signal: this.signal });
+        verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, clock: this.platform.clock, shouldRetry, signal: this.signal });
     } catch(error) {
 
       // The shutdown signal aborting the retry is an orderly teardown, not a failure to report. An exhausted auth budget surfaces here.
@@ -399,7 +327,8 @@ export class AccessController {
   }
 
   /* Tear this controller down. Called from the shutdown handler after the phase has already moved, so the abort cascade has fired and every loop is unwinding by the
-   * time we get here. The MQTT client needs no explicit call: it was constructed against our terminal signal and ends with it.
+   * time we get here. Neither the MQTT client nor the removal registry needs an explicit call: both were constructed against our terminal signal and end with it,
+   * which is what makes the abort the one act that tears this controller down.
    */
   async #disconnect(): Promise<void> {
 
@@ -407,8 +336,6 @@ export class AccessController {
     const events = this.events as AccessEvents | undefined;
 
     events?.dispose();
-
-    this.#removals.clear();
 
     const client = this.#liveClient();
 
@@ -656,11 +583,12 @@ export class AccessController {
    * exception is the warn that fires once per registration when verification starts failing, because that names a problem only the user can fix.
    *
    * The clock is read once at the head and both time-dependent tests share the reading, so a delivery cannot be judged fresh against one moment and replayed
-   * against another.
+   * against another. It is the platform's clock, the same one every timer here arms on, so a suite that moves time past the freshness window sees this judgment
+   * move with it.
    */
   #receiveDelivery(request: AccessWebhookRequest): boolean {
 
-    const nowMs = Date.now();
+    const nowMs = this.platform.clock.now();
     const webhook = this.#webhook;
 
     if(!webhook || (request.signature === undefined)) {
@@ -1076,7 +1004,7 @@ export class AccessController {
     // grace and the device came back before it fired.
     if(accessory) {
 
-      this.#removals.cancel(accessory.UUID);
+      this.#removals.clear(accessory.UUID);
     }
 
     // We've got a new device, let's add it to HomeKit.
@@ -1131,14 +1059,26 @@ export class AccessController {
      */
     if(!noRemovalDelay && delayInterval) {
 
-      // An armed timer already owns this removal, so a reconcile raising the same departure again leaves it alone rather than arming a second one.
-      if(this.#removals.isQueued(accessory.UUID)) {
+      /* An armed timer already owns this removal, so a reconcile raising the same departure again leaves it alone. Asking first is what keeps the delay the one
+       * already being served: a second registration under the same key would replace the first and start the whole wait over.
+       */
+      if(this.#removals.has(accessory.UUID)) {
 
         return;
       }
 
       this.log.info(ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, accessory.displayName, delayInterval, delayInterval > 1 ? "s" : "");
-      this.#removals.queue(accessory, delayInterval * 1000);
+
+      /* The registry removes the entry before running the callback, so the membership re-check below is the whole of what decides: a device that came back during
+       * the delay keeps its accessory, its entry is already gone, and nothing arms in its place.
+       */
+      this.#removals.setTimeout(accessory.UUID, () => {
+
+        if(!this.#membershipClaims(this.client.state.snapshot()).uuids.has(accessory.UUID)) {
+
+          this.removeHomeKitDevice(accessory, true);
+        }
+      }, delayInterval * 1000);
 
       return;
     }
@@ -1166,7 +1106,7 @@ export class AccessController {
     }
 
     // Cleanup after ourselves.
-    this.#removals.cancel(accessory.UUID);
+    this.#removals.clear(accessory.UUID);
 
     // Grab our instance of the Access device, if it exists.
     const accessDevice = this.configuredDevices.get(accessory.UUID);

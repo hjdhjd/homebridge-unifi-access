@@ -179,7 +179,8 @@ export abstract class AccessDevice extends AccessBase {
     this.mac = admission.mac;
     this.projection = projection;
     this.signal = AbortSignal.any([ controller.signal, this.#deviceController.signal ]);
-    this.timers = new TimerRegistry({ signal: this.signal });
+    // Every deadline this device arms reads the platform's clock, so a device timer and a controller timer share one timeline rather than each finding their own.
+    this.timers = new TimerRegistry({ clock: this.platform.clock, signal: this.signal });
     this.uda = projection.config;
 
     // Set the accessory.

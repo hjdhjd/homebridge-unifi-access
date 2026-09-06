@@ -1,23 +1,23 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * controller.test.ts: Tests for the controller's removal queue and its membership resolution.
+ * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
+  PLUGIN_NAME } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
-import { AccessController, createRemovalQueue } from "./controller.ts";
 import type { AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
 import type { AccessWebhookListener, AccessWebhookRoute } from "../webhooks.ts";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { FeatureOptions, retry } from "homebridge-plugin-utils";
+import { FeatureOptions, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
 import { ROOT_ID, buildingTopology, hubRecord } from "../testing.helpers.ts";
-import { TestMqttClient, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
-import { mock, test } from "node:test";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
+import { AccessController } from "./controller.ts";
 import type { AccessControllerConnect } from "./controller.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
@@ -27,9 +27,16 @@ import type { MqttClient } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { format } from "node:util";
+import test from "node:test";
 
 // The controller's own MAC, in the raw form an accessory context carries and the normalized form feature options resolve against.
 const CONTROLLER_MAC = "11:22:33:44:55:66";
+
+// The removal delay every departure below serves, in milliseconds: the Controller.DelayDeviceRemoval default of sixty seconds, which the user-facing sentence names.
+const DEVICE_REMOVAL_DELAY_MS = 60000;
+
+// What a connect spends in backoff before the authentication budget stops it: the default retry ladder's first two waits, asserted against that ladder below.
+const AUTH_BUDGET_BACKOFF_MS = 3000;
 
 /* How many macrotask boundaries an arm crosses before reading what a dispatched chain did. The chains drained through it are the connection observer's walk
  * over one transition, the webhook configuration a login sets in motion, and the MQTT publish chokepoint. Each is fire-and-forget by design, so an arm waits on
@@ -47,6 +54,12 @@ const DISPATCH_SETTLE_TURNS = 2;
 function plainHubRecord(): Record<string, unknown> {
 
   return hubRecord({ alias: "", name: "Plain Hub", unique_id: "plain" });
+}
+
+// The hub that turns up mid-delay: absent from the Enterprise topology above, so an accessory naming it is a departure until this record joins the store.
+function returnedHubRecord(): Record<string, unknown> {
+
+  return { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee99", name: "Returned Hub", unique_id: "returned" };
 }
 
 function enterpriseDevices(): Record<string, unknown>[] {
@@ -172,6 +185,8 @@ function clientDouble(options: { connection?: unknown; controllerInfo: Record<st
 interface ControllerHarness {
 
   accessories: AccessAccessory[];
+  // The time source this controller's removals and its connect backoff are armed on, so an arm advances time here rather than waiting any of it out.
+  clock: TestClock;
   controller: AccessController;
   logged: string[];
   registered: string[];
@@ -189,6 +204,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
   store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
 
   const accessories: AccessAccessory[] = [];
+  const clock = new TestClock();
   // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
   const logged: string[] = [];
   const registered: string[] = [];
@@ -222,6 +238,10 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
 
     accessories,
     api,
+    /* The clock every deadline this controller owns is armed on, stated here rather than left to the library's default, because a controller reading a clock no
+     * arm holds is a controller whose timers an advance would never reach.
+     */
+    clock,
     featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
     log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
       warn: (): void => undefined },
@@ -255,7 +275,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
 
   controller.client = client;
 
-  return { accessories, controller, logged, registered, shutdown, unregistered };
+  return { accessories, clock, controller, logged, registered, shutdown, unregistered };
 }
 
 /* The connection monitor a controller observes, with the transitions an arm hands it. The generator ends on the caller's own abort, which is the lifetime the real
@@ -408,88 +428,137 @@ test("the connection observer's lifetime is the controller's own terminal signal
   assert.deepEqual(stub.calls, [ "refresh", "restore" ], "a transition driven after the plugin's lifetime ended walks nothing");
 });
 
-test("a queued removal fires after its delay only while the accessory is still gone", () => {
+test("a departure with the delay on removes the accessory only once its whole delay has been served", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const store = createStateStore({});
 
-  const removed: string[] = [];
-  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
-  queue.queue(accessory("gone"), 60000);
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  // An accessory naming hardware the topology does not carry, so membership can never account for it and the delay is the only thing standing between it and removal.
+  const departed = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  assert.equal(queue.isQueued("gone"), true);
+  harness.accessories.push(departed);
+  harness.controller.removeHomeKitDevice(departed);
 
-  mock.timers.tick(59999);
+  assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 1, "a departure states the delay it is serving, once");
+  assert.equal(harness.clock.nextDeadline, DEVICE_REMOVAL_DELAY_MS, "and the removal comes due a whole delay out");
 
-  assert.equal(removed.length, 0, "the removal must wait out its whole delay");
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS - 1);
 
-  mock.timers.tick(1);
+  assert.deepEqual(harness.unregistered, [], "the removal must serve its whole delay, not almost all of it");
 
-  assert.deepEqual(removed, ["gone"]);
-  assert.equal(queue.isQueued("gone"), false, "a fired entry must leave the queue");
+  harness.clock.advance(1);
 
-  mock.timers.reset();
+  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE99"]);
+  assert.equal(harness.clock.nextDeadline, null, "a fired removal leaves nothing behind on the timeline");
 });
 
-test("a device that returns during its delay is left alone", () => {
+test("a device that returns during its delay keeps its accessory and leaves nothing armed", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const store = createStateStore({});
 
-  const removed: string[] = [];
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
-  // The predicate answers that the accessory came back, which is the whole point of the delay.
-  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => false });
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const returning = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  queue.queue(accessory("returned"), 60000);
-  mock.timers.tick(60000);
+  harness.accessories.push(returning);
+  harness.controller.removeHomeKitDevice(returning);
 
-  assert.equal(removed.length, 0, "a reappeared device must not be removed");
-  assert.equal(queue.isQueued("returned"), false, "the entry must drop either way");
+  /* The hardware turns up while the timer runs, which is the whole reason the delay exists. The fire path re-asks membership rather than trusting what it read when
+   * it armed, so an implementation that captured the answer at arming time removes this accessory and fails here.
+   */
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ ...enterpriseDevices(), returnedHubRecord() ]) });
 
-  mock.timers.reset();
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [], "a device that came back keeps its accessory");
+  assert.ok(harness.accessories.includes(returning));
+  assert.equal(harness.clock.nextDeadline, null, "and the entry is gone rather than re-armed for another delay");
 });
 
-test("an already-queued accessory is not armed a second time and can be cancelled", () => {
+test("a second departure raised during the delay neither restarts the wait nor restates the sentence", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const store = createStateStore({});
 
-  const removed: string[] = [];
-  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
-  queue.queue(accessory("once"), 60000);
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const departed = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  // The caller consults isQueued before arming, so a repeated departure leaves the armed timer owning the removal rather than adding a second.
-  assert.equal(queue.isQueued("once"), true);
+  harness.accessories.push(departed);
+  harness.controller.removeHomeKitDevice(departed);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS / 2);
 
-  queue.cancel("once");
+  /* The same departure raised again halfway through, as a second reconcile pass raises it. The armed timer keeps the removal: a registration under a key that
+   * already holds one replaces it, so a departure path that armed without asking first would move this removal out to a delay and a half.
+   */
+  harness.controller.removeHomeKitDevice(departed);
 
-  assert.equal(queue.isQueued("once"), false);
+  assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 1, "the delay is stated once, by the departure that armed it");
 
-  mock.timers.tick(60000);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS / 2);
 
-  assert.equal(removed.length, 0, "a cancelled removal must never fire");
-
-  mock.timers.reset();
+  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE99"], "the removal fires one whole delay after the first departure, not after the second");
+  assert.equal(harness.clock.nextDeadline, null);
 });
 
-test("teardown clears every pending removal", () => {
+test("an adoption during the delay clears the removal armed against its accessory", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const store = createStateStore({});
 
-  const removed: string[] = [];
-  const queue = createRemovalQueue({ remove: (target) => removed.push(target.UUID), stillGone: () => true });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
-  queue.queue(accessory("one"), 60000);
-  queue.queue(accessory("two"), 60000);
-  queue.clear();
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const adopted = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
 
-  mock.timers.tick(60000);
+  harness.accessories.push(adopted);
+  harness.controller.removeHomeKitDevice(adopted);
 
-  assert.equal(removed.length, 0, "no deferred removal may survive the controller it belonged to");
-  assert.equal(queue.isQueued("one"), false);
-  assert.equal(queue.isQueued("two"), false);
+  assert.equal(harness.clock.nextDeadline, DEVICE_REMOVAL_DELAY_MS, "the departure must genuinely have armed something for the adoption to clear");
 
-  mock.timers.reset();
+  const record = store.snapshot().devices.get("plain");
+
+  assert.ok(record, "the store should hold the plain hub the adoption below readopts");
+
+  // The device comes back through the adoption path, which is where a readopted device's pending removal is dropped.
+  assert.equal(harness.controller.addHomeKitDevice(record), true);
+  assert.equal(harness.clock.nextDeadline, null, "adoption drops the pending removal rather than leaving it to be re-checked");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [], "a cleared removal must never fire");
+  assert.ok(harness.accessories.includes(adopted));
+});
+
+test("the plugin's shutdown drains every pending removal without acting on any of them", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  /* Two accessories, because the drain has to reach every entry rather than one: a teardown that dropped a single timer would pass with one pending and leave the
+   * other to fire against a controller that is already gone.
+   */
+  const first = accessory("uuid-AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+  const second = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+
+  harness.accessories.push(first, second);
+  harness.controller.removeHomeKitDevice(first);
+  harness.controller.removeHomeKitDevice(second);
+
+  assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 2, "both departures must genuinely be armed");
+
+  // The plugin's lifetime ends, which the controller composes its own terminal signal from and the removal registry drains on.
+  harness.shutdown.abort();
+
+  assert.equal(harness.clock.nextDeadline, null, "the drain empties the timeline rather than leaving the deadlines to be stepped over");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [], "no deferred removal may survive the controller it belonged to");
 });
 
 test("a device leaving controller state lands in the removal half of the membership delta", () => {
@@ -516,8 +585,6 @@ test("a device leaving controller state lands in the removal half of the members
 
 test("membership resolution keeps what it can project and reclaims what it cannot", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
-
   const store = createStateStore({});
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
@@ -542,14 +609,12 @@ test("membership resolution keeps what it can project and reclaims what it canno
   // The default removal delay is sixty seconds, so nothing has been decided yet.
   assert.equal(harness.unregistered.length, 0);
 
-  mock.timers.tick(60000);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
   assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE03"], "only the record membership cannot account for may be reclaimed");
   assert.ok(harness.accessories.includes(plain));
   assert.ok(harness.accessories.includes(port));
   assert.ok(!harness.accessories.includes(unsupported));
-
-  mock.timers.reset();
 });
 
 test("the adoption gate addresses one port of an Enterprise hub by that port's own identity", () => {
@@ -772,8 +837,6 @@ test("an accessory created under an earlier form of the device's identity is nev
 
 test("membership names a device by its identity alone, so a queued removal of an accessory keyed by an earlier form fires", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
-
   const store = createStateStore({});
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
@@ -788,12 +851,10 @@ test("membership names a device by its identity alone, so a queued removal of an
    */
   harness.controller.removeHomeKitDevice(earlier);
 
-  mock.timers.tick(60000);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
   assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"], "membership accounts for a device under its identity alone");
   assert.ok(!harness.accessories.includes(earlier));
-
-  mock.timers.reset();
 });
 
 test("a device the user disabled gives up the accessory under its identity, and an earlier one is the sweep's", () => {
@@ -929,19 +990,13 @@ test("a device adopted to a constructed accessory is spared by the sweep and sta
 
 test("the first start after an identity change retires every accessory created under the earlier form, and only those", async (t) => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
-
   const store = createStateStore({});
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  t.after(() => {
-
-    harness.shutdown.abort();
-    mock.timers.reset();
-  });
+  t.after(() => harness.shutdown.abort());
 
   /* The cache a mixed install restores. Created by an earlier version, recording no identity: the plain hub's accessory under this controller's key, a twin of it
    * stamped by the controller this one replaced under a UUID no seed produces, an Enterprise port's, one naming a managed record this plugin cannot project, and
@@ -983,7 +1038,7 @@ test("the first start after an identity change retires every accessory created u
 
   // The departure honors the delay and the queue's own membership read, and its removal line carries no reason; the port's current accessory and both
   // strangers are untouched - the one naming the unprojectable record above all, since a claim walked over unfiltered membership would have taken it.
-  mock.timers.tick(60000);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
   assert.deepEqual(harness.unregistered.slice(5), ["uuid-AABBCCDDEE98"]);
   assert.ok(harness.logged.filter(line => line.includes("Removing")).slice(5).every(line => line.endsWith("from HomeKit.")));
@@ -1019,8 +1074,6 @@ test("a disabled device's earlier accessory is retired at the first start with i
 
 test("a controller the user disabled takes every accessory it can claim out of HomeKit at once, by key or by identity", async (t) => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
-
   const store = createStateStore({});
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
@@ -1028,11 +1081,7 @@ test("a controller the user disabled takes every accessory it can claim out of H
   // The controller's own scope disables it, which is the gate that runs after connect rather than the global one before it.
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device." + serialForm(CONTROLLER_MAC)], store });
 
-  t.after(() => {
-
-    harness.shutdown.abort();
-    mock.timers.reset();
-  });
+  t.after(() => harness.shutdown.abort());
 
   /* One accessory this version created under this controller's key, one an earlier version created that another controller stamped but that names the
    * Enterprise hub's hardware - which its port shares, so the claim lands at the hardware grain where a serial set built from port-qualified identities would
@@ -1074,6 +1123,7 @@ test("login reports the identity outcome its exit took", async (t) => {
 
   const gatedPlatform = {
 
+    clock: new TestClock(),
     featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, ["Disable.Device"]),
     log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
     signal: shutdown.signal
@@ -1109,16 +1159,17 @@ test("login reports the identity outcome its exit took", async (t) => {
 
 test("a login whose connect exhausts its authentication budget reports no identity", async (t) => {
 
+  const clock = new TestClock();
   const shutdown = new AbortController();
 
   let attempts = 0;
 
-  const platform = { featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, []),
+  const platform = { clock, featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, []),
     log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal };
 
   /* Credentials the controller refuses on every attempt. Auth faults get a small consecutive budget so a controller still sorting out its own auth state
-   * recovers, and this spends the whole of it...the wait between attempts runs on the promise-based timers, which the runner's mock timers do not patch, so this
-   * arm serves those waits in real time rather than pretending to.
+   * recovers, and this spends the whole of it...the waits between attempts are armed on the platform's clock, so the drain below walks the ladder on virtual time
+   * and the arm reads what the policy waited rather than waiting it out.
    */
   const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
 
@@ -1129,8 +1180,16 @@ test("a login whose connect exhausts its authentication budget reports no identi
 
   t.after(() => shutdown.abort());
 
-  assert.equal(await controller.login(), "unavailable", "a connect that never succeeded leaves this controller's identity unknown");
+  // The login is started rather than awaited, because the waits it is about are only registered once it is running and nothing else would step them.
+  const login = controller.login();
+  const steps = await drainClock(clock);
+
+  assert.equal(await login, "unavailable", "a connect that never succeeded leaves this controller's identity unknown");
   assert.equal(attempts, ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, "and the budget is what stopped it, rather than a retry without end");
+  assert.equal(steps, ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT - 1, "one wait between each pair of attempts, and none after the attempt that spent the budget");
+  assert.equal(clock.now(), AUTH_BUDGET_BACKOFF_MS, "and the whole of what it waited is the two waits that ladder prescribes");
+  assert.equal(AUTH_BUDGET_BACKOFF_MS, defaultRetryBackoff(2) + defaultRetryBackoff(3),
+    "so a change to the library's ladder reddens this arm rather than drifting past it");
 });
 
 test("an accessory under the device identity that records none is adopted rather than retired, because membership is read before the record", async (t) => {
@@ -1190,8 +1249,6 @@ test("an orphan is named from the controller's own record whichever spelling its
 
 test("a record whose hardware identity never arrived is admitted to nothing", () => {
 
-  mock.timers.enable({ apis: ["setTimeout"] });
-
   const store = createStateStore({});
 
   // The official API names a device by an identifier that is not always address-shaped, and the projection leaves the hardware identity absent when it is not.
@@ -1219,11 +1276,9 @@ test("a record whose hardware identity never arrived is admitted to nothing", ()
   harness.accessories.push(orphan);
   harness.controller.removeHomeKitDevice(orphan);
 
-  mock.timers.tick(60000);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
   assert.deepEqual(harness.unregistered, ["uuid-undefined"], "a record with no hardware identity can account for no accessory");
-
-  mock.timers.reset();
 });
 
 test("the plugin's shutdown reaches a controller through the one signal every controller composes from", async () => {
@@ -1281,6 +1336,8 @@ interface WebhookOptions {
 interface WebhookHarness {
 
   calls: string[];
+  // The clock this controller judges a delivery's age against, so an arm about staleness moves time rather than backdating a header.
+  clock: TestClock;
   controller: AccessController;
   deliveries: unknown[];
   lines: string[];
@@ -1311,6 +1368,7 @@ function sign(secret: string, timestampSeconds: number, body: string): string {
 function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
 
   const calls: string[] = [];
+  const clock = new TestClock();
   const deliveries: unknown[] = [];
   const lines: string[] = [];
   const routes = new Map<string, AccessWebhookRoute>();
@@ -1424,6 +1482,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
       unregisterPlatformAccessories: (): void => undefined,
       updatePlatformAccessories: (): void => undefined
     },
+    clock,
     config: { controllers: options.controllers ?? [{ address: "1.2.3.4" }], options: [] },
     featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, entries),
     localAddressFor: options.hostResolution ?? (async (): Promise<string> => "10.0.0.7"),
@@ -1449,6 +1508,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
   return {
 
     calls,
+    clock,
     controller,
     deliveries,
     lines,
@@ -1733,7 +1793,10 @@ test("the route admits a genuine delivery once and refuses everything else about
 
   const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
     event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "delivery1" });
-  const now = Math.floor(Date.now() / 1000);
+  /* The moment a delivery is stamped with, read from the same clock the controller judges its age against and re-read after each advance below. A header composed
+   * from the wall clock would be judged against virtual time and come out arbitrarily old.
+   */
+  const now = (): number => Math.floor(harness.clock.now() / 1000);
 
   // Nothing to verify against.
   assert.equal(route({ body: Buffer.from(body), signature: undefined }), false);
@@ -1741,17 +1804,23 @@ test("the route admits a genuine delivery once and refuses everything else about
   /* A well-formed header that fails the code is a secret mismatch or a forgery, and the first is worth one breadcrumb per registration. A second failure must not
    * add a second line, or a forger could fill the log at will.
    */
-  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now, body) }), false);
-  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now, body) }), false);
+  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now(), body) }), false);
+  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now(), body) }), false);
   assert.equal(harness.lines.filter(line => line.includes("failed signature verification")).length, 1, "the breadcrumb is once per registration");
 
-  // Authentic, but dated outside the window this host will act on.
-  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", now - 3600, body) }), false);
+  /* Authentic, and fresh when it was signed - but the host's own clock moves past the window before it arrives, which is the age the check is about. Moving time
+   * rather than backdating the header is what proves the judgment reads this clock at all.
+   */
+  const dated = sign("minted-secret", now(), body);
+
+  harness.clock.advance(ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS + 1000);
+
+  assert.equal(route({ body: Buffer.from(body), signature: dated }), false);
 
   // Authentic and fresh, but not JSON at all.
-  assert.equal(route({ body: Buffer.from("not json"), signature: sign("minted-secret", now, "not json") }), false);
+  assert.equal(route({ body: Buffer.from("not json"), signature: sign("minted-secret", now(), "not json") }), false);
 
-  const genuine = sign("minted-secret", now, body);
+  const genuine = sign("minted-secret", now(), body);
 
   assert.equal(route({ body: Buffer.from(body), signature: genuine }), true);
   assert.equal(harness.deliveries.length, 1, "an admitted delivery reaches the accessories");
@@ -1778,7 +1847,7 @@ test("an authentic delivery this plugin does not model is answered without being
   /* The controller is told the delivery was taken, so it stops retrying something this plugin is simply not interested in - and nothing is emitted, because there
    * is nothing here that could read it.
    */
-  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", Math.floor(Date.now() / 1000), body) }), true);
+  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) }), true);
   assert.equal(harness.deliveries.length, 0);
 });
 

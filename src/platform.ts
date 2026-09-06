@@ -4,14 +4,14 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, FeatureOptions, debugGatedLog, formatErrorMessage, guardedDispatch, onAbort } from "homebridge-plugin-utils";
+import { APIEvent, FeatureOptions, TimerRegistry, debugGatedLog, formatErrorMessage, guardedDispatch, systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
-import { AccessController, createRemovalQueue } from "./controller/controller.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
 import { AccessWebhookListener, localAddressFor } from "./webhooks.ts";
-import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
+import { AccessController } from "./controller/controller.ts";
 import type { AccessOptions } from "./options.ts";
 
 /* What one controller's startup settled: the controller itself, and what its login established about its identity. The two are paired at the moment the login is
@@ -27,6 +27,11 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
   public accessories: AccessAccessory[];
   public readonly api: API;
+  /* The one time source every timer and every wait in the plugin reads: the controller's delayed removals, the reclaim below, each device's timer registry, and the
+   * connect retry's backoff. It is the production clock in the field and a controllable one under test, so a suite drives every deadline on a virtual timeline
+   * instead of serving it out in real seconds.
+   */
+  public readonly clock: Clock;
   public readonly config: AccessOptions;
   private readonly controllers: AccessController[];
   public readonly featureOptions: FeatureOptions;
@@ -39,10 +44,11 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * shutdown event is registered exactly once for the plugin rather than once per controller.
    */
   readonly #shutdownController: AbortController;
-  /* The delayed removals of accessories no configured controller answers for, built on the first reclaim that honors a delay. An install whose controllers answer
-   * for everything they created never builds one, and never arms a timer.
+  /* The delayed removals of accessories no configured controller answers for, keyed by accessory UUID. An empty registry costs a map, a set, and one listener on a
+   * signal we already hold, so it is built with the platform rather than by the first reclaim that needs one...which is what puts its drain in the constructor
+   * instead of in a branch someone has to remember to wire.
    */
-  #strandedRemovals: Nullable<ReturnType<typeof createRemovalQueue>>;
+  readonly #strandedRemovals: TimerRegistry;
   // The one webhook listener, constructed on the first controller that asks for it. A plugin with webhooks turned off never asks, so it binds no port at all.
   #webhookListener: Nullable<AccessWebhookListener>;
   // The port that listener will bind, read once here because the port is a plugin-wide deployment decision rather than a per-controller one.
@@ -52,12 +58,13 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     this.accessories = [];
     this.api = api;
+    this.clock = systemClock;
     this.controllers = [];
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options ?? []);
     this.log = log;
     this.#debugLog = debugGatedLog(log, () => this.featureOptions.test("Log.Debug"));
     this.#shutdownController = new AbortController();
-    this.#strandedRemovals = null;
+    this.#strandedRemovals = new TimerRegistry({ clock: this.clock, signal: this.signal });
     this.#webhookListener = null;
     this.#webhookPort = this.featureOptions.getInteger("Controller.Webhooks.Port") ?? ACCESS_WEBHOOK_PORT;
 
@@ -231,24 +238,25 @@ export class AccessPlatform implements DynamicPlatformPlugin {
         continue;
       }
 
-      /* The queue is built by the first accessory that needs one, and the teardown is wired inside the same branch as the construction so that however many
-       * accessories follow this one, the plugin's lifetime carries exactly one listener for the queue it clears.
-       */
-      if(!this.#strandedRemovals) {
-
-        this.#strandedRemovals = createRemovalQueue({ remove: (target) => this.#retireStranded(target),
-          stillGone: (uuid) => this.#stillStranded({ settled, uuid }) });
-        onAbort(this.signal, () => this.#strandedRemovals?.clear());
-      }
-
-      // The queue holds one timer per accessory and arming a second would strand the first, so it is asked before arming - the contract the departure path honors.
-      if(this.#strandedRemovals.isQueued(accessory.UUID)) {
+      // The registry holds one timer per accessory UUID and a second registration would replace the first, restarting a delay already being served, so it is asked
+      // before arming - the contract the controller's departure path honors for the same reason.
+      if(this.#strandedRemovals.has(accessory.UUID)) {
 
         continue;
       }
 
       this.log.info(ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, accessory.displayName, delayInterval, delayInterval > 1 ? "s" : "");
-      this.#strandedRemovals.queue(accessory, delayInterval * 1000);
+
+      /* The registry removes the entry before running the callback, so the re-check below is the whole of what decides: an accessory whose device turned up during
+       * the delay is left alone, its entry is already gone, and nothing arms in its place.
+       */
+      this.#strandedRemovals.setTimeout(accessory.UUID, () => {
+
+        if(this.#stillStranded({ settled, uuid: accessory.UUID })) {
+
+          this.#retireStranded(accessory);
+        }
+      }, delayInterval * 1000);
     }
   }
 
