@@ -57,14 +57,14 @@ function makeHarness(): Harness {
       events.push(event);
       handlers.set(event, handler);
     },
-    registerPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+    registerPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
 
       for(const target of targets) {
 
         registered.push(target.UUID);
       }
     },
-    unregisterPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+    unregisterPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
 
       for(const target of targets) {
 

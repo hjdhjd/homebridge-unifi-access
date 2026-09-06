@@ -303,7 +303,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
           throw options.ringRefusal;
         }
       },
-      updateSettings: async (deviceId: string, update: unknown): Promise<void> => void updates.push(update)
+      updateSettings: async (_deviceId: string, update: unknown): Promise<void> => void updates.push(update)
     }
   } : null;
 
@@ -1415,7 +1415,7 @@ test("a settings read that lands after the device was torn down materializes not
     official: true,
     options: ["Enable.Log.Debug"],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
-    settings: async (): Promise<unknown> => new Promise<never>((resolve, reject) => { answerSettings = (): void => reject(new Error("the device is gone")); })
+    settings: async (): Promise<unknown> => new Promise<never>((_resolve, reject) => { answerSettings = (): void => reject(new Error("the device is gone")); })
   });
 
   await settle();

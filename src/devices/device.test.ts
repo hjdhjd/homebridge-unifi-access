@@ -177,7 +177,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     },
     resolveDeviceModel: (device: AccessStateDevice): string => deviceModel(device),
     signal: new AbortController().signal,
-    spawnLoop: (title: string, body: () => Promise<void>): void => { loop = body; }
+    spawnLoop: (_title: string, body: () => Promise<void>): void => { loop = body; }
   };
 
   return { clock, construction, controller: controller as unknown as AccessController, emissions, featureOptions: engine, health, infoLines,

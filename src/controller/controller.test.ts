@@ -216,14 +216,14 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     hap: { Characteristic, Service, uuid: { generate: (input: string): string => "uuid-" + input } },
     on: (): void => undefined,
     platformAccessory: TestAccessory,
-    registerPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+    registerPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
 
       for(const target of targets) {
 
         registered.push(target.UUID);
       }
     },
-    unregisterPlatformAccessories: (name: string, platformName: string, targets: AccessAccessory[]): void => {
+    unregisterPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
 
       for(const target of targets) {
 
@@ -1740,7 +1740,7 @@ test("a shutdown landing while the address lookup is pending is the teardown it 
    * line this arm is about is a debug line: an orderly teardown is not something the user is told about at any louder level.
    */
   let refuse: (reason: unknown) => void = (): void => undefined;
-  const harness = makeWebhookController({ hostResolution: async (): Promise<string> => new Promise<string>((resolve, reject) => { refuse = reject; }),
+  const harness = makeWebhookController({ hostResolution: async (): Promise<string> => new Promise<string>((_resolve, reject) => { refuse = reject; }),
     options: ["Enable.Log.Debug"] });
 
   t.after(() => harness.shutdown.abort());
