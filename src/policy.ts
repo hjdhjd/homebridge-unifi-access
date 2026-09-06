@@ -23,6 +23,7 @@ import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import type { AccessControllerTokens } from "./options.ts";
 import { AccessReservedNames } from "./types.ts";
+import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
 
 // The device type the controller reports for an Enterprise Access Hub, and the type whose per-port records carry a source_id that participates in accessory identity.
@@ -1376,6 +1377,25 @@ export function orphanedWebhookRegistrations(options: { configuredAddresses: rea
 
     return parsed.pathname.startsWith(ACCESS_WEBHOOK_PATH_PREFIX) && !claimed.has(parsed.pathname) && (parsed.host === ours);
   });
+}
+
+/**
+ * The signature a delivery carries, read out of the headers Node parsed for it.
+ *
+ * Only a string is a signature. Node comma-joins an ordinary header sent more than once into a single string, so a repeated `signature` arrives as one joined
+ * value that fails verification downstream rather than reaching anything as two candidates. The array shape belongs to the handful of headers Node collects
+ * that way and never carries a signature on a real round trip, and the branch answering `undefined` for it is here because `IncomingHttpHeaders` types every
+ * value as a string, an array of strings, or nothing at all...answering that type completely is what this does rather than casting a shape away.
+ *
+ * @param headers - The delivery's headers as Node parsed them.
+ *
+ * @returns The signature when the header is a string, and `undefined` when it is absent or arrived in the array shape.
+ */
+export function webhookSignatureHeader(headers: IncomingHttpHeaders): string | undefined {
+
+  const header = headers["signature"];
+
+  return (typeof header === "string") ? header : undefined;
 }
 
 /**

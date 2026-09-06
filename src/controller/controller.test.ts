@@ -8,12 +8,12 @@ import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEB
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
 import type { AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
-import type { AccessWebhookListener, AccessWebhookRoute } from "../webhooks.ts";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { FeatureOptions, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
+import { FeatureOptions, HbpuAbortError, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
+import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
 import { ROOT_ID, buildingTopology, hubRecord } from "../testing.helpers.ts";
-import { TestClock, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
@@ -23,7 +23,6 @@ import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
-import type { MqttClient } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { format } from "node:util";
@@ -1327,7 +1326,6 @@ test("the plugin's shutdown reaches a controller through the one signal every co
  */
 interface WebhookOptions {
 
-  closed?: boolean;
   // Every controller the plugin is configured for, which is what the orphan sweep reads to decide which paths are claimed. The controller under test is the
   // default, so an arm names this only to put a sibling entry beside it.
   controllers?: { address: string }[];
@@ -1336,6 +1334,7 @@ interface WebhookOptions {
   endpoints?: AccessOfficialWebhookEndpoint[];
   failures?: Record<string, Error>;
   hostResolution?: () => Promise<string>;
+  listenerFailed?: boolean;
   official?: boolean;
   onCreate?: () => void;
   options?: string[];
@@ -1349,8 +1348,8 @@ interface WebhookHarness {
   controller: AccessController;
   deliveries: unknown[];
   lines: string[];
+  listener: TestHttpListener;
   listenerRequests: number;
-  routes: Map<string, AccessWebhookRoute>;
   run: () => Promise<void>;
   shutdown: AbortController;
 }
@@ -1379,7 +1378,6 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
   const clock = new TestClock();
   const deliveries: unknown[] = [];
   const lines: string[] = [];
-  const routes = new Map<string, AccessWebhookRoute>();
   const shutdown = new AbortController();
   /* The registrations this controller currently holds. The double keeps them the way the controller would, because an arm that creates one and then tears down
    * has to find it listed back or the teardown it is testing has nothing to retire.
@@ -1442,30 +1440,36 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     }
   } as unknown as OfficialApi;
 
-  const listener = {
+  const listener = new TestHttpListener({ signal: shutdown.signal });
 
-    get closed(): boolean {
+  // A path this arm claims before the controller can, which is what two controller entries configured with one address collide over. Registered through the
+  // double's own method ahead of the recording below, because claiming it is the arm's act rather than one of the controller's.
+  if(options.duplicatePath === true) {
 
-      return options.closed === true;
-    },
-    route: (path: string, handler: AccessWebhookRoute): Disposable => {
+    listener.route(WEBHOOK_PATH, () => ({ status: 200 }));
+  }
 
-      if(options.closed === true) {
+  /* A listener whose lifetime ended on a bind failure it already reported, which is the condition that actually reaches the controller's refusal branch. The
+   * double refuses every registration afterwards by throwing that reason, exactly as the listener does.
+   */
+  if(options.listenerFailed === true) {
 
-        throw new TypeError("The webhook listener is closed and cannot accept a route for " + path + ".");
-      }
+    listener.abort(new HbpuAbortError("failed"));
+  }
 
-      if(options.duplicatePath === true) {
+  /* Every act the controller performs goes into one sequence, its route registration included, so an arm reads that the route came up between the mint and the
+   * orphan sweep rather than only that it exists once everything is done. The double answers the registration itself; this records that it was asked for.
+   */
+  const register: TestHttpListener["route"] = listener.route.bind(listener);
 
-        throw new TypeError("The webhook listener already routed " + path + " to another handler.");
-      }
+  listener.route = (path, handler, routeOptions): Disposable => {
 
-      calls.push("route:" + path);
-      routes.set(path, handler);
+    const handle = register(path, handler, routeOptions);
 
-      return { [Symbol.dispose]: (): void => void routes.delete(path) };
-    }
-  } as unknown as AccessWebhookListener;
+    calls.push("route:" + String(path));
+
+    return handle;
+  };
 
   const store = createStateStore({});
 
@@ -1503,11 +1507,13 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     // The webhook arms adopt nothing, but the entry is stated all the same so no double answers a shape the real platform does not have.
     registerAccessory: (): void => undefined,
     signal: shutdown.signal,
-    webhookListener: (): AccessWebhookListener => {
+    // The double stands in for the listener, cast at the injection site exactly as the double's own documentation states: both classes carry private fields, so
+    // nothing structural assigns one to the other and the cast is this file's own statement that the substitution is deliberate.
+    webhookListener: (): HttpListener => {
 
       listenerRequests++;
 
-      return listener;
+      return listener as unknown as HttpListener;
     },
     webhookPort: 10120
   };
@@ -1522,11 +1528,11 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     controller,
     deliveries,
     lines,
+    listener,
     get listenerRequests(): number {
 
       return listenerRequests;
     },
-    routes,
     run: async (): Promise<void> => {
 
       await controller.login();
@@ -1553,7 +1559,7 @@ test("with webhooks off, a controller lists its endpoints once, clears its own, 
    */
   assert.deepEqual(harness.calls, [ "fetch", "delete:stale" ]);
   assert.equal(harness.listenerRequests, 0, "a plugin with webhooks off must never construct a listener");
-  assert.equal(harness.routes.size, 0);
+  assert.equal(harness.listener.routes.size, 0);
 });
 
 test("with webhooks on but no published API to register through, a controller says so and binds nothing", async (t) => {
@@ -1672,7 +1678,7 @@ test("a controller that refuses the sweep keeps the webhooks it just configured"
    * will not clean up after a re-addressing is not something to put an error in front of the user about.
    */
   assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:abandoned" ]);
-  assert.ok(harness.routes.has(WEBHOOK_PATH), "the route must survive a sweep the controller refused");
+  assert.ok(harness.listener.routes.has(WEBHOOK_PATH), "the route must survive a sweep the controller refused");
   assert.ok(harness.lines.some(line => line.includes("Registered for Access webhook deliveries at " + WEBHOOK_URL + ".")), "the registration must still be reported");
   assert.ok(!harness.lines.some(line => line.startsWith("error: ") || line.startsWith("warn: ")), "a refused sweep must not raise its voice");
 });
@@ -1687,21 +1693,73 @@ test("a controller refused its route removes the registration its own attempt cr
   await harness.run();
 
   assert.deepEqual(harness.calls, [ "fetch", "create", "delete:minted" ]);
-  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("already routed")), "the refusing condition must be named");
+  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("already routes")), "the refusing condition must be named");
   assert.ok(!harness.lines.some(line => line.includes("Registered for Access webhook deliveries")), "a controller that never routed must not claim it registered");
 });
 
-test("a controller that meets a closed listener reports it and holds no registration", async (t) => {
+test("a controller that meets a listener whose lifetime already ended reports it and holds no registration", async (t) => {
 
-  const harness = makeWebhookController({ closed: true });
+  const harness = makeWebhookController({ listenerFailed: true });
 
   t.after(() => harness.shutdown.abort());
 
   await harness.run();
 
+  /* The plugin's own sentence carries the library's message, composed here rather than retyped, so a change to the library's wording reddens this arm instead
+   * of a stale literal quietly agreeing with nothing.
+   */
   assert.deepEqual(harness.calls, [ "fetch", "create", "delete:minted" ]);
-  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("closed")), "the refusing condition must be named");
+  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("Unable to receive Access webhook deliveries. " +
+    new HbpuAbortError("failed").message)), "the refusing condition must be named");
   assert.ok(!harness.lines.some(line => line.includes("Registered for Access webhook deliveries")));
+});
+
+test("a host that does not resolve fails the registration and leaves nothing behind", async (t) => {
+
+  const harness = makeWebhookController({ hostResolution: async (): Promise<string> => {
+
+    throw new Error("getaddrinfo ENOTFOUND access.local");
+  } });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* The probe reports a lookup it could not answer rather than handing back an address that means nothing, so the attempt stops before it asks the controller
+   * for anything at all and no endpoint is ever composed against a host this plugin cannot be reached at.
+   */
+  assert.deepEqual(harness.calls, []);
+  assert.ok(harness.lines.some(line => line.startsWith("error: ") && line.includes("Unable to determine the address the Access controller can reach this " +
+    "plugin on: getaddrinfo ENOTFOUND access.local.")), "the failure must name what could not be resolved");
+  assert.equal(harness.listener.routes.size, 0, "a controller that never learned its address must route nothing");
+});
+
+test("a shutdown landing while the address lookup is pending is the teardown it is rather than a failure to report", async (t) => {
+
+  /* A lookup left pending, which is what one looks like while a resolver is not answering, and the arm below is what ends it. Debug is turned on because the
+   * line this arm is about is a debug line: an orderly teardown is not something the user is told about at any louder level.
+   */
+  let refuse: (reason: unknown) => void = (): void => undefined;
+  const harness = makeWebhookController({ hostResolution: async (): Promise<string> => new Promise<string>((resolve, reject) => { refuse = reject; }),
+    options: ["Enable.Log.Debug"] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  /* The plugin's lifetime is what ends a lookup still in flight, because the platform hands its own signal to the library's probe and the probe rejects with that
+   * signal's reason. Both halves of that happen here: the signal fires, and the wait it was handed to refuses exactly as the probe would.
+   */
+  harness.shutdown.abort();
+  refuse(new HbpuAbortError("shutdown"));
+
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  // An orderly teardown is not something to put an error in front of the user about, so the shutdown line stands in for the one the failure path would write.
+  assert.ok(!harness.lines.some(line => line.includes("Unable to determine the address")), "an orderly teardown must not read as a host that could not be reached");
+  assert.ok(harness.lines.some(line => line.includes("The webhook configuration ended with a shutdown in progress: shutdown.")), "the teardown must say so at debug");
+  assert.equal(harness.listener.routes.size, 0, "and nothing may be routed against a controller that is going away");
 });
 
 test("a shutdown arriving mid-configuration removes the registration the attempt had just minted", async (t) => {
@@ -1720,7 +1778,7 @@ test("a shutdown arriving mid-configuration removes the registration the attempt
   await settle(DISPATCH_SETTLE_TURNS);
 
   assert.ok(harness.calls.includes("delete:minted"), "a registration minted into a shutdown must be undone");
-  assert.equal(harness.routes.size, 0, "and nothing may be routed against a controller that is going away");
+  assert.equal(harness.listener.routes.size, 0, "and nothing may be routed against a controller that is going away");
 });
 
 test("a token that cannot manage endpoints is told what to grant, whichever way the controller refuses", async (t) => {
@@ -1797,9 +1855,7 @@ test("the route admits a genuine delivery once and refuses everything else about
 
   await harness.run();
 
-  const route = harness.routes.get(WEBHOOK_PATH);
-
-  assert.ok(route, "the controller should have routed its own path");
+  assert.ok(harness.listener.routes.has(WEBHOOK_PATH), "the controller should have routed its own path");
 
   const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
     event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "delivery1" });
@@ -1809,14 +1865,24 @@ test("the route admits a genuine delivery once and refuses everything else about
   const now = (): number => Math.floor(harness.clock.now() / 1000);
 
   // Nothing to verify against.
-  assert.equal(route({ body: Buffer.from(body), signature: undefined }), false);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: {} }).status, 401);
 
   /* A well-formed header that fails the code is a secret mismatch or a forgery, and the first is worth one breadcrumb per registration. A second failure must not
    * add a second line, or a forger could fill the log at will.
    */
-  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now(), body) }), false);
-  assert.equal(route({ body: Buffer.from(body), signature: sign("the-wrong-secret", now(), body) }), false);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
+    headers: { signature: sign("the-wrong-secret", now(), body) } }).status, 401);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
+    headers: { signature: sign("the-wrong-secret", now(), body) } }).status, 401);
   assert.equal(harness.lines.filter(line => line.includes("failed signature verification")).length, 1, "the breadcrumb is once per registration");
+
+  /* A `signature` header a sender wrote twice, in the comma-joined form Node hands a consumer for an ordinary repeated header rather than the array a test could
+   * compose by hand. It reaches verification as the one string it arrived as, and the property that has to hold is that repeating a header never makes a code
+   * valid over this body: the first carries no valid code at all, and the second appends a forgery after an authentic value, which is the pair the parse reads.
+   */
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: "t=1,v1=aa, t=2,v1=bb" } }).status, 401);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
+    headers: { signature: sign("minted-secret", now(), body) + ", " + sign("the-wrong-secret", now(), body) } }).status, 401);
 
   /* Authentic, and fresh when it was signed - but the host's own clock moves past the window before it arrives, which is the age the check is about. Moving time
    * rather than backdating the header is what proves the judgment reads this clock at all.
@@ -1825,19 +1891,40 @@ test("the route admits a genuine delivery once and refuses everything else about
 
   harness.clock.advance(ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS + 1000);
 
-  assert.equal(route({ body: Buffer.from(body), signature: dated }), false);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: dated } }).status, 401);
 
   // Authentic and fresh, but not JSON at all.
-  assert.equal(route({ body: Buffer.from("not json"), signature: sign("minted-secret", now(), "not json") }), false);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from("not json"),
+    headers: { signature: sign("minted-secret", now(), "not json") } }).status, 401);
 
   const genuine = sign("minted-secret", now(), body);
 
-  assert.equal(route({ body: Buffer.from(body), signature: genuine }), true);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: genuine } }).status, 200);
   assert.equal(harness.deliveries.length, 1, "an admitted delivery reaches the accessories");
 
   // The same delivery again inside the window is a replay, and the ledger refuses it.
-  assert.equal(route({ body: Buffer.from(body), signature: genuine }), false);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: genuine } }).status, 401);
   assert.equal(harness.deliveries.length, 1);
+});
+
+test("a request the route does not claim is answered before the controller ever judges it", async (t) => {
+
+  const harness = makeWebhookController();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
+    event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "unclaimed1" });
+  const request = { body: Buffer.from(body), headers: { signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) } };
+
+  /* Both answers are the listener's, and neither costs the controller a verdict: a path this controller never claimed is nobody's, and the route accepts POST
+   * alone because that is how a delivery arrives. An authentic body is used for both, so what makes each one refuse is the addressing and not the payload.
+   */
+  assert.equal(harness.listener.deliver("/unifi-access/9.9.9.9", request).status, 404);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, request, "GET").status, 405);
+  assert.equal(harness.deliveries.length, 0, "neither may reach the accessories");
 });
 
 test("an authentic delivery this plugin does not model is answered without being emitted", async (t) => {
@@ -1848,16 +1935,13 @@ test("an authentic delivery this plugin does not model is answered without being
 
   await harness.run();
 
-  const route = harness.routes.get(WEBHOOK_PATH);
-
-  assert.ok(route);
-
   const body = JSON.stringify({ event: "something.the.plugin.never.modeled", event_object_id: "other1" });
 
   /* The controller is told the delivery was taken, so it stops retrying something this plugin is simply not interested in - and nothing is emitted, because there
    * is nothing here that could read it.
    */
-  assert.equal(route({ body: Buffer.from(body), signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) }), true);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
+    headers: { signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) } }).status, 200);
   assert.equal(harness.deliveries.length, 0);
 });
 

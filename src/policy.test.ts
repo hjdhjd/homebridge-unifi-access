@@ -16,7 +16,7 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
   isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
   recordByMac, resolveDoorService, serialForm, tamperState, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl,
-  webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
+  webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1198,6 +1198,35 @@ test("orphanedWebhookRegistrations reads an IPv6 authority through the composers
 
   assert.deepEqual(orphanedWebhookRegistrations({ configuredAddresses: [ "1.2.3.4", "" ], existing: [bare], host: "10.0.0.7",
     port: 10120 }).map(record => record.id), ["bare"]);
+});
+
+test("webhookSignatureHeader hands back the header a sender actually wrote, unchanged", () => {
+
+  /* Node comma-joins an ordinary header sent more than once into one string, so the second value below is the round-trip shape of a repeated `signature` rather
+   * than anything a sender composed. It passes through here and is refused at verification, where a malformed code belongs...an implementation that went looking
+   * for a separator and answered `undefined` on finding one would refuse it a step too early and for the wrong reason.
+   */
+  const joined = "t=1000000000,v1=aaaa, t=1000000000,v1=bbbb";
+
+  assert.equal(webhookSignatureHeader({ signature: "t=1000000000,v1=abcdef" }), "t=1000000000,v1=abcdef");
+  assert.equal(webhookSignatureHeader({ signature: joined }), joined);
+});
+
+test("webhookSignatureHeader reads the array shape as no signature at all", () => {
+
+  /* The value is what this asserts and not merely its falsiness: an implementation reaching for `String(header)` would answer the comma-joined `"a,b"` here,
+   * which is a string and would go on to be verified as one. Comparing against `undefined` itself is what that coercion cannot pass.
+   */
+  assert.equal(webhookSignatureHeader({ signature: [ "a", "b" ] }), undefined);
+});
+
+test("webhookSignatureHeader reads an absent header as no signature", () => {
+
+  /* An unsigned delivery, and one carrying headers that say nothing about a signature. An implementation defaulting to an empty string would answer `""` for
+   * both, and the caller tests for `undefined`, so an empty string would reach verification as a signature nobody sent.
+   */
+  assert.equal(webhookSignatureHeader({}), undefined);
+  assert.equal(webhookSignatureHeader({ "content-type": "application/json" }), undefined);
 });
 
 test("webhookDeliveryFresh refuses a delivery on both sides of the window", () => {

@@ -9,19 +9,18 @@ import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcom
 import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAccessWebhookDelivery, selectDoorStates, verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
-import type { HomebridgePluginLogging, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, loopFaultReporter, mqttConnectionSettings, onAbort, prefixedLog,
-  retry, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
+import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, mqttConnectionSettings,
+  onAbort, prefixedLog, retry, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
   deviceSerial, isManagedRecord, isSupportedAccessDevice, membershipDelta, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
-  webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations } from "../policy.ts";
+  webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import { AccessDeliveryLedger } from "../webhooks.ts";
 import type { AccessDevice } from "../devices/device.ts";
 import { AccessEvents } from "./events.ts";
 import { AccessHub } from "../devices/hub.ts";
 import type { AccessPlatform } from "../platform.ts";
-import type { AccessWebhookRequest } from "../webhooks.ts";
 
 /**
  * The connect port: how a controller reaches its Access controller.
@@ -411,6 +410,16 @@ export class AccessController {
         host = await this.platform.localAddressFor(this.config.address);
       } catch(error) {
 
+        /* The plugin's own lifetime rejects a lookup that is still pending, so a teardown landing here is the orderly one the outer catch reports the same way
+         * rather than a host this plugin could not reach. Everything else is a genuine failure to resolve, and the user is told which host it was about.
+         */
+        if(this.#isShuttingDown()) {
+
+          this.log.debug("The webhook configuration ended with a shutdown in progress: %s.", formatErrorMessage(error));
+
+          return;
+        }
+
         this.log.error("Unable to determine the address the Access controller can reach this plugin on: %s.", formatErrorMessage(error));
 
         return;
@@ -469,9 +478,13 @@ export class AccessController {
 
       /* One synchronous sequence with no task boundary inside it: the secret is in hand before the route exists, so there is no window in which a delivery can
        * reach a route that cannot verify it.
+       *
+       * The lambda is also the single place a verdict becomes a status, which is what lets the decision behind it stay a two-valued answer about the delivery
+       * and keeps the HTTP vocabulary at the boundary that speaks HTTP. Deliveries are posted, so the route accepts that method alone and the listener answers
+       * anything else without the handler ever seeing it.
        */
       this.#webhook = { endpoint, ledger: new AccessDeliveryLedger({ windowMs: ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS }), refusalWarned: false,
-        route: listener.route(path, (request) => this.#receiveDelivery(request)) };
+        route: listener.route(path, (request) => ({ status: this.#receiveDelivery(request) ? 200 : 401 }), { methods: ["POST"] }) };
 
       // The listener's own line is the truth about the port, so this one is about the registration.
       this.log.info("Registered for Access webhook deliveries at %s.", url);
@@ -516,10 +529,12 @@ export class AccessController {
 
         this.log.warn("The API token cannot manage webhook endpoints (%s). Grant it webhook permissions, or register %s with the ufa command line tool and the " +
           "plugin will use it.", error.message, url);
-      } else if(error instanceof TypeError) {
+      } else if((error instanceof TypeError) || isHbpuAbortError(error)) {
 
-        // The listener refused the route, and its own message names which condition did it: the path is already routed - two controllers configured with one
-        // address - or the listener has closed.
+        /* The listener refused, and its own message names the cause. A TypeError is the path already routed - two controllers configured with one address - or
+         * the listener refusing an option it was constructed with, an out-of-range port among them, and it names the collision or the option. An abort error is
+         * a listener whose lifetime ended on a bind failure it has already reported. A shutdown never arrives here, because the check above answers it first.
+         */
         this.log.error("Unable to receive Access webhook deliveries. %s", error.message);
       } else {
 
@@ -586,19 +601,20 @@ export class AccessController {
    * against another. It is the platform's clock, the same one every timer here arms on, so a suite that moves time past the freshness window sees this judgment
    * move with it.
    */
-  #receiveDelivery(request: AccessWebhookRequest): boolean {
+  #receiveDelivery(request: HttpListenerRequest): boolean {
 
     const nowMs = this.platform.clock.now();
+    const header = webhookSignatureHeader(request.headers);
     const webhook = this.#webhook;
 
-    if(!webhook || (request.signature === undefined)) {
+    if(!webhook || (header === undefined)) {
 
       this.log.debug("A webhook delivery arrived carrying no signature, or with no registration to verify it against.");
 
       return false;
     }
 
-    const signature = verifyWebhookSignature({ body: request.body, header: request.signature, secret: webhook.endpoint.secret });
+    const signature = verifyWebhookSignature({ body: request.body, header, secret: webhook.endpoint.secret });
 
     if(!signature) {
 

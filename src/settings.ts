@@ -43,14 +43,8 @@ export const ACCESS_WEBHOOK_PORT = 10120;
 // identifier on the same horizon, because a delivery older than this is refused before the ledger is consulted.
 export const ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS = 300000;
 
-// The largest delivery body the listener reads. A delivery carries one device record and one event payload, which the live captures put in the low kilobytes.
-export const ACCESS_WEBHOOK_BODY_LIMIT = 65536;
-
 // The path prefix every controller's endpoint registers under; the controller's configured address follows it, percent-encoded.
 export const ACCESS_WEBHOOK_PATH_PREFIX = "/unifi-access/";
-
-// How long the listener waits before retrying a port that was in use - long enough for a previous instance to release it during a restart.
-export const ACCESS_WEBHOOK_LISTEN_RETRY_MS = 5000;
 
 // The deliveries the plugin consumes, by name, and the registration list derived from them. The names are stated here once: the hub's handlers and the
 // registration both read these members, so the set a controller is asked to deliver and the set the plugin listens for cannot drift apart.

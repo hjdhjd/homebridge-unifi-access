@@ -440,3 +440,29 @@ test("a disabled controller contributes its keys and is never asked for claims",
 
   assert.deepEqual(harness.unregistered, ["uuid-stranded"], "every configured controller's keys spare an accessory, and only the unclaimed one leaves");
 });
+
+test("the platform builds one real listener, on its own clock and lifetime, and the shutdown ends it", async (t) => {
+
+  const harness = makeHarness();
+  /* The ephemeral port, so this arm binds a real socket without contending for one anything else on the machine might hold. Everything else about the listener -
+   * the clock its bind retry waits on, the label its own lines carry, the signal that ends it - is what the platform composes, and this is the only arm that
+   * runs that composition rather than substituting for it.
+   */
+  const platform = harness.make({ options: ["Enable.Controller.Webhooks.Port.0"], platform: "UniFi Access" });
+  const listener = platform.webhookListener();
+
+  // Registered here rather than at the end, so an arm failing partway still releases the port instead of leaving the run hanging on a bound server.
+  t.after(() => harness.handlers.get(APIEvent.SHUTDOWN)?.());
+
+  // One listener serves every controller, so the second ask is answered with the first one rather than binding a second port beside it.
+  assert.equal(platform.webhookListener(), listener, "the listener is constructed once and answered again");
+
+  await listener.ready;
+
+  assert.ok(listener.boundPort > 0, "an ephemeral port resolves to a real one the operating system chose");
+
+  // Homebridge's own shutdown ends it, through the handler the platform registered for itself before it looked at any controller configuration.
+  harness.handlers.get(APIEvent.SHUTDOWN)?.();
+
+  assert.equal(listener.aborted, true, "the plugin's lifetime is the listener's");
+});

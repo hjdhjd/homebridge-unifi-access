@@ -4,10 +4,10 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, FeatureOptions, TimerRegistry, debugGatedLog, formatErrorMessage, guardedDispatch, systemClock } from "homebridge-plugin-utils";
+import { APIEvent, FeatureOptions, HttpListener, TimerRegistry, debugGatedLog, formatErrorMessage, guardedDispatch, localAddressFor,
+  systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
-import { AccessWebhookListener, localAddressFor } from "./webhooks.ts";
 import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
@@ -50,7 +50,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    */
   readonly #strandedRemovals: TimerRegistry;
   // The one webhook listener, constructed on the first controller that asks for it. A plugin with webhooks turned off never asks, so it binds no port at all.
-  #webhookListener: Nullable<AccessWebhookListener>;
+  #webhookListener: Nullable<HttpListener>;
   // The port that listener will bind, read once here because the port is a plugin-wide deployment decision rather than a per-controller one.
   readonly #webhookPort: number;
 
@@ -383,11 +383,15 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * One listener serves every configured controller, routed by path, because the port is a deployment decision the user makes once for the whole plugin rather
    * than once per controller. Nothing constructs it until a controller with webhooks turned on asks, so the default configuration binds no port and pays nothing.
    *
+   * The lines the listener speaks for itself - the port it came up on, a port somebody else holds, an error it cannot come back from - are the library's own
+   * wording under the label handed here, so the plugin states which listener this is and nothing about how a socket reports itself.
+   *
    * @returns The listener.
    */
-  public webhookListener(): AccessWebhookListener {
+  public webhookListener(): HttpListener {
 
-    this.#webhookListener ??= new AccessWebhookListener({ log: this.#debugLog, port: this.#webhookPort, signal: this.signal });
+    this.#webhookListener ??= new HttpListener({ clock: this.clock, label: "Access webhook listener", log: this.#debugLog, port: this.#webhookPort,
+      signal: this.signal });
 
     return this.#webhookListener;
   }
@@ -398,12 +402,16 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * It lives on the platform rather than at each controller's own call site because composing this plugin's reachable address is a deployment decision, and
    * because one named home for the plugin's only outbound network probe is what lets it be substituted rather than reached for.
    *
+   * A host that does not resolve, or one resolving to a family the socket cannot connect toward, rejects rather than answering an address that means nothing,
+   * and the controller reports it as a registration it could not arrange. The plugin's shutdown signal rejects a lookup still pending for the same reason it
+   * ends every other wait here, and the controller reads that one as the orderly teardown it is.
+   *
    * @param host - The controller's configured address.
    *
    * @returns The local address the route toward that controller leaves from.
    */
   public async localAddressFor(host: string): Promise<string> {
 
-    return localAddressFor(host);
+    return localAddressFor(host, { signal: this.signal });
   }
 }
