@@ -10,9 +10,9 @@ import { APIEvent } from "homebridge-plugin-utils";
 import type { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
-import { setTimeout as delay } from "node:timers/promises";
 import { format } from "node:util";
 import { serialForm } from "./policy.ts";
+import { settle } from "homebridge-plugin-utils/testing";
 
 interface Harness {
 
@@ -260,7 +260,7 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   wiredInner.launchControllers();
 
   // The pass runs behind the logins it awaits, so yielding once is what lets it reach its own decision.
-  await delay(0);
+  await settle();
 
   assert.ok(failures.some(line => line.includes("Startup did not complete")), "the failure must be said against the controller it belongs to");
   assert.deepEqual(wired.unregistered, [], "and the pass must stand down for the session");
@@ -349,9 +349,9 @@ test("a shutdown that lands before the fence closes removes nothing", async () =
   const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }],
     options: [ "Disable.Controller.DelayDeviceRemoval", "Enable.Log.Debug" ], platform: "UniFi Access" });
 
-  let settle = (): void => undefined;
+  let releaseLogin = (): void => undefined;
 
-  const pending = new Promise<AccessLoginOutcome>(resolve => { settle = (): void => resolve("reporting"); });
+  const pending = new Promise<AccessLoginOutcome>(resolve => { releaseLogin = (): void => resolve("reporting"); });
 
   // A controller whose login is still outstanding is what leaves the pass waiting, which is the window this arm is about.
   const waiting = { login: async (): Promise<AccessLoginOutcome> => pending,
@@ -366,9 +366,9 @@ test("a shutdown that lands before the fence closes removes nothing", async () =
 
   // Homebridge's own shutdown, fired through the handler the platform registered for it, and only then does the login it was waiting on resolve.
   harness.handlers.get(APIEvent.SHUTDOWN)?.();
-  settle();
+  releaseLogin();
 
-  await delay(0);
+  await settle();
 
   assert.deepEqual(harness.unregistered, [], "a shutdown that resolved the logins is not an occasion to act on them");
   assert.ok(harness.lines.some(line => line.includes("the plugin is shutting down")), "and the pass must say that is why it stood down");

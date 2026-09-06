@@ -12,21 +12,22 @@
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
 import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
-import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection, AccessStateDevice } from "unifi-access";
+import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
+  AccessStateDevice } from "unifi-access";
 import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
 import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
+import { TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { accessMethods, officialDeviceModel } from "../policy.ts";
+import { configRows, hubRecord } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
-import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
-import { setImmediate as settle } from "node:timers/promises";
 import test from "node:test";
 
 // The door this hub drives, and the reader hanging off it, in the identities the live captures use.
@@ -63,25 +64,23 @@ const GATE_TRAVEL_MS = 5000;
  * An arm about the token-identity seed must override configs to undefined explicitly, or the model seeds synchronously from the empty census and the official
  * settings read under test never runs.
  */
-function hubRecord(overrides: Record<string, unknown> = {}): AccessStateDevice & { mac: string } {
+function testHub(overrides: Record<string, unknown> = {}): AccessStateDevice & { mac: string } {
 
-  return {
+  return hubRecord({
 
     alias: "",
     capabilities: [ "is_hub", "door_bell" ],
     configs: [],
     connected_uah_id: "",
-    device_type: "UAH",
     is_adopted: true,
     is_connected: true,
-    is_managed: true,
     is_online: true,
     location_id: MAIN_DOOR,
     mac: HUB_MAC,
     name: "UA-HUB-5B9C",
     unique_id: HUB_ID,
     ...overrides
-  };
+  });
 }
 
 /* A HomeKit accessory over real HAP services: the lookups the plugin performs, backed by a plain list. The services are the genuine classes, so what the shared
@@ -198,7 +197,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const requests: string[] = [];
   const rings: { cancel: boolean; readerId: string }[] = [];
   const handlers = new Map<string, (payload: unknown) => void>();
-  const record = options.record ?? hubRecord();
+  const record = options.record ?? testHub();
 
   /* The client's door state map, which is where a hub reads every door it drives. An arm that named one door's entry has it keyed here under that entry's own
    * identity, so the single-door spelling and the whole-map spelling reach the hub through the one map the plugin actually reads.
@@ -428,7 +427,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 function makeGate(options: HubOptions = {}): HubHarness {
 
   return makeHub({ credentials: true, doors: [ { name: "Main Gate", unique_id: MAIN_DOOR }, { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ],
-    record: hubRecord({ device_type: "UGT" }), ...options });
+    record: testHub({ device_type: "UGT" }), ...options });
 }
 
 // A door hub presenting its door as a garage door opener, which is the surface every momentary-operator arm drives.
@@ -788,7 +787,7 @@ test("a UA Gate publishes its side door's unlocks under the side door's own topi
   const gate = makeHub({
 
     doors: [ { name: "Main Gate", unique_id: MAIN_DOOR }, { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ],
-    record: hubRecord({ device_type: "UGT" })
+    record: testHub({ device_type: "UGT" })
   });
 
   gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: SIDE_DOOR, doorName: "Pedestrian Gate" }));
@@ -806,7 +805,7 @@ test("a UA Gate publishes its side door's unlocks under the side door's own topi
  */
 function securedGate(options: HubOptions = {}): HubHarness {
 
-  return makeGate({ ...options, record: hubRecord({ configs: [ { device_id: HUB_ID, key: "output_oper1_relay", tag: "relay", value: "off" },
+  return makeGate({ ...options, record: testHub({ configs: [ { device_id: HUB_ID, key: "output_oper1_relay", tag: "relay", value: "off" },
     { device_id: HUB_ID, key: "output_oper2_relay", tag: "relay", value: "off" } ], device_type: "UGT" }) });
 }
 
@@ -892,7 +891,7 @@ test("a doorbell call that ended on this hub's reader is logged, and one on anot
 
 test("a record's configuration rows create the switches its capabilities call for, and a capability with no row of its own reads off", async () => {
 
-  const harness = makeReader({ record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ],
+  const harness = makeReader({ record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ],
     configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
 
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "a row the record carries is what the switch reads");
@@ -909,7 +908,7 @@ test("a reader whose record carries no configuration rows takes its switches fro
   const harness = makeReader({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code", "support_apple_pass" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code", "support_apple_pass" ], configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" }, touch_pass: { enabled: "yes" } } })
   });
 
@@ -936,7 +935,7 @@ test("a settings read the controller refused keeps every switch the accessory ca
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => { throw new Error("the controller is not answering"); }
   });
 
@@ -958,7 +957,7 @@ test("a rowless record on a client with no official surface keeps what it has an
   const harness = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined })
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined })
   });
 
   await settle();
@@ -992,7 +991,7 @@ test("a seeded device retires the switch of a method that has left the reader, i
   const credential = makeReader({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
   });
 
@@ -1004,7 +1003,7 @@ test("a seeded device retires the switch of a method that has left the reader, i
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } })
   });
 
@@ -1020,7 +1019,7 @@ test("a v2 access method event moves the switch and the model behind it, in both
 
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
 
-  const credential = makeReader({ record: hubRecord({ ...reader, configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
+  const credential = makeReader({ record: testHub({ ...reader, configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
   const service = switchService(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
 
   // The wire echoes key names back as values, and the handler's own filter is what keeps one out of the model as surely as out of the switch.
@@ -1033,7 +1032,7 @@ test("a v2 access method event moves the switch and the model behind it, in both
   assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the event is pushed to the switch");
   assert.equal(await switchReads(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model it reads from moved with it");
 
-  const token = makeReader({ official: true, record: hubRecord({ ...reader, configs: undefined }),
+  const token = makeReader({ official: true, record: testHub({ ...reader, configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
   await settle();
@@ -1054,7 +1053,7 @@ test("a v2 access method event retries a settings read that failed, and only whi
   const harness = makeHub({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     // The first read is refused; the retry stays in flight for the rest of the arm, which is what the event arriving behind it meets.
     settings: async (fetch: number): Promise<unknown> => {
@@ -1120,7 +1119,7 @@ test("a door command refuses locally whenever the composition reads unreachable,
   /* The device term: a healthy connection over a record that reads offline. Driving the two separately is what makes dropping either half of the composition fail
    * here, where one combined arm would pass on the surviving half's strength.
    */
-  const offline = makeHub({ record: hubRecord({ is_online: false }) });
+  const offline = makeHub({ record: testHub({ is_online: false }) });
 
   await writeLock(lockService(offline), Characteristic.LockTargetState.UNSECURED);
 
@@ -1173,7 +1172,7 @@ test("a UA Gate whose door was never discovered refuses its commands for the rec
   /* A gate holding a control surface over an empty topology. Both of the preamble's own refusals are behind it, so the only reason left is the one the door
    * resolution could not answer.
    */
-  const gate = makeHub({ credentials: true, doors: [], record: hubRecord({ device_type: "UGT" }) });
+  const gate = makeHub({ credentials: true, doors: [], record: testHub({ device_type: "UGT" }) });
 
   await gate.mqttSet("lock", "true");
   await settle();
@@ -1224,7 +1223,7 @@ test("a completed recovery refreshes a rowless reader's access methods and resta
   const harness = makeReader({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     // The controller answers differently the second time, which is what makes the refreshed value tell itself apart from the seeded one.
     settings: async (fetch: number): Promise<unknown> => ({ access_methods: { pin_code: { enabled: (fetch === 1) ? "yes" : "no", pin_code_shuffle: "no" } } })
@@ -1254,7 +1253,7 @@ test("a restore arriving while a refresh is still out asks for nothing more", as
   const harness = makeHub({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     // The seed settles; the refresh behind it stays in flight for the rest of the arm, which is what the second restore edge meets.
     settings: async (fetch: number): Promise<unknown> => (fetch === 1) ? { access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } } :
@@ -1284,7 +1283,7 @@ test("a reader whose record carries configuration rows reads no settings on a co
   const harness = makeReader({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
   });
 
@@ -1306,7 +1305,7 @@ test("rows landing while a refresh is out outrank the answer that refresh comes 
   const harness = makeReader({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     settings: async (fetch: number): Promise<unknown> => {
 
@@ -1344,7 +1343,7 @@ test("a refused refresh keeps the values already held, retires nothing, and neve
 
     official: true,
     options: ["Enable.Log.Debug"],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     settings: async (fetch: number): Promise<unknown> => {
 
@@ -1383,7 +1382,7 @@ test("a settings read that lands after the device was torn down materializes not
 
     official: true,
     options: ["Enable.Log.Debug"],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => new Promise<unknown>(resolve => { answerSettings = resolve; })
   });
 
@@ -1407,7 +1406,7 @@ test("a settings read that lands after the device was torn down materializes not
 
     official: true,
     options: ["Enable.Log.Debug"],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => new Promise<never>((resolve, reject) => { answerSettings = (): void => reject(new Error("the device is gone")); })
   });
 
@@ -1428,7 +1427,7 @@ test("a recovery arriving after the device was torn down reads nothing, changes 
 
     official: true,
     options: ["Enable.Log.Debug"],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } })
   });
 
@@ -1551,7 +1550,7 @@ test("a completed recovery gives the startup seed of a reader nothing has answer
   const harness = makeReader({
 
     official: true,
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
     settings: async (fetch: number): Promise<unknown> => {
 
@@ -1585,7 +1584,7 @@ test("a confirmed access method write answers from the model before the controll
   const readBack = (enabled: string): unknown => ({ access_methods: { pin_code: { enabled: enabled, pin_code_shuffle: "no" } } });
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "no" }] };
 
-  const confirmed = makeReader({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("yes") });
+  const confirmed = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("yes") });
 
   await switchService(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
 
@@ -1596,7 +1595,7 @@ test("a confirmed access method write answers from the model before the controll
   assert.equal(await switchReads(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
   // The negative control: the controller answered success while leaving the setting where it was. Nothing was confirmed, so nothing is folded.
-  const declined = makeReader({ official: true, record: hubRecord(reader), settings: async (): Promise<unknown> => readBack("no") });
+  const declined = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("no") });
 
   await switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
 
@@ -1612,7 +1611,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
 
   // A refresh carrying genuine news moves what the switch answers, with no v2 event involved anywhere.
-  const refreshed = makeReader({ record: hubRecord({ ...reader, configs: row("no") }) });
+  const refreshed = makeReader({ record: testHub({ ...reader, configs: row("no") }) });
 
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false);
 
@@ -1626,7 +1625,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "a row the record dropped leaves nothing standing");
 
   // The recency guard: a confirmed write moves the model ahead of the rows, and the rows restating what they said before must not drag it back.
-  const written = makeReader({ official: true, record: hubRecord({ ...reader, configs: row("no") }),
+  const written = makeReader({ official: true, record: testHub({ ...reader, configs: row("no") }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
   await switchService(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
@@ -2750,7 +2749,7 @@ test("a reader with no access method selected creates no switch and retires one 
   const harness = makeHub({
 
     existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
-    record: hubRecord({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
   });
 
@@ -2761,7 +2760,7 @@ test("a reader with no access method selected creates no switch and retires one 
 
 test("a selection creates exactly the selected switches, at the device's own scope over the global one, in any case the entry spelled them", async () => {
 
-  const record = hubRecord({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code", "qr_code" ],
+  const record = testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code", "qr_code" ],
     configs: [ { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }, { device_id: HUB_ID, key: "nfc", tag: "open_door_mode", value: "no" } ] });
 
   // The global selection names two methods; the device's own names one, spelled in lower case, and it is the device's that counts.
@@ -2780,37 +2779,16 @@ test("a selection creates exactly the selected switches, at the device's own sco
   assert.ok(!hasSwitch(global, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC));
 });
 
-// A configuration row as a hub's record carries one: the device it belongs to, the key it is read by, the family it belongs to, and the reading it reports.
-interface ConfigRow {
-
-  device_id: string;
-  key: string;
-  tag: string;
-  value: string;
-}
-
-/* The configuration rows of one family, addressed to this hub, in the shape its record carries them.
- *
- * @param tag     - The family the rows belong to.
- * @param entries - The key each row is read by and the reading it reports.
- *
- * @returns The rows.
- */
-function hubRows(tag: string, entries: { key: string; value: string }[]): ConfigRow[] {
-
-  return entries.map(({ key, value }) => ({ device_id: HUB_ID, key, tag, value }));
-}
-
 // The wiring rows behind a terminal input's live circuit detection, which is the evidence a sensor is created on.
-function wiringRows(pairs: { key: string; value: string }[]): ConfigRow[] {
+function wiringRows(pairs: Record<string, string>): AccessDeviceEntryConfig[] {
 
-  return hubRows("wiring", pairs);
+  return configRows({ deviceId: HUB_ID, entries: pairs, tag: "wiring" });
 }
 
 // The rows a hub reports its terminal input readings through, which is what a created sensor answers from.
-function inputRows(readings: { key: string; value: string }[]): ConfigRow[] {
+function inputRows(readings: Record<string, string>): AccessDeviceEntryConfig[] {
 
-  return hubRows("input", readings);
+  return configRows({ deviceId: HUB_ID, entries: readings, tag: "input" });
 }
 
 // Every wiring key a terminal input is detected through across the hub families that name one, so an arm can offer a family all the evidence there is.
@@ -2818,25 +2796,24 @@ const EVERY_WIRE = [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos",
   "wiring_state_ren-pos", "wiring_state_rex-neg", "wiring_state_rex-pos" ];
 
 // Every one of those pairs reporting a live circuit, which is the most a record can say about its terminal inputs.
-const EVERY_PAIR_LIVE = wiringRows(EVERY_WIRE.map(key => ({ key, value: "on" })));
+const EVERY_PAIR_LIVE = wiringRows(Object.fromEntries(EVERY_WIRE.map(key => [ key, "on" ])));
 
 // The remote release pair alone, which is what the arms about one input's own lifecycle vary.
-const REL_PAIR_LIVE = wiringRows([ { key: "wiring_state_rel-neg", value: "on" }, { key: "wiring_state_rel-pos", value: "on" } ]);
+const REL_PAIR_LIVE = wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_rel-pos": "on" });
 
 // The request to exit pair a UA Hub Door Mini reports its one input through.
-const D1_PAIR_LIVE = wiringRows([ { key: "wiring_state_d1-button-neg", value: "on" }, { key: "wiring_state_d1-button-pos", value: "on" } ]);
+const D1_PAIR_LIVE = wiringRows({ "wiring_state_d1-button-neg": "on", "wiring_state_d1-button-pos": "on" });
 
 // A UA Hub reporting every terminal input wired, with each input reading whatever the arm names.
 function wiredHub(reading: string): AccessStateDevice & { mac: string } {
 
-  return hubRecord({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: reading }, { key: "input_state_ren", value: reading },
-    { key: "input_state_rex", value: reading } ]) ] });
+  return testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": reading, "input_state_ren": reading, "input_state_rex": reading }) ] });
 }
 
 // A UA Hub Door Mini reporting its one terminal input wired, reading whatever the arm names.
 function doorMiniHub(reading: string): AccessStateDevice & { mac: string } {
 
-  return hubRecord({ configs: [ ...D1_PAIR_LIVE, ...inputRows([{ key: "input_d1_button", value: reading }]) ], device_type: "UA-Hub-Door-Mini" });
+  return testHub({ configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": reading }) ], device_type: "UA-Hub-Door-Mini" });
 }
 
 /* A UA Ultra whose one multiplexed terminal input is configured for the mode an arm names, carried in the port setting extension the controller reports it through.
@@ -2847,12 +2824,12 @@ function doorMiniHub(reading: string): AccessStateDevice & { mac: string } {
  */
 function ultraRecord(mode: string): AccessStateDevice & { mac: string } {
 
-  return hubRecord({ device_type: "UA-ULTRA", extensions: [{ device_id: HUB_ID, extension_name: "port_setting",
+  return testHub({ device_type: "UA-ULTRA", extensions: [{ device_id: HUB_ID, extension_name: "port_setting",
     target_config: [{ config_key: "rex_button_mode", config_tag: "", config_value: mode }], target_type: "device", unique_id: "extension-1" }] });
 }
 
 // A doorbell-capable reader hanging off this hub, as the client's device snapshot carries it, which is the device a dispatched ring is addressed to.
-const READER_RECORD = hubRecord({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: HUB_ID, device_type: "UA-G2-PRO", unique_id: READER_ID });
+const READER_RECORD = testHub({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: HUB_ID, device_type: "UA-G2-PRO", unique_id: READER_ID });
 
 // Every terminal input sensor, which most of the arms below sweep over together.
 const TERMINAL_SUBTYPES = [ AccessReservedNames.CONTACT_REL, AccessReservedNames.CONTACT_REN, AccessReservedNames.CONTACT_REX ];
@@ -2869,8 +2846,7 @@ test("a hub creates a terminal input's sensor the moment its wiring reports live
     assert.ok(!hasContactSensor(harness, subtype), "a record offering no wiring evidence carries no " + subtype + " to begin with");
   }
 
-  restateRecord(harness, { configs: [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "on" }, { key: "input_state_ren", value: "on" },
-    { key: "input_state_rex", value: "on" } ]) ] });
+  restateRecord(harness, { configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ] });
 
   for(const subtype of TERMINAL_SUBTYPES) {
 
@@ -2922,8 +2898,7 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
   }
 
   // One terminal of a pair is a half-wired sensor, which is not a sensor.
-  const half = makeHub({ record: hubRecord({ configs: wiringRows([ { key: "wiring_state_rel-neg", value: "on" }, { key: "wiring_state_ren-neg", value: "on" },
-    { key: "wiring_state_rex-neg", value: "on" } ]) }) });
+  const half = makeHub({ record: testHub({ configs: wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_ren-neg": "on", "wiring_state_rex-neg": "on" }) }) });
 
   for(const subtype of TERMINAL_SUBTYPES) {
 
@@ -2931,8 +2906,8 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
   }
 
   // A UA Gate and an Enterprise hub drive no terminal input at all, so the most generous evidence a record can carry still says nothing about them.
-  const gate = makeGate({ record: hubRecord({ configs: EVERY_PAIR_LIVE, device_type: "UGT" }) });
-  const enterprise = makeHub({ record: hubRecord({ configs: EVERY_PAIR_LIVE, device_type: "UAH-Ent" }) });
+  const gate = makeGate({ record: testHub({ configs: EVERY_PAIR_LIVE, device_type: "UGT" }) });
+  const enterprise = makeHub({ record: testHub({ configs: EVERY_PAIR_LIVE, device_type: "UAH-Ent" }) });
 
   for(const subtype of TERMINAL_SUBTYPES) {
 
@@ -2950,7 +2925,7 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
   // The Ultra multiplexes its one input and reports no wiring pair at all, so what that input is configured for is the whole of the evidence.
   const ultra = makeHub({ record: ultraRecord("rex") });
   const positioned = makeHub({ record: ultraRecord("dps") });
-  const unconfigured = makeHub({ record: hubRecord({ device_type: "UA-ULTRA" }) });
+  const unconfigured = makeHub({ record: testHub({ device_type: "UA-ULTRA" }) });
 
   assert.ok(hasContactSensor(ultra, AccessReservedNames.CONTACT_REX), "a UA Ultra configured for a request to exit carries that sensor, with no wiring row at all");
   assert.ok(!hasContactSensor(ultra, AccessReservedNames.CONTACT_REL), "and a UA Ultra carries no remote release");
@@ -2965,7 +2940,7 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
 
 test("a hub keeps a terminal input's sensor through a silence about its wiring and retires it only when the user turns the option off", () => {
 
-  const harness = makeHub({ record: hubRecord({ configs: REL_PAIR_LIVE }) });
+  const harness = makeHub({ record: testHub({ configs: REL_PAIR_LIVE }) });
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the pair reporting live is what creates the sensor");
 
@@ -2983,7 +2958,7 @@ test("a hub keeps a terminal input's sensor through a silence about its wiring a
   assert.equal(lineCount(harness, "Disabling the remote release."), 1, "and the retirement is announced exactly once");
 
   // A hub adopted with the toggle already off never carries the sensor, whatever its wiring reports.
-  const disabled = makeHub({ options: ["Disable.Hub.REL"], record: hubRecord({ configs: EVERY_PAIR_LIVE }) });
+  const disabled = makeHub({ options: ["Disable.Hub.REL"], record: testHub({ configs: EVERY_PAIR_LIVE }) });
 
   assert.ok(!hasContactSensor(disabled, AccessReservedNames.CONTACT_REL), "and a hub adopted with the toggle off never carries it");
   assert.ok(hasContactSensor(disabled, AccessReservedNames.CONTACT_REN), "while the inputs the user left alone are untouched by it");
@@ -2991,23 +2966,23 @@ test("a hub keeps a terminal input's sensor through a silence about its wiring a
 
 test("a hub carries a terminal input's change to the characteristic, the topic, and the log exactly once, and carries a repeat of the same reading nowhere", () => {
 
-  const harness = makeHub({ record: hubRecord({ configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "on" }]) ] }) });
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
   const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
 
-  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "off" }]) ] });
+  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
 
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
     "the input opening reaches the characteristic");
   assert.equal(lineCount(harness, "Remote release open."), 1, "and is announced once");
 
-  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "on" }]) ] });
+  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] });
 
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
     "the input closing reaches it too");
   assert.equal(lineCount(harness, "Remote release closed."), 1, "and is announced once");
 
   // The same reading restated is not a change, so it reaches none of them.
-  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "on" }]) ] });
+  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] });
 
   assert.deepEqual(topicPayloads(harness, "rel"), [ "true", "false" ], "each change publishes exactly once, and a repeat publishes nothing");
   assert.equal(lineCount(harness, "Remote release closed."), 1, "and a repeat is announced no second time");
@@ -3016,20 +2991,20 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
   const mini = makeHub({ record: doorMiniHub("on") });
   const miniSensor = contactSensor(mini, AccessReservedNames.CONTACT_REX);
 
-  restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows([{ key: "input_d1_button", value: "off" }]) ] });
+  restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": "off" }) ] });
 
   assert.equal(miniSensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED);
   assert.equal(lineCount(mini, "Request to exit sensor open."), 1);
 
-  restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows([{ key: "input_d1_button", value: "on" }]) ] });
+  restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": "on" }) ] });
 
   assert.deepEqual(topicPayloads(mini, "rex"), [ "true", "false" ], "the Door Mini's readings reach the request to exit topic");
   assert.equal(lineCount(mini, "Request to exit sensor closed."), 1);
 
   // The log option is the user's own, and turning it off silences the sentence without withholding the reading from anything else.
-  const quiet = makeHub({ options: ["Disable.Log.REL"], record: hubRecord({ configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "on" }]) ] }) });
+  const quiet = makeHub({ options: ["Disable.Log.REL"], record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
 
-  restateRecord(quiet, { configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "off" }]) ] });
+  restateRecord(quiet, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
 
   assert.equal(contactSensor(quiet, AccessReservedNames.CONTACT_REL).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_NOT_DETECTED, "the reading still reaches HomeKit");
@@ -3047,25 +3022,22 @@ test("a UA Hub reads each terminal input from its own row, so no input can answe
   const closed = Characteristic.ContactSensorState.CONTACT_DETECTED;
   const open = Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
 
-  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "on" }, { key: "input_state_ren", value: "off" },
-    { key: "input_state_rex", value: "off" } ]) ]);
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on", "input_state_ren": "off", "input_state_rex": "off" }) ]);
 
   assert.deepEqual(readings(), [ closed, open, open ], "the remote release row alone reads on, and the remote release alone answers closed");
 
-  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "off" }, { key: "input_state_ren", value: "on" },
-    { key: "input_state_rex", value: "off" } ]) ]);
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "off", "input_state_ren": "on", "input_state_rex": "off" }) ]);
 
   assert.deepEqual(readings(), [ open, closed, open ], "the request to enter row alone reads on, and only that sensor follows it");
 
-  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows([ { key: "input_state_rel", value: "off" }, { key: "input_state_ren", value: "off" },
-    { key: "input_state_rex", value: "on" } ]) ]);
+  refreshRecord(harness, [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "off", "input_state_ren": "off", "input_state_rex": "on" }) ]);
 
   assert.deepEqual(readings(), [ open, open, closed ], "and the request to exit row alone reads on");
 });
 
 test("a terminal input whose wiring falls silent keeps its sensor, reads closed, and announces nothing", () => {
 
-  const harness = makeHub({ record: hubRecord({ configs: [ ...REL_PAIR_LIVE, ...inputRows([{ key: "input_state_rel", value: "off" }]) ] }) });
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] }) });
   const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
 
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
@@ -3074,7 +3046,7 @@ test("a terminal input whose wiring falls silent keeps its sensor, reads closed,
   /* The wiring rows go away while the reading row stays exactly where it was. The service survives, because the gate keeps one already standing through a wiring
    * silence, and the reading falls back to the closed default an input carrying no wiring evidence has.
    */
-  refreshRecord(harness, inputRows([{ key: "input_state_rel", value: "off" }]));
+  refreshRecord(harness, inputRows({ "input_state_rel": "off" }));
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the sensor already standing survives the silence");
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
@@ -3094,7 +3066,7 @@ test("a hub's wiring table and the option catalog's model lists agree about whic
    */
   for(const deviceType of families) {
 
-    const harness = makeHub({ record: (deviceType === "UA-ULTRA") ? ultraRecord("rex") : hubRecord({ configs: EVERY_PAIR_LIVE, device_type: deviceType }) });
+    const harness = makeHub({ record: (deviceType === "UA-ULTRA") ? ultraRecord("rex") : testHub({ configs: EVERY_PAIR_LIVE, device_type: deviceType }) });
 
     for(const { name, subtype } of inputs) {
 
@@ -3139,7 +3111,7 @@ test("a hub delivers a doorbell ring to HomeKit, its trigger switch, the topic, 
   assert.equal(lineCount(foreign, "Doorbell ring detected."), 0, "and says nothing");
 
   // Hardware with no doorbell has no ring to answer, whatever the wire says.
-  const mute = makeHub({ record: hubRecord({ capabilities: ["is_hub"] }) });
+  const mute = makeHub({ record: testHub({ capabilities: ["is_hub"] }) });
 
   mute.emit("access.remote_view", ringPacket([]));
 

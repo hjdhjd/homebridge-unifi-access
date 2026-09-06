@@ -16,6 +16,7 @@ import type { DecoratedSerial } from "../policy.ts";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { format } from "node:util";
+import { hubRecord } from "../testing.helpers.ts";
 import test from "node:test";
 
 // The controller every device below belongs to, in the casing a controller's own identity carries.
@@ -62,20 +63,7 @@ class TimerDevice extends AccessDevice {
 // A device record that reads as fully online, which is what the availability sweep below writes from.
 function record(overrides: Record<string, unknown> = {}): AccessStateDevice & { mac: string } {
 
-  return {
-
-    alias: "",
-    capabilities: ["is_hub"],
-    device_type: "UAH",
-    is_adopted: true,
-    is_connected: true,
-    is_managed: true,
-    is_online: true,
-    mac: "aabbccddee01",
-    name: "Test Hub",
-    unique_id: "device1",
-    ...overrides
-  } as unknown as AccessStateDevice & { mac: string };
+  return hubRecord({ alias: "", is_adopted: true, is_connected: true, is_online: true, ...overrides });
 }
 
 /* One port of a multi-door Enterprise hub, as the library synthesizes it: the hub's own record with that port's key spread over it. Two ports therefore share one

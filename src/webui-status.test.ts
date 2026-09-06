@@ -8,18 +8,16 @@
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
 /* eslint-disable camelcase */
-import type { AccessApiMode, AccessBootstrapConfig, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice,
-  StateStore } from "unifi-access";
+import type { AccessApiMode, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore,
   noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, formatUptime, narrowStatusContextRequest } from "./webui-status.ts";
+import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
 import type { StatusEvent, StatusRow } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
+import { settle } from "homebridge-plugin-utils/testing";
 import test from "node:test";
-
-// The topology root every fixture below hangs its doors from.
-const ROOT_ID = "root1";
 
 // The two hubs' colon-bearing MAC spellings and the decorated serials the registry keys them by.
 const MAC_ONE = "aa:bb:cc:dd:ee:01";
@@ -33,73 +31,37 @@ const ADDRESS = "192.0.2.10";
 // The uptime, in seconds, that renders as "127d 14h" - the formatter's fixed arithmetic input.
 const UPTIME_127D_14H = 11023200;
 
-// Build a minimal topology document carrying doors, each with its serving devices. Only the members the reducer and the selectors read are meaningful; the rest
-// satisfies the document's shape.
-function doorsTopology(doors: { devices: Record<string, unknown>[]; id: string }[]): AccessBootstrapConfig {
-
-  return {
-
-    device_groups: [[]],
-    extra_type: "building",
-    extras: {},
-    floors: [{
-
-      doors: doors.map(({ devices, id }) => ({ device_groups: [devices], extras: {}, full_name: "Door " + id, level: 2, location_type: "door", name: "Door " + id,
-        unique_id: id, up_id: "floor1" })),
-      floor_number: 1,
-      level: 1,
-      name: "Test Floor",
-      unique_id: "floor1",
-      up_id: ROOT_ID
-    }],
-    full_name: "Test Building",
-    level: 0,
-    location_type: "building",
-    name: "Test Building",
-    timezone: "UTC",
-    unique_id: ROOT_ID,
-    up_id: "",
-    work_time: "",
-    work_time_id: ""
-  } as unknown as AccessBootstrapConfig;
-}
-
-// The configuration rows a device record carries, in the key/tag/value shape the controller writes them as.
-function configs(deviceId: string, entries: Record<string, string>): Record<string, unknown>[] {
-
-  return Object.entries(entries).map(([ key, value ]) => ({ device_id: deviceId, key, tag: "input_state", value }));
-}
+// How many macrotask boundaries an arm crosses before reading a dispatched frame: the observe loops register and drain on the microtask and immediate queues, so
+// two immediates cover a dispatch chain.
+const DISPATCH_SETTLE_TURNS = 2;
 
 // A managed, online hub whose position wiring reads live and closed and whose lock reads locked - the capture corpus's plain UA Hub shape, so the topology seed
 // establishes { dps: "close", lock: "locked" } for the door it serves.
 function wiredHub(uniqueId: string, mac: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
-  return {
+  return hubRecord({
 
     capabilities: [ "is_hub", "dps_alarm" ],
-    configs: configs(uniqueId, { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on", "wiring_state_dps-pos": "on" }),
-    device_type: "UAH",
-    is_managed: true,
+    configs: configRows({ deviceId: uniqueId, entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on",
+      "wiring_state_dps-pos": "on" } }),
     is_online: true,
     mac,
     name: "Hub " + uniqueId,
     unique_id: uniqueId,
     ...overrides
-  };
+  });
 }
 
 // A managed, online hub carrying no wiring facts at all, so what its door establishes comes only from dispatched door-state events.
 function bareHub(uniqueId: string, mac: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
-  return { capabilities: ["is_hub"], configs: [], device_type: "UAH", is_managed: true, is_online: true, mac, name: "Hub " + uniqueId, unique_id: uniqueId,
-    ...overrides };
+  return hubRecord({ configs: [], is_online: true, mac, name: "Hub " + uniqueId, unique_id: uniqueId, ...overrides });
 }
 
 // A managed, online reader carrying whatever capabilities and configuration rows an arm hands it - the hardware whose access methods the methods row reports.
 function reader(uniqueId: string, mac: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
-  return { capabilities: ["is_reader"], configs: [], device_type: "UA-G2-PRO", is_managed: true, is_online: true, mac, name: "Reader " + uniqueId,
-    unique_id: uniqueId, ...overrides };
+  return readerRecord({ configs: [], is_online: true, mac, name: "Reader " + uniqueId, unique_id: uniqueId, ...overrides });
 }
 
 // Classify one captured-shape door-state notification for dispatch, so an entry moves through the real reducer exactly as a live controller would move it.
@@ -133,7 +95,7 @@ function deviceConfigsEvent(deviceId: string, entries: Record<string, string>): 
 
   const packet = {
 
-    data: { configs: configs(deviceId, entries), unique_id: deviceId },
+    data: { configs: configRows({ deviceId: deviceId, entries: entries }), unique_id: deviceId },
     event: "access.data.device.update",
     event_object_id: deviceId,
     receiver_id: "",
@@ -225,13 +187,6 @@ function makeClient(store: StateStore, hubs: { doorId?: string; port?: boolean; 
 function contextRequest(serials: string[], overrides: Partial<StatusContextController> = {}): StatusContextRequest {
 
   return { controllers: [{ address: ADDRESS, password: "secret", serials, username: "user", ...overrides }] };
-}
-
-// Let the fire-and-forget machinery settle: the observe loops register and drain on the microtask and immediate queues, so two immediates cover a dispatch chain.
-async function settle(): Promise<void> {
-
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 // The device-scoped frames addressed to one serial, in arrival order.
@@ -410,7 +365,7 @@ test("the row policy answers the tamper row all three ways", () => {
   const tamperHub = (rows: Record<string, string>): Record<string, unknown> => bareHub("device1", MAC_ONE, {
 
     capabilities: [ "is_hub", "tamper_proofing" ],
-    configs: configs("device1", rows)
+    configs: configRows({ deviceId: "device1", entries: rows })
   });
 
   const rowsFor = (record: Record<string, unknown>): string[][] => {
@@ -496,7 +451,7 @@ test("the access methods row states what the record's configuration rows say, in
    * catalog rather than from whatever order the record happened to list.
    */
   const record = reader("reader1", MAC_TWO, { capabilities: [ "qr_code", "is_reader", "pin_code", "nfc_card_easy_provision" ],
-    configs: configs("reader1", { "nfc": "yes", "pin_code": "yes", "qr_code": "no" }).reverse() });
+    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "yes", "qr_code": "no" } }).reverse() });
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
 
@@ -534,14 +489,14 @@ test("the access methods row lists only the methods the hardware's capabilities 
   // Every one of these rows says yes, so what the list leaves out is decided by the capabilities alone.
   const enabled = { "bt_button": "yes", "face": "yes", "nfc": "yes", "pin_code": "yes" };
 
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "pin_code" ], configs: configs("reader1", enabled) })),
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "pin_code" ], configs: configRows({ deviceId: "reader1", entries: enabled }) })),
     [[ "methods", "[x] PIN" ]]);
 
   // The array-form capability names a family rather than a flag: either member offers the one Mobile switch, so either member lists it.
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "mobile_unlock_ver2" ], configs: configs("reader1", enabled) })),
-    [[ "methods", "[x] Mobile" ]]);
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "support_mobile_unlock" ], configs: configs("reader1", enabled) })),
-    [[ "methods", "[x] Mobile" ]]);
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "mobile_unlock_ver2" ],
+    configs: configRows({ deviceId: "reader1", entries: enabled }) })), [[ "methods", "[x] Mobile" ]]);
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "support_mobile_unlock" ],
+    configs: configRows({ deviceId: "reader1", entries: enabled }) })), [[ "methods", "[x] Mobile" ]]);
 });
 
 test("the access methods row omits a method the record never mentioned, and no other hardware composes one", () => {
@@ -566,20 +521,20 @@ test("the access methods row omits a method the record never mentioned, and no o
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable }), "reader1"), [[ "methods", "" ]]);
 
   // One row resolving speaks for that method alone - the method the rows still do not mention stays absent rather than reading off.
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable, configs: configs("reader1", { "nfc": "no" }) }), "reader1"),
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable, configs: configRows({ deviceId: "reader1", entries: { "nfc": "no" } }) }), "reader1"),
     [[ "methods", "[ ] NFC" ]]);
 
   // Hardware that reads no credentials composes no methods row at all, whatever its configuration rows happen to carry.
-  assert.deepEqual(rowsFor(bareHub("device1", MAC_ONE, { capabilities: [ "is_hub", "pin_code" ], configs: configs("device1", { "pin_code": "yes" }) }), "device1"),
-    [ [ "lock", "" ], [ "door", "" ] ]);
+  assert.deepEqual(rowsFor(bareHub("device1", MAC_ONE, { capabilities: [ "is_hub", "pin_code" ],
+    configs: configRows({ deviceId: "device1", entries: { "pin_code": "yes" } }) }), "device1"), [ [ "lock", "" ], [ "door", "" ] ]);
 });
 
 test("a hub that is also a reader carries its access methods beneath its door rows", () => {
 
   const store = createStateStore({});
   const hubReader = wiredHub("device1", MAC_ONE, { capabilities: [ "is_hub", "dps_alarm", "is_reader", "pin_code" ],
-    configs: configs("device1", { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "pin_code": "yes", "wiring_state_dps-neg": "on",
-      "wiring_state_dps-pos": "on" }) });
+    configs: configRows({ deviceId: "device1", entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "pin_code": "yes", "wiring_state_dps-neg": "on",
+      "wiring_state_dps-pos": "on" } }) });
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [hubReader], id: "door1" }]) });
 
@@ -641,7 +596,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
 
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The establishment sequence: connecting, the snapshot, and the immediate availability truth frame - and every frame carries the decorated serial, never the
   // colon-bearing MAC the fixture record spells.
@@ -661,7 +616,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   // The live push path: a door-state change through the real store surfaces as a row frame with the changed value alone.
   frames.length = 0;
   store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "locked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const doorFrames = forSerial(frames, SERIAL_ONE);
 
@@ -674,7 +629,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
     { devices: [wiredHub("device1", MAC_ONE, { is_online: false })], id: "door1" },
     { devices: [wiredHub("device2", MAC_TWO)], id: "door2" }
   ]) });
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const flip = forSerial(frames, SERIAL_ONE).filter((frame) => frame.kind === "availability");
 
@@ -688,7 +643,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   // An unrelated door's change wakes nothing: the per-entry selector relies on the reducer's reference stability, so the viewed serial stays silent.
   frames.length = 0;
   store.dispatch(doorEvent("door2", { dps: "open", dps_connected: true, lock: "unlocked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(forSerial(frames, SERIAL_ONE), []);
 });
@@ -708,7 +663,7 @@ test("a row set that grows mid-view is pushed as a fresh snapshot, where a value
   feed.context(contextRequest([SERIAL_ONE]));
 
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The set the view established, which is what every push below is a delta against.
   assert.deepEqual(idValues(frameOf(forSerial(frames, SERIAL_ONE), 1, "snapshot").rows), [ [ "lock", "Locked" ], [ "door", "Closed" ] ]);
@@ -718,7 +673,7 @@ test("a row set that grows mid-view is pushed as a fresh snapshot, where a value
    */
   frames.length = 0;
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE, tamperCapable)], id: "door1" }]) });
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const grown = forSerial(frames, SERIAL_ONE);
 
@@ -731,7 +686,7 @@ test("a row set that grows mid-view is pushed as a fresh snapshot, where a value
    */
   frames.length = 0;
   store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "locked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const moved = forSerial(frames, SERIAL_ONE);
 
@@ -746,7 +701,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [reader("reader1", MAC_ONE, {
 
     capabilities: [ "is_reader", "nfc_card_easy_provision", "pin_code" ],
-    configs: configs("reader1", { "nfc": "yes", "pin_code": "no" })
+    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "no" } })
   })], id: "door1" }]) });
 
   const { client } = makeClient(store);
@@ -756,7 +711,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
   feed.context(contextRequest([SERIAL_ONE]));
 
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The set the view established, which the change below is a delta against.
   assert.deepEqual(idValues(frameOf(forSerial(frames, SERIAL_ONE), 1, "snapshot").rows), [[ "methods", "[x] NFC [ ] PIN" ]]);
@@ -766,7 +721,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
    */
   frames.length = 0;
   store.dispatch(deviceConfigsEvent("reader1", { "nfc": "yes", "pin_code": "yes" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const moved = forSerial(frames, SERIAL_ONE);
 
@@ -778,7 +733,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
    */
   frames.length = 0;
   store.dispatch(deviceConfigsEvent("reader1", { "nfc": "yes", "pin_code": "yes", "tamper_event": "false" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(forSerial(frames, SERIAL_ONE), []);
 });
@@ -811,7 +766,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO + "-PORT1", SERIAL_TWO ]));
 
   await feed.view(SERIAL_TWO + "-PORT1");
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const establishment = forSerial(frames, SERIAL_TWO + "-PORT1");
 
@@ -832,7 +787,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   // The other hub's door moving wakes nothing here: the port view observes its own door and its own record, and neither of them moved.
   frames.length = 0;
   store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "unlocked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(forSerial(frames, SERIAL_TWO + "-PORT1"), [], "an unrelated door's change must leave a port's view silent");
 
@@ -841,7 +796,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   // devices map would hand back instead.
   frames.length = 0;
   await feed.view(SERIAL_TWO);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const parent = forSerial(frames, SERIAL_TWO);
 
@@ -929,12 +884,12 @@ test("a superseded establish emits nothing for its session and releases the clie
   // The establish parks at the gated connect; a view switch supersedes it before its snapshot ever pushes.
   const first = feed.view(SERIAL_ONE);
 
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
   await feed.view("UNKNOWN0001");
 
   gate.resolve(true);
   await first;
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The old session got exactly its connecting frame - everything after the supersession dropped at the emit chokepoint - and the stale establish released the
   // client it made rather than leaking it.
@@ -981,11 +936,11 @@ test("a within-controller switch reuses the client, re-resolves the doors, and s
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
 
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   frames.length = 0;
   await feed.view(SERIAL_TWO);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The client is the reuse - one connect across the switch, nothing released - while the resolution is not: the post-switch snapshot carries the NEW device's
   // door values, which is what proves the reuse branch re-resolved rather than carrying the prior view's doors.
@@ -1000,13 +955,13 @@ test("a within-controller switch reuses the client, re-resolves the doors, and s
   // The old view's loops are retired: a mutation on the OLD device's door emits nothing at all, for either serial.
   frames.length = 0;
   store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "locked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(frames, []);
 
   // The new view's loops are live: the NEW device's door answers with its row frame.
   store.dispatch(doorEvent("door2", { dps: "close", dps_connected: true, lock: "unlocked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const fresh = forSerial(frames, SERIAL_TWO);
 
@@ -1027,13 +982,13 @@ test("a view for a serial the registry dropped releases the standing client and 
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The context rebuild drops the viewed serial - a removal's send does exactly this - and the next view of it finds nothing.
   feed.context(contextRequest([SERIAL_TWO]));
   frames.length = 0;
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const answer = forSerial(frames, SERIAL_ONE);
 
@@ -1085,7 +1040,7 @@ test("every frame carries the decorated serial whatever spelling the boundary re
 
   // ...and the view boundary re-normalizes symmetrically: a colon-bearing view request resolves that entry and emits normally.
   await feed.view(MAC_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const emitted = forSerial(frames, SERIAL_ONE);
 
@@ -1108,7 +1063,7 @@ test("the connection wiring emits only the offline truth on lost and re-pushes s
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // A lost controller makes the device's liveness unknown: exactly one offline availability frame, and no snapshot claiming state knowledge the feed lacks.
   frames.length = 0;
@@ -1165,12 +1120,12 @@ test("a lost connection is never reused: the next view connects fresh and releas
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The standing connection dies; the next view of the same controller must connect fresh rather than reuse the husk.
   first.connection.state = "lost";
   await feed.view(SERIAL_TWO);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.equal(connects, 2);
   assert.equal(first.disposeCount(), 1);
@@ -1197,7 +1152,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
   feed.context(contextRequest([SERIAL_ONE], { controllerSerial: "aa:bb:cc:00:00:99" }));
 
   await feed.view("AABBCC000099");
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const answer = forSerial(frames, "AABBCC000099");
 
@@ -1223,7 +1178,7 @@ test("a throwing door resolution degrades the view to absence and starts no door
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   // The view still pushes its snapshot, with the door and lock rows degraded to the placeholder dash.
   const establishment = forSerial(frames, SERIAL_ONE);
@@ -1234,7 +1189,7 @@ test("a throwing door resolution degrades the view to absence and starts no door
   // No door loop runs for an unresolved view: the viewed device's own door changing emits nothing.
   frames.length = 0;
   store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "unlocked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(forSerial(frames, SERIAL_ONE), []);
 });
@@ -1261,7 +1216,7 @@ test("a UA Gate view drives the shared discovery through the live client and ass
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const answer = forSerial(frames, SERIAL_ONE);
 
@@ -1272,7 +1227,7 @@ test("a UA Gate view drives the shared discovery through the live client and ass
   // Both role loops are live: the side door's change surfaces on the side rows alone.
   frames.length = 0;
   store.dispatch(doorEvent("door2", { dps: "open", dps_connected: true, lock: "locked" }));
-  await settle();
+  await settle(DISPATCH_SETTLE_TURNS);
 
   const sideFrames = forSerial(frames, SERIAL_ONE);
 

@@ -8,8 +8,8 @@
 /* eslint-disable camelcase */
 import { ACCESS_DOORBELL_REASON_CODES, AccessAuthError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
-import type { AccessBootstrapConfig, AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice,
-  AccessStateDoor } from "unifi-access";
+import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
+import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
@@ -19,44 +19,6 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   webhookRegistrationPlan, webhookRegistrations } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-
-// The topology root every fixture below hangs its devices from. An Enterprise hub is recognized as building-hosted by carrying this as its location.
-const ROOT_ID = "root1";
-
-// Build a minimal topology document carrying the given device records. Only the members the reducer and the selectors read are meaningful; the rest satisfies the
-// document's shape.
-function topology(devices: Record<string, unknown>[]): AccessBootstrapConfig {
-
-  return {
-
-    device_groups: [devices],
-    extra_type: "building",
-    extras: {},
-    floors: [],
-    full_name: "Test Building",
-    level: 0,
-    location_type: "building",
-    name: "Test Building",
-    timezone: "UTC",
-    unique_id: ROOT_ID,
-    up_id: "",
-    work_time: "",
-    work_time_id: ""
-  } as unknown as AccessBootstrapConfig;
-}
-
-// A managed hub record, with anything the individual fixture cares about layered over it.
-function hubRecord(overrides: Record<string, unknown>): Record<string, unknown> {
-
-  return { capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee01", name: "Test Hub", unique_id: "device1", ...overrides };
-}
-
-// A managed reader hanging off the hub record above, with anything the individual fixture cares about layered over it.
-function readerRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-
-  return { capabilities: ["is_reader"], connected_uah_id: "device1", device_type: "UA-G2-PRO", is_managed: true, mac: "aabbccddee02", name: "Test Reader",
-    unique_id: "reader1", ...overrides };
-}
 
 /* A record carrying exactly the members every census establishes and nothing else - no configuration rows, no port extensions, no embedded door snapshot, no
  * display model, no address. This is the shape the official API's device inventory projects into, and the fixture every degrade-by-absence arm below reads.
@@ -86,45 +48,7 @@ function coreRecord(overrides: Record<string, unknown> = {}): AccessStateDevice 
 // Drive one refresh through a real store and hand back its resulting state.
 function applyTopology(store: ReturnType<typeof createStateStore>, devices: Record<string, unknown>[]): void {
 
-  store.applyRefreshDocuments({ controller: null, topology: topology(devices) });
-}
-
-/* A topology whose devices serve a door, which is the shape the library's door-state derivation actually reads: it resolves a door's serving hardware from that
- * door's own device group, so hardware hung directly off the building serves no door and seeds nothing about one.
- */
-function doorTopology(doorId: string, devices: Record<string, unknown>[]): AccessBootstrapConfig {
-
-  return {
-
-    device_groups: [[]],
-    extra_type: "building",
-    extras: {},
-    floors: [{
-
-      doors: [{ device_groups: [devices], extras: {}, full_name: "Test Door", level: 2, location_type: "door", name: "Front Door", unique_id: doorId,
-        up_id: "floor1" }],
-      floor_number: 1,
-      level: 1,
-      name: "Test Floor",
-      unique_id: "floor1",
-      up_id: ROOT_ID
-    }],
-    full_name: "Test Building",
-    level: 0,
-    location_type: "building",
-    name: "Test Building",
-    timezone: "UTC",
-    unique_id: ROOT_ID,
-    up_id: "",
-    work_time: "",
-    work_time_id: ""
-  } as unknown as AccessBootstrapConfig;
-}
-
-// The configuration rows a device record carries, in the key/tag/value shape the controller writes them as.
-function configs(entries: Record<string, string>): Record<string, unknown>[] {
-
-  return Object.entries(entries).map(([ key, value ]) => ({ device_id: "device1", key, tag: "input_state", value }));
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(devices) });
 }
 
 /* The plain UA Hub of the capture corpus, carrying the unprefixed wiring and input key forms, with its door position wiring flipped on. The captured record reads
@@ -135,7 +59,8 @@ function plainHubRecord(overrides: Record<string, unknown> = {}): Record<string,
   return hubRecord({
 
     capabilities: [ "is_hub", "dps_alarm" ],
-    configs: configs({ "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on", "wiring_state_dps-pos": "on" }),
+    configs: configRows({ entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on",
+      "wiring_state_dps-pos": "on" } }),
     device_type: "UAH",
     display_model: "UA Hub",
     ...overrides
@@ -440,7 +365,7 @@ test("a wired plain hub answers the position gate from wiring facts, whatever it
 
     const store = createStateStore({});
 
-    store.applyRefreshDocuments({ controller: null, topology: doorTopology("door1", [plainHubRecord({ display_model: displayModel })]) });
+    store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [plainHubRecord({ display_model: displayModel })], id: "door1" }]) });
 
     const entry = selectDoorStates(store.snapshot()).get("door1");
 
@@ -458,10 +383,10 @@ test("a wired plain hub answers the position gate from wiring facts, whatever it
 test("a plain hub whose position wiring reads off answers the gate false through a positive unwired report", () => {
 
   const store = createStateStore({});
-  const record = plainHubRecord({ configs: configs({ "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "off",
-    "wiring_state_dps-pos": "off" }) });
+  const record = plainHubRecord({ configs: configRows({ entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off",
+    "wiring_state_dps-neg": "off", "wiring_state_dps-pos": "off" } }) });
 
-  store.applyRefreshDocuments({ controller: null, topology: doorTopology("door1", [record]) });
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
 
   const entry = selectDoorStates(store.snapshot()).get("door1");
 
@@ -474,9 +399,10 @@ test("hardware that establishes no position at all answers the gate false", () =
 
   const store = createStateStore({});
   // The Ultra carries the single-door key forms and no wiring pair whatsoever, so what its record establishes about the door is the lock and nothing else.
-  const record = hubRecord({ configs: configs({ "input_d1_dps": "on", "output_d1_lock_relay": "off" }), device_type: "UA-ULTRA", display_model: "UA Ultra" });
+  const record = hubRecord({ configs: configRows({ entries: { "input_d1_dps": "on", "output_d1_lock_relay": "off" } }), device_type: "UA-ULTRA",
+    display_model: "UA Ultra" });
 
-  store.applyRefreshDocuments({ controller: null, topology: doorTopology("door1", [record]) });
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
 
   const entry = selectDoorStates(store.snapshot()).get("door1");
 
@@ -497,12 +423,13 @@ test("a Door Mini's position flows from its topology seed and is corrected by a 
   const record = hubRecord({
 
     capabilities: [ "is_hub", "dps_trigger_level" ],
-    configs: configs({ "input_d1_dps": "on", "output_d1_lock_relay": "off", "wiring_state_d1-dps-neg": "on", "wiring_state_d1-dps-pos": "on" }),
+    configs: configRows({ entries: { "input_d1_dps": "on", "output_d1_lock_relay": "off", "wiring_state_d1-dps-neg": "on",
+      "wiring_state_d1-dps-pos": "on" } }),
     device_type: "UA-Hub-Door-Mini",
     display_model: "UA Hub Door Mini"
   });
 
-  store.applyRefreshDocuments({ controller: null, topology: doorTopology("door1", [record]) });
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
   assert.equal(selectDoorStates(store.snapshot()).get("door1")?.dps, "close", "the topology seed must establish the door before any notification arrives");
 
   // The captured location-update shape. Its envelope identifier is a per-notification value, so the door it speaks for is named in the metadata instead.
@@ -597,7 +524,7 @@ test("lockCommandRule maps every configured interval onto the verb that expresse
 test("tamperState reports what the record states and stays silent when it states nothing", () => {
 
   // The captured shape: the condition is carried by an ordinary configuration row, which is what lets it reach us on the same delivery as every other record change.
-  const withTamper = (value: string): AccessStateDevice => hubRecord({ configs: configs({ "tamper_event": value }) }) as unknown as AccessStateDevice;
+  const withTamper = (value: string): AccessStateDevice => hubRecord({ configs: configRows({ entries: { "tamper_event": value } }) });
 
   assert.equal(tamperState(withTamper("true")), true);
   assert.equal(tamperState(withTamper("false")), false);
@@ -605,7 +532,7 @@ test("tamperState reports what the record states and stays silent when it states
   /* A record with no tamper row has said nothing, which has to stay distinct from its having said there is no tampering: collapsing the two would turn a first-ever
    * observation into a transition and announce a change nobody saw.
    */
-  assert.equal(tamperState(hubRecord({ configs: [] }) as unknown as AccessStateDevice), undefined);
+  assert.equal(tamperState(hubRecord({ configs: [] })), undefined);
 });
 
 test("composeConnectIdentity accepts every whole identity and names every missing half", () => {
@@ -730,14 +657,15 @@ test("doorbellReaderId resolves a hub to the reader carrying its call surface an
   const store = createStateStore({});
 
   // The rig's own topology: a ringable reader and a plain one hanging off the same hub. Only the one carrying the ring rail's capability may answer.
-  applyTopology(store, [ hubRecord({ connected_uah_id: "" }), readerRecord({ capabilities: [ "is_reader", "remote_view", "remote_call" ] }),
-    readerRecord({ mac: "aabbccddee03", unique_id: "reader2" }) ]);
+  applyTopology(store, [ hubRecord({ connected_uah_id: "" }),
+    readerRecord({ capabilities: [ "is_reader", "remote_view", "remote_call" ], connected_uah_id: "device1" }),
+    readerRecord({ connected_uah_id: "device1", mac: "aabbccddee03", unique_id: "reader2" }) ]);
 
   assert.equal(doorbellReaderId({ devices: store.snapshot().devices.values(), hubId: "device1" }), "reader1");
 
   // A hub whose only linked reader carries no ring capability has nothing to ring, and saying so is what keeps the resolution from handing back a reader the
   // controller would refuse.
-  applyTopology(store, [ hubRecord({ connected_uah_id: "" }), readerRecord() ]);
+  applyTopology(store, [ hubRecord({ connected_uah_id: "" }), readerRecord({ connected_uah_id: "device1" }) ]);
 
   assert.equal(doorbellReaderId({ devices: store.snapshot().devices.values(), hubId: "device1" }), null);
 
@@ -750,8 +678,8 @@ test("doorbellReaderId resolves a hub to the reader carrying its call surface an
   assert.equal(doorbellReaderId({ devices: [], hubId: "device1" }), null);
 
   // Two ringable readers on one hub is hardware nobody has observed; the resolution still answers the same id every time, taking the first the topology offers.
-  applyTopology(store, [ hubRecord({ connected_uah_id: "" }), readerRecord({ capabilities: [ "is_reader", "remote_view" ] }),
-    readerRecord({ capabilities: [ "is_reader", "remote_view" ], mac: "aabbccddee03", unique_id: "reader2" }) ]);
+  applyTopology(store, [ hubRecord({ connected_uah_id: "" }), readerRecord({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: "device1" }),
+    readerRecord({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: "device1", mac: "aabbccddee03", unique_id: "reader2" }) ]);
 
   assert.equal(doorbellReaderId({ devices: store.snapshot().devices.values(), hubId: "device1" }), "reader1");
 });
@@ -885,8 +813,8 @@ test("dpsSensorEligible answers each hardware family from its own evidence", () 
   const withoutDps = { location_id: "door1" } as AccessDoorStateEntry;
 
   // The UA Gate refuses regardless of the entry - two contrasting entries are what prove the regardless-of-entry claim.
-  assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }) as unknown as AccessStateDevice, entry: withDps }), false);
-  assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }) as unknown as AccessStateDevice, entry: withoutDps }), false);
+  assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }), entry: withDps }), false);
+  assert.equal(dpsSensorEligible({ device: hubRecord({ device_type: "UGT" }), entry: withoutDps }), false);
 
   // The Ultra answers from its input multiplex in both directions, never from the entry: a request-to-exit input refuses even beside dps evidence, and a
   // door-position input accepts even before the entry establishes anything.
@@ -895,14 +823,14 @@ test("dpsSensorEligible answers each hardware family from its own evidence", () 
     device_type: "UA-ULTRA",
     extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
       target_name: "port1" }]
-  }) as unknown as AccessStateDevice;
+  });
 
   assert.equal(dpsSensorEligible({ device: ultra("rex"), entry: withDps }), false);
   assert.equal(dpsSensorEligible({ device: ultra("dps"), entry: withoutDps }), true);
 
   // Every other family answers from the door-state model through hasDpsEvidence: established position accepts, a positive unwired report refuses, and an absent
   // entry refuses.
-  const plainHub = hubRecord({}) as unknown as AccessStateDevice;
+  const plainHub = hubRecord({});
 
   assert.equal(dpsSensorEligible({ device: plainHub, entry: withDps }), true);
   assert.equal(dpsSensorEligible({ device: plainHub, entry: { dps: "none", location_id: "door1" } }), false);
@@ -1049,7 +977,7 @@ test("a UA Ultra record carrying no extensions answers position eligibility from
     device_type: "UA-ULTRA",
     extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
       target_name: "port1" }]
-  }) as unknown as AccessStateDevice;
+  });
 
   const projected = coreRecord({ device_type: "UA-ULTRA" });
 
