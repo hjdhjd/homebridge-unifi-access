@@ -67,6 +67,19 @@ type SensorInput = typeof terminalInputs[number]["input"];
 // The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
 const DPS_LABEL = "Door Position Sensor";
 
+// The HomeKit-facing name of the side door position sensor, beside the main door's for the same reason.
+const SIDE_DOOR_DPS_LABEL = "Side Door Position Sensor";
+
+/* Which pass a sensor configure path is running as. At adoption, the sensors the accessory arrived carrying - restored from Homebridge's accessory cache with the
+ * values they last held and none of their handlers - have been dressed by nobody, so every sensor the pass acquires is dressed. On every later pass, the re-gate a
+ * device update or a door-state delivery runs, those sensors were dressed at adoption, so only a sensor the pass creates is. The pass states the one fact the
+ * library cannot know: its creation callback tells a created sensor from a found one, and only the caller knows whether a found sensor was dressed already.
+ */
+interface SensorPass {
+
+  readonly initialized: boolean;
+}
+
 // An input label as a sentence opens it: the first word's capital kept and the rest lowered. This is what lets one spelling in the table above serve a service name,
 // a mid-sentence mention, and a sentence-leading one.
 function sentenceCase(label: string): string {
@@ -391,9 +404,10 @@ export class AccessHub extends AccessDevice {
     this.configureAccessMethodSwitches();
 
     // Configure the sensors connected to terminal inputs. This must be done before configuring the lock so that the DPS contact sensor exists when configuring a
-    // GarageDoorOpener service, which derives its state from the DPS sensor.
-    this.configureTerminalInputs();
-    this.configureSideDoorTerminalInputs();
+    // GarageDoorOpener service, which derives its state from the DPS sensor. This is adoption, so nothing has dressed anything yet and every sensor these two
+    // acquire is dressed from what we hold.
+    this.configureTerminalInputs({ initialized: false });
+    this.configureSideDoorTerminalInputs({ initialized: false });
 
     // Configure the lock, if we're a hub device.
     this.configureLock();
@@ -926,11 +940,12 @@ export class AccessHub extends AccessDevice {
    * created on positive evidence and one already present survives a window in which the hardware reports none. Turning the option off always removes it.
    *
    * Re-running this is how a wiring change reaches HomeKit mid-run, so it is written to be silent on repeat: validService speaks only when a present service is
-   * being removed, acquireService's callback only when one is created, and the initial writes below re-state the current reading rather than a fresh one.
+   * being removed, the acquire helper only when one is created, and a sensor is dressed only the first time this hub holds it - at adoption, or at its creation on
+   * a later pass.
    */
-  private configureTerminalInputs(): boolean {
+  private configureTerminalInputs({ initialized }: SensorPass): boolean {
 
-    this.configureDpsSensor();
+    this.configureDpsSensor({ initialized });
 
     for(const { input, label } of terminalInputs) {
 
@@ -953,50 +968,58 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
-      // Acquire the service.
-      const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, reservedId,
-        () => { this.log.info("Enabling the " + label.toLowerCase() + "."); });
-
-      if(!service) {
-
-        this.log.error("Unable to add the " + label.toLowerCase() + ".");
-
-        continue;
-      }
-
-      // Initialize the sensor state.
-      service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this.terminalInputState(input));
-      this.dressAvailability(service);
-      this.dressTamperState(service);
+      // Acquire the sensor, dressed with the input's own reading the first time this hub holds it.
+      this.#acquireSensor({ initialized, label, reading: this.terminalInputState(input), subtype: reservedId });
     }
 
     return true;
   }
 
-  /* Dress a sensor service we have just acquired with its availability, in the two halves HomeKit needs from us.
+  /* Acquire a contact sensor under its reserved subtype and dress it the first time this hub holds it. The library's callback tells a created sensor from one
+   * found on the accessory, and the pass tells whether a found sensor is one an earlier pass dressed: restored from the accessory cache, it carries the values it
+   * last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting values; every
+   * change after it reaches the sensor through the sweeps alone.
    *
-   * The write is what puts the optional characteristic on the service at all: HomeKit carries one only once something has written it, so without this the sweep that
-   * keeps availability current would find no service to write to. The handler is what makes a read honest, answering from the live composition so HomeKit sees where
-   * the device stands even when nothing has pushed since the composition last moved.
+   * @param options - The pass this acquire runs as, the sensor's label, the reading it is dressed with, and the reserved subtype it is acquired under.
    *
-   * A repeat configure pass registers the handler over the one the characteristic already holds, which is the same registration idiom the access method switches use.
+   * @returns Whether the sensor stands on the accessory. HomeKit refusing to add one is logged here, so the configure paths have nothing to say about it.
    */
-  private dressAvailability(service: Service): void {
+  #acquireSensor({ initialized, label, reading, subtype }: SensorPass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): boolean {
 
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
-    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
+    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, subtype, () => {
+
+      // A sensor created on this pass was dressed by nobody, whichever pass this is.
+      initialized = false;
+      this.log.info("Enabling the " + label.toLowerCase() + ".");
+    });
+
+    if(!service) {
+
+      this.log.error("Unable to add the " + label.toLowerCase() + ".");
+
+      return false;
+    }
+
+    if(!initialized) {
+
+      this.#dressSensor(service, reading);
+    }
+
+    return true;
   }
 
-  /* Dress a sensor service with the tamper characteristic, which is what puts the characteristic on the service at all: HomeKit carries an optional characteristic
-   * only once something has written it. Every configure path calls this for the sensor it acquired, so on tamper-capable hardware every contact sensor carries the
-   * characteristic from its creation - which is what lets the update handler's sweep reach all of them without keeping a roster - and reads normal until a verdict
-   * says otherwise. Nothing established renders normal here: HomeKit has no third value, a status restored from the accessory cache with no reading behind it is
-   * not one this plugin can assert, and the distinction between nothing said and no tampering lives in the held verdict and the status panel instead.
-   *
-   * It states the tracked verdict and never the record, so the per-update re-runs of the blocks that call it cannot move the baseline a genuine change is measured
-   * against. Announcing a change is the update handler's job alone.
+  /* Dress a sensor the first time this hub holds it: its reading, its availability, and its tamper status. HomeKit carries an optional characteristic only once
+   * something has written it, so the availability and tamper writes are what put those characteristics on the sensor at all, which is what lets the two sweeps
+   * reach every sensor without the hub keeping a roster. The availability handler answers every later read from the live composition, so HomeKit sees where the
+   * device stands even when nothing has pushed since the composition last moved. The tamper status states the tracked verdict and never the record, so a dressing
+   * can never move the baseline a genuine change is measured against; nothing established renders normal, because HomeKit has no third value and a status restored
+   * from the accessory cache with no reading behind it is not one this plugin can assert.
    */
-  private dressTamperState(service: Service): void {
+  #dressSensor(service: Service, reading: CharacteristicValue): void {
+
+    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, reading);
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
 
     if(!isTamperCapable(this.uda)) {
 
@@ -1014,7 +1037,7 @@ export class AccessHub extends AccessDevice {
    * The door-state delivery calls this too, so a change in wiring evidence re-gates the sensor on that rail as well rather than waiting for a device update. Like
    * the loop above, it is a no-op on repeat by construction.
    */
-  private configureDpsSensor(): boolean {
+  private configureDpsSensor({ initialized }: SensorPass): boolean {
 
     /* A UA Gate offers the sensor on the strength of the hardware being a gate, exactly as it always has: that hardware drives two doors, and the library derives
      * no topology facts for a device it cannot tell the doors of apart, so there is no evidence here to gate on and its own handlers own the state behind it.
@@ -1039,27 +1062,12 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
-    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + DPS_LABEL, AccessReservedNames.CONTACT_DPS,
-      () => { this.log.info("Enabling the " + DPS_LABEL.toLowerCase() + "."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the " + DPS_LABEL.toLowerCase() + ".");
-
-      return false;
-    }
-
-    // Initialize the sensor state from the projection the delivery path maintains, so a repeat call writes the reading we already hold rather than a fresh one.
-    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkDpsState);
-    this.dressAvailability(service);
-    this.dressTamperState(service);
-
-    return true;
+    // The reading is the projection the delivery path maintains, so a dressing writes what we already hold rather than a fresh read of the record.
+    return this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, subtype: AccessReservedNames.CONTACT_DPS });
   }
 
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
-  private configureSideDoorTerminalInputs(): boolean {
+  private configureSideDoorTerminalInputs({ initialized }: SensorPass): boolean {
 
     // We only configure side door terminal inputs for UA Gate hubs that have the side door enabled.
     if(!this.hints.hasSideDoor) {
@@ -1072,7 +1080,7 @@ export class AccessHub extends AccessDevice {
 
       if(!this.hints.hasWiringSideDoorDps && hasService) {
 
-        this.log.info("Disabling the side door position sensor.");
+        this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
       }
 
       return this.hints.hasWiringSideDoorDps;
@@ -1081,23 +1089,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
-    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " Side Door Position Sensor",
-      AccessReservedNames.CONTACT_DPS_SIDE, () => { this.log.info("Enabling the side door position sensor."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the side door position sensor.");
-
-      return false;
-    }
-
-    // Initialize the sensor state from the current side door DPS state.
-    service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, this._hkSideDoorDpsState);
-    this.dressAvailability(service);
-    this.dressTamperState(service);
-
-    return true;
+    // The reading is the projection the side door's delivery maintains, for the same reason the main door's is.
+    return this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, subtype: AccessReservedNames.CONTACT_DPS_SIDE });
   }
 
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
@@ -1793,7 +1786,7 @@ export class AccessHub extends AccessDevice {
        */
       if(!door.isSideDoor) {
 
-        this.configureDpsSensor();
+        this.configureDpsSensor({ initialized: true });
       }
 
       this.applyDoorState(entry, door.isSideDoor);
@@ -2759,9 +2752,9 @@ export class AccessHub extends AccessDevice {
 
     /* Re-derive every input's eligibility from the evidence this update brought with it. Running it unconditionally is what lets a wiring change or a multiplex flip
      * re-gate its services mid-run on any hub family rather than only on the one that happened to be checked for it, and the call is cheap and silent on repeat by
-     * construction.
+     * construction. The pass dresses a sensor it creates and nothing else, because every sensor already standing was dressed at adoption.
      */
-    this.configureTerminalInputs();
+    this.configureTerminalInputs({ initialized: true });
   }
 
   /* Project tampering. The condition lives on this rail alone: the configure path adopts a baseline and dresses the sensors from it, and every change after that

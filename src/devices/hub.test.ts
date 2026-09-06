@@ -83,6 +83,18 @@ function testHub(overrides: Record<string, unknown> = {}): AccessStateDevice & {
   });
 }
 
+/* A service a previous run left on the accessory, named the way the hub names its own so an acquire finds it under its subtype rather than creating a second.
+ *
+ * @param serviceType - The HAP service class to carry.
+ * @param subtype     - The reserved subtype the hub will look it up under.
+ *
+ * @returns The service, bare: an arm writes onto it whatever cached values it wants the hub to find.
+ */
+function carried<T extends Service>(serviceType: new (displayName?: string, subtype?: string) => T, subtype: string): T {
+
+  return new serviceType("Test Hub " + subtype, subtype);
+}
+
 /* A HomeKit accessory over real HAP services: the lookups the plugin performs, backed by a plain list. The services are the genuine classes, so what the shared
  * service helpers do to them here is what they do in the field.
  */
@@ -163,8 +175,10 @@ interface HubOptions {
    */
   doorStates?: Map<string, AccessDoorStateEntry>;
   doors?: { name: string; unique_id: string }[];
-  // The switch subtypes the accessory already carries when the hub is stood up, standing in for what a previous run left on it.
-  existing?: string[];
+  /* The services the accessory already carries when the hub is stood up, standing in for what a previous run left on it: a restored service carries the values it
+   * last held and none of its handlers, exactly as Homebridge's accessory cache hands one back.
+   */
+  existing?: Service[];
   // A hub stood up with no door control surface at all, which is the state the base class admits through its optional handle.
   hubless?: boolean;
   official?: boolean;
@@ -277,7 +291,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const projection = { config: record, observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ }, peek: (): undefined => undefined };
 
   const doors = new Map((options.doors ?? []).map(door => [ door.unique_id, door ]));
-  const services: Service[] = (options.existing ?? []).map(subtype => new Service.Switch("Test Hub " + subtype, subtype));
+  const services: Service[] = [...(options.existing ?? [])];
 
   /* The official device surface, held only by a client an arm gave one to. The settings read is what seeds a reader whose record carries no configuration rows, the
    * settings write is what an access method switch dispatches, and the doorbell dispatch is what the trigger switch's manual direction sends, so each of them is
@@ -953,7 +967,7 @@ test("a settings read the controller refused keeps every switch the accessory ca
 
   const harness = makeReader({
 
-    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC)],
     official: true,
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => { throw new Error("the controller is not answering"); }
@@ -976,7 +990,7 @@ test("a rowless record on a client with no official surface keeps what it has an
 
   const harness = makeReader({
 
-    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC)],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined })
   });
 
@@ -1010,7 +1024,7 @@ test("a seeded device retires the switch of a method that has left the reader, i
   // The credential identity: the record's rows seed the model synchronously, so the sweep runs in the very pass that configures the device.
   const credential = makeReader({
 
-    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC)],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
   });
@@ -1021,7 +1035,7 @@ test("a seeded device retires the switch of a method that has left the reader, i
   // The token identity: the same sweep, reached through the settings read instead of the rows, which is what makes retirement reach a rowless record at all.
   const token = makeReader({
 
-    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC)],
     official: true,
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } })
@@ -2712,7 +2726,7 @@ test("a reader with no access method selected creates no switch and retires one 
 
   const harness = makeHub({
 
-    existing: [AccessReservedNames.SWITCH_ACCESSMETHOD_NFC],
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC)],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
   });
@@ -3090,7 +3104,8 @@ test("a tamper-capable hub carries a raise to the characteristic, the warning, a
 
   refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
 
-  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED, "the raise reaches the characteristic");
+  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+    "the raise reaches the characteristic through the sweep alone, which an implementation writing nothing would fail by leaving it normal");
   assert.equal(warnCount(harness, "Tampering detected."), 1, "and is warned exactly once");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
 
@@ -3101,6 +3116,21 @@ test("a tamper-capable hub carries a raise to the characteristic, the warning, a
     "a restated raise leaves the characteristic where it stands");
   assert.equal(warnCount(harness, "Tampering detected."), 1, "warns no second time");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and publishes no second payload");
+});
+
+test("a delivery that changes nothing writes nothing to a sensor the hub already holds, and a change reaches it through one write", () => {
+
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "false" }) });
+  const writes = recordWrites(contactSensor(harness, AccessReservedNames.CONTACT_REX));
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "false" }));
+
+  assert.deepEqual(writes, [], "a restated record is not a change, so a sensor the hub already holds is written nowhere");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.deepEqual(writes, [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }],
+    "and a raise reaches it through the sweep's one write, which a configure path that re-dressed every sensor on each delivery would fail by writing three more");
 });
 
 test("a tamper-capable hub carries a clear to the characteristic, the note, and the topic exactly once, and carries a restated clear nowhere", () => {
@@ -3200,22 +3230,35 @@ test("a sensor of tamper-capable hardware carries the characteristic from creati
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic carries every change of the held verdict, an adoption included");
 });
 
-test("a carried tamper status with nothing established behind it reads normal at its next dressing", () => {
+test("a sensor the accessory arrived carrying is dressed at adoption from what the hub holds, and answers availability live from then on", async () => {
 
-  const harness = makeHub({ record: tamperUltra({}) });
-  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+  const restored = carried(Service.ContactSensor, AccessReservedNames.CONTACT_REX);
 
-  /* A status restored from the accessory cache with no reading behind it, written here through getCharacteristic for exactly the side effect the presence reads
-   * elsewhere avoid: this is the one arm that wants a value standing on a characteristic nothing projected.
+  /* What a previous run left in the accessory cache: a reading, a raised tamper status, and an availability, every one of them stale. The record below reads open
+   * and establishes no tamper reading, so a carried sensor written closed and raised is what tells a dressing that ran from one that skipped the sensor it found.
    */
-  sensor.getCharacteristic(Characteristic.StatusTampered).updateValue(Characteristic.StatusTampered.TAMPERED);
+  restored.updateCharacteristic(Characteristic.ContactSensorState, Characteristic.ContactSensorState.CONTACT_DETECTED);
+  restored.updateCharacteristic(Characteristic.StatusTampered, Characteristic.StatusTampered.TAMPERED);
+  restored.updateCharacteristic(Characteristic.StatusActive, false);
 
-  refreshRecord(harness, tamperRows({}));
+  const harness = makeHub({ existing: [restored], record: tamperUltra({}) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
+  const carriers = harness.services.filter(service => (service.UUID === Service.ContactSensor.UUID) && (service.subtype === AccessReservedNames.CONTACT_REX));
 
+  assert.equal(sensor, restored, "the hub acquires the sensor the accessory arrived carrying");
+  assert.equal(carriers.length, 1, "and carries exactly one under that subtype rather than creating a second beside it");
+  assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+    "the reading the record carries replaces the stale one");
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
-    "nothing established renders normal, which an implementation leaving an unestablished carrier alone would fail by reading raised");
-  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 0, "and nothing is said, because no reading was withdrawn");
-  assert.deepEqual(topicPayloads(harness, "tamper"), [], "and nothing is published, because the held verdict did not move");
+    "nothing established renders normal, which a dressing that skipped the sensor it found would fail by leaving it raised");
+  assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), true,
+    "the handler is registered on a sensor the hub never created, which a creation-only dressing would fail by answering the cached false");
+
+  harness.health.isHealthy = false;
+
+  assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), false,
+    "and it answers where the device stands now rather than what was last written to it");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
 });
 
 test("a hub constructed while the tampering alert is off reads normal, and the alert returning is published and not announced", () => {
@@ -3267,31 +3310,6 @@ test("a sensor the re-gate creates on the delivery that changes the verdict read
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "and reads the verdict this delivery established, which a sensor dressed from the verdict held before it and never swept would fail");
   assert.equal(warnCount(harness, "Tampering detected."), 1, "the raise is warned exactly once");
-  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
-});
-
-test("a contact sensor only the sweep reaches follows a raise to the characteristic, the warning, and the topic", () => {
-
-  /* The side door position sensor is configured once and never re-dressed by the re-gate, which makes it the one contact sensor that tells a working sweep from
-   * none: every other sensor here is re-dressed from the updated verdict on the same delivery, so an implementation that wrote nothing would still read right.
-   * The capability pair on a Gate is a fixture for the mechanism and no claim about what this hardware detects.
-   */
-  const harness = makeGate({ record: testHub({ capabilities: [ "is_hub", "tamper_proofing" ], configs: tamperRows({ "tamper_event": "false" }),
-    device_type: "UGT" }) });
-
-  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE), "the side door features default on, so the Gate carries its side position sensor");
-
-  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE);
-
-  assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "which carries the tamper characteristic from its creation like every other contact sensor");
-  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
-    "reading normal from the quiet verdict the record arrived with");
-
-  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
-
-  assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
-    "the raise reaches it through the sweep alone, which an implementation writing nothing would fail by leaving it normal");
-  assert.equal(warnCount(harness, "Tampering detected."), 1, "and the raise is warned exactly once");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
 });
 
