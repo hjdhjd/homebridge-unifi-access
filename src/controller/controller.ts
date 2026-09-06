@@ -2,7 +2,7 @@
  *
  * controller.ts: Access controller device class for UniFi Access.
  */
-import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerOwnershipKeys, DecoratedSerial,
   MembershipClaims } from "../policy.ts";
@@ -1015,9 +1015,7 @@ export class AccessController {
       this.log.info("%s: Adding %s to HomeKit.", this.getDeviceName(device), this.resolveDeviceModel(device));
 
       // Register this accessory with homebridge and add it to the accessory array so we can track it.
-      this.platform.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      this.platform.accessories.push(accessory);
-      this.platform.api.updatePlatformAccessories(this.platform.accessories);
+      this.platform.registerAccessory(accessory);
     }
 
     // Setup the accessory as a new Access device in HBUA if we haven't configured it yet. A device we already track needs nothing here: its updates arrive through

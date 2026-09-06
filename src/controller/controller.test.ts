@@ -245,6 +245,14 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
     log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
       warn: (): void => undefined },
+
+    // The platform's one entry an accessory arrives in HomeKit through, standing in for the real one so an adoption reaches the same api calls and the same list.
+    registerAccessory: (accessory: AccessAccessory): void => {
+
+      api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      accessories.push(accessory);
+      api.updatePlatformAccessories();
+    },
     signal: shutdown.signal,
 
     // The platform's one exit an accessory leaves HomeKit through, standing in for the real one so a retirement reaches the same api calls and the same list.
@@ -1492,6 +1500,8 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
       info: (message: string, ...parameters: unknown[]): void => void lines.push("info: " + format(message, ...parameters)),
       warn: (message: string, ...parameters: unknown[]): void => void lines.push("warn: " + format(message, ...parameters))
     },
+    // The webhook arms adopt nothing, but the entry is stated all the same so no double answers a shape the real platform does not have.
+    registerAccessory: (): void => undefined,
     signal: shutdown.signal,
     webhookListener: (): AccessWebhookListener => {
 

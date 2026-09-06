@@ -22,6 +22,10 @@ interface Harness {
   make: (config: AccessPlatformConfig) => AccessPlatform;
   registered: string[];
   unregistered: string[];
+  /* How many accessories each cache refresh was handed, in the order the refreshes happened. The count rather than the list, because what an arm reads here is
+   * whether the refresh saw the list as it stood after the mutation beside it - a position the list itself, read later, could never answer.
+   */
+  updated: number[];
 }
 
 function makeHarness(): Harness {
@@ -34,6 +38,7 @@ function makeHarness(): Harness {
   const lines: string[] = [];
   const registered: string[] = [];
   const unregistered: string[] = [];
+  const updated: number[] = [];
 
   // Every line rendered exactly as the user reads it, which is what lets an arm assert a removal's own sentence rather than the format string behind it.
   const log = {
@@ -66,11 +71,11 @@ function makeHarness(): Harness {
         unregistered.push(target.UUID);
       }
     },
-    updatePlatformAccessories: (): void => undefined
+    updatePlatformAccessories: (targets: AccessAccessory[]): void => void updated.push(targets.length)
   };
 
   return { events, handlers, lines, make: (config: AccessPlatformConfig): AccessPlatform => new AccessPlatform(log as unknown as Logging, config,
-    api as unknown as API), registered, unregistered };
+    api as unknown as API), registered, unregistered, updated };
 }
 
 /* The platform's own plumbing as the arms below drive it: the controllers it constructed, the launch that starts them, and the reclaim that consumes their
@@ -193,6 +198,35 @@ test("an accessory the platform is not carrying leaves its one exit untouched, w
 
   assert.deepEqual(harness.unregistered, ["uuid-carried"], "a repeated removal is announced to HomeKit once");
   assert.deepEqual(platform.accessories, [], "and takes nothing else with it");
+});
+
+test("an accessory entering HomeKit is registered, appended, and saved with the list it was appended to, in that order", () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+
+  const first = cachedAccessory("uuid-first", "First", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:01" });
+  const second = cachedAccessory("uuid-second", "Second", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:02" });
+
+  platform.registerAccessory(first);
+
+  assert.deepEqual(harness.registered, ["uuid-first"], "the accessory is announced to HomeKit");
+  assert.deepEqual(platform.accessories, [first], "and joins the list we track it by");
+
+  /* The refresh was handed a list of one, which is what says it ran after the push rather than before it. A cache saved ahead of the append would have been handed
+   * an empty list here and would leave the new accessory out of what Homebridge writes down.
+   */
+  assert.deepEqual(harness.updated, [1], "the cache refresh sees the list the push has already grown");
+
+  platform.registerAccessory(second);
+
+  assert.deepEqual(harness.registered, [ "uuid-first", "uuid-second" ]);
+  assert.deepEqual(platform.accessories, [ first, second ]);
+  assert.deepEqual(harness.updated, [ 1, 2 ], "and each registration refreshes once, against the list as it stands");
+
+  // The negative control: an accessory registered once appears once, so nothing here announces or appends twice.
+  assert.equal(harness.registered.filter(uuid => uuid === "uuid-first").length, 1);
+  assert.equal(platform.accessories.filter(accessory => accessory === first).length, 1);
 });
 
 test("a skipped controller entry fences the reclaim off", async () => {

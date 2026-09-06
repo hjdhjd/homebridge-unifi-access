@@ -128,6 +128,27 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   }
 
   /**
+   * Add an accessory to HomeKit and to our own list of them: the one entry a newly minted accessory arrives through at this layer, and the mirror of the exit
+   * below.
+   *
+   * This is the list-and-HomeKit mechanics and nothing else. The caller owns the policy of when, and the one that has any is the controller's adoption path, which
+   * mints the accessory and names it before handing it here. An accessory Homebridge restores from its own cache takes the other road into the list, through
+   * `configureAccessory()` above - that is Homebridge telling us about an accessory that already exists rather than us creating one, so it registers nothing.
+   *
+   * The cache refresh follows the push, so what Homebridge is handed to save is the list that already carries the new accessory.
+   *
+   * @param accessory - The accessory to add.
+   */
+  public registerAccessory(accessory: AccessAccessory): void {
+
+    this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    this.accessories.push(accessory);
+
+    // Tell Homebridge to save the updated list of accessories.
+    this.api.updatePlatformAccessories(this.accessories);
+  }
+
+  /**
    * Remove an accessory from HomeKit and from our own list of them: the one exit an accessory leaves through at this layer.
    *
    * This is the list-and-HomeKit mechanics and nothing else. An owner holding live state for the accessory - a configured device instance with its services, its
