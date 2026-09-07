@@ -1,7 +1,7 @@
 {
   "pluginAlias": "UniFi Access",
   "pluginType": "platform",
-  "headerDisplay": "Full HomeKit support UniFi Access devices. See the [homebridge-unifi-access](https://github.com/hjdhjd/homebridge-unifi-access) developer page for detailed documentation.",
+  "headerDisplay": "Full HomeKit support for UniFi Access devices. See the [homebridge-unifi-access](https://github.com/hjdhjd/homebridge-unifi-access) developer page for detailed documentation.",
   "footerDisplay": "See the [homebridge-unifi-access developer page](https://github.com/hjdhjd/homebridge-unifi-access) for detailed documentation, including [Feature Options](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md) and [MQTT](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/MQTT.md).",
   "singular": true,
   "customUi": true,
