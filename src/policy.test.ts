@@ -15,8 +15,8 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
   isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
-  recordByMac, resolveDoorService, serialForm, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl,
-  webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
+  recordByMac, resolveDoorService, resolveWebhookPort, serialForm, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
+  webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1061,6 +1061,34 @@ function unlockDelivery(overrides: { actor?: Record<string, string> | null; obje
     event_object_id: "86a9fa88-e1cd-4363-b2ba-8a867ef754b5"
   } as unknown as Parameters<typeof unlockAttribution>[0];
 }
+
+test("the webhook port setting resolves to the port as written, the default when absent or off, and the default with the rejected value otherwise", () => {
+
+  // A setting nobody stated: absent, turned off, or configured as nothing at all. Each is the default, said silently, because nothing was said.
+  for(const value of [ undefined, null, "", "  " ]) {
+
+    assert.deepEqual(resolveWebhookPort(value), { port: 10120, source: "default" }, "a setting of " + JSON.stringify(value) + " states no port");
+  }
+
+  /* Every whole number from 0 to 65535 as written, surrounding whitespace included. 0 is the ephemeral port a suite binds by, and 65535 is the last port there
+   * is, so both bounds are stated rather than assumed to be inside. "00080" is five digits, which the length cap admits and parseInt reads as 80 - the documented
+   * reading of a padded port, and the row that puts the cap's own limit next to it.
+   */
+  for(const [ value, port ] of [ [ "0", 0 ], [ "10120", 10120 ], [ "65535", 65535 ], [ " 10130 ", 10130 ], [ "00080", 80 ] ] as [string, number][]) {
+
+    assert.deepEqual(resolveWebhookPort(value), { port, source: "configured" }, "a setting of " + JSON.stringify(value) + " is that port");
+  }
+
+  /* Everything else present: over the bound, signed, fractional, trailing rubbish, not a number at all, and the spellings a looser numeric parse would take.
+   * "1e3" and "+80" are what a bare Number() would read as 1000 and 80, and the digits-only rule is what refuses them. "000080" is six digits: over the length
+   * cap however small the number it spells, which is the one row that tells the cap apart from the numeric bound.
+   */
+  for(const value of [ "65536", "-1", "1.5", "10120x", "abc", "1e3", "+80", "000080" ]) {
+
+    assert.deepEqual(resolveWebhookPort(value), { port: 10120, source: "invalid", value: value.trim() },
+      "a setting of " + JSON.stringify(value) + " is not a port, and the value it was is carried back for the reader to name");
+  }
+});
 
 test("webhookEndpointPath keys a controller's path on its configured address, encoded for a path", () => {
 

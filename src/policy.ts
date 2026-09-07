@@ -15,7 +15,7 @@
  */
 import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, AccessAuthError, isEnterpriseHubRecord, isHub, isReader, normalizeActorType,
   normalizeMacAddress, selectAccessPoints } from "unifi-access";
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
+import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
@@ -1224,6 +1224,39 @@ export function doorbellReaderId(options: { devices: Iterable<AccessStateDevice>
 export function isManagedRecord(device: AccessStateDevice): device is AccessStateDevice & { mac: string } {
 
   return device.is_managed && Boolean(device.mac);
+}
+
+/* What the webhook port setting resolves to. A setting that is absent or turned off is the default, silently: nothing was said. A setting that is present and a whole
+ * number from 0 to 65535 is the port. Anything else present is invalid, answered as the default with the value that was rejected, so the one reader can say so
+ * once, at read time, rather than each controller discovering it when the listener refuses to bind.
+ */
+export type AccessWebhookPortResolution = { readonly port: number; readonly source: "configured" | "default" } |
+  { readonly port: number; readonly source: "invalid"; readonly value: string };
+
+/**
+ * Resolve the webhook port setting: a whole number from 0 to 65535 as written, the default for a setting that is absent or turned off, and the default with the
+ * rejected value for anything else.
+ *
+ * @param value - The setting's raw value: the string as configured, `undefined` when absent, `null` when turned off.
+ *
+ * @returns The port to bind and where it came from.
+ */
+export function resolveWebhookPort(value: Nullable<string | undefined>): AccessWebhookPortResolution {
+
+  if((value === undefined) || (value === null) || (value.trim() === "")) {
+
+    return { port: ACCESS_WEBHOOK_PORT, source: "default" };
+  }
+
+  const text = value.trim();
+
+  // A port is digits alone: no sign, no decimal point, no exponent, and nothing a looser numeric parse would quietly accept.
+  if(!/^\d{1,5}$/.test(text) || (Number.parseInt(text, 10) > 65535)) {
+
+    return { port: ACCESS_WEBHOOK_PORT, source: "invalid", value: text };
+  }
+
+  return { port: Number.parseInt(text, 10), source: "configured" };
 }
 
 /**

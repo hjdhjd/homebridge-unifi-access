@@ -2,14 +2,14 @@
  *
  * platform.ts: homebridge-unifi-access platform class.
  */
-import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
+import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
 import { APIEvent, FeatureOptions, HttpListener, TimerRegistry, debugGatedLog, formatErrorMessage, guardedDispatch, localAddressFor,
   systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
 import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
-import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen } from "./policy.ts";
+import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen, resolveWebhookPort } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { AccessController } from "./controller/controller.ts";
 import type { AccessOptions } from "./options.ts";
@@ -54,7 +54,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   readonly #strandedRemovals: TimerRegistry;
   // The one webhook listener, constructed on the first controller that asks for it. A plugin with webhooks turned off never asks, so it binds no port at all.
   #webhookListener: Nullable<HttpListener>;
-  // The port that listener will bind, read once here because the port is a plugin-wide deployment decision rather than a per-controller one.
+  // The port that listener will bind.
   readonly #webhookPort: number;
 
   constructor(log: Logging, config: AccessPlatformConfig | undefined, api: API) {
@@ -69,7 +69,15 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.#shutdownController = new AbortController();
     this.#strandedRemovals = new TimerRegistry({ clock: this.clock, signal: this.signal });
     this.#webhookListener = null;
-    this.#webhookPort = this.featureOptions.getInteger("Controller.Webhooks.Port") ?? ACCESS_WEBHOOK_PORT;
+    // The port is a plugin-wide deployment decision, read once here; a setting that is not a port is said once, here, and the default stands in for it.
+    const webhookPort = resolveWebhookPort(this.featureOptions.value("Controller.Webhooks.Port"));
+
+    if(webhookPort.source === "invalid") {
+
+      this.log.warn("The webhook port setting %s is not a whole number from 0 to 65535. The default port %s will be used.", webhookPort.value, webhookPort.port);
+    }
+
+    this.#webhookPort = webhookPort.port;
 
     // Arm the plugin's lifetime before anything below can return early, so the signal every controller and every listener composes against always exists.
     api.on(APIEvent.SHUTDOWN, () => this.#shutdownController.abort());

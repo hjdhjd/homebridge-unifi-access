@@ -438,6 +438,30 @@ test("a disabled controller contributes its keys and is never asked for claims",
   assert.deepEqual(harness.unregistered, ["uuid-stranded"], "every configured controller's keys spare an accessory, and only the unclaimed one leaves");
 });
 
+test("a webhook port setting that is not a port is said once and the default is used, and one that is a port is used as written", () => {
+
+  const refused = makeHarness();
+  const refusedPlatform = refused.make({ options: ["Enable.Controller.Webhooks.Port=70000"], platform: "UniFi Access" });
+
+  assert.equal(refusedPlatform.webhookPort, 10120, "a setting outside the range of a port leaves the default standing");
+  assert.deepEqual(refused.lines.filter(line => line.startsWith("warn: The webhook port setting")),
+    ["warn: The webhook port setting 70000 is not a whole number from 0 to 65535. The default port 10120 will be used."],
+    "and it is reported once as a configuration problem, naming the setting and the port that will be used instead");
+
+  const stated = makeHarness();
+  const statedPlatform = stated.make({ options: ["Enable.Controller.Webhooks.Port=10130"], platform: "UniFi Access" });
+
+  assert.equal(statedPlatform.webhookPort, 10130, "a port the user stated is the port");
+  assert.deepEqual(stated.lines.filter(line => line.startsWith("warn: The webhook port setting")), [], "and nothing is said about a setting that is one");
+
+  // Nobody configured a port at all, so the engine answers the option's own registered default and the rule reads it as the port it is.
+  const plain = makeHarness();
+  const plainPlatform = plain.make({ platform: "UniFi Access" });
+
+  assert.equal(plainPlatform.webhookPort, 10120, "a configuration naming no port binds the default");
+  assert.deepEqual(plain.lines.filter(line => line.startsWith("warn: The webhook port setting")), [], "and says nothing about a setting nobody wrote");
+});
+
 test("the platform builds one real listener, on its own clock and lifetime, and the shutdown ends it", async (t) => {
 
   const harness = makeHarness();
