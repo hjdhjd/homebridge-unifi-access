@@ -487,15 +487,7 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
-      // Acquire the service.
       const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " " + accessMethod.name, accessMethod.subtype);
-
-      if(!service) {
-
-        this.log.error("Unable to add the %s access method switch.", accessMethod.name);
-
-        continue;
-      }
 
       // Retrieve the state when requested.
       service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.#accessMethodEnabled(accessMethod.key));
@@ -921,15 +913,7 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => { this.log.info("Enabling the doorbell."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the doorbell.");
-
-      return false;
-    }
 
     service.setPrimaryService(true);
 
@@ -981,10 +965,8 @@ export class AccessHub extends AccessDevice {
    * change after it reaches the sensor through the sweeps alone.
    *
    * @param options - The pass this acquire runs as, the sensor's label, the reading it is dressed with, and the reserved subtype it is acquired under.
-   *
-   * @returns Whether the sensor stands on the accessory. HomeKit refusing to add one is logged here, so the configure paths have nothing to say about it.
    */
-  #acquireSensor({ initialized, label, reading, subtype }: SensorPass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): boolean {
+  #acquireSensor({ initialized, label, reading, subtype }: SensorPass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): void {
 
     const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, subtype, () => {
 
@@ -993,19 +975,10 @@ export class AccessHub extends AccessDevice {
       this.log.info("Enabling the " + label.toLowerCase() + ".");
     });
 
-    if(!service) {
-
-      this.log.error("Unable to add the " + label.toLowerCase() + ".");
-
-      return false;
-    }
-
     if(!initialized) {
 
       this.#dressSensor(service, reading);
     }
-
-    return true;
   }
 
   /* Dress a sensor the first time this hub holds it: its reading, its availability, and its tamper status. HomeKit carries an optional characteristic only once
@@ -1063,7 +1036,9 @@ export class AccessHub extends AccessDevice {
     }
 
     // The reading is the projection the delivery path maintains, so a dressing writes what we already hold rather than a fresh read of the record.
-    return this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, subtype: AccessReservedNames.CONTACT_DPS });
+    this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, subtype: AccessReservedNames.CONTACT_DPS });
+
+    return true;
   }
 
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
@@ -1090,7 +1065,9 @@ export class AccessHub extends AccessDevice {
     }
 
     // The reading is the projection the side door's delivery maintains, for the same reason the main door's is.
-    return this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, subtype: AccessReservedNames.CONTACT_DPS_SIDE });
+    this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, subtype: AccessReservedNames.CONTACT_DPS_SIDE });
+
+    return true;
   }
 
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
@@ -1119,16 +1096,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined,
       () => { this.log.info("Configuring door as %s service.", this.doorServiceType); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the door.");
-
-      return false;
-    }
 
     // Configure based on service type.
     if(this.doorServiceType === "GarageDoorOpener") {
@@ -1154,12 +1123,7 @@ export class AccessHub extends AccessDevice {
   }
 
   // Configure a LockMechanism service.
-  private configureLockService(service: ReturnType<typeof acquireService>, isSideDoor: boolean): void {
-
-    if(!service) {
-
-      return;
-    }
+  private configureLockService(service: Service, isSideDoor: boolean): void {
 
     const lockStateGetter = isSideDoor ? (): CharacteristicValue => this.hkSideDoorLockState : (): CharacteristicValue => this.hkLockState;
     const lockCommand = isSideDoor ? async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
@@ -1192,12 +1156,7 @@ export class AccessHub extends AccessDevice {
   }
 
   // Configure a GarageDoorOpener service.
-  private configureGarageDoorService(service: ReturnType<typeof acquireService>): void {
-
-    if(!service) {
-
-      return;
-    }
+  private configureGarageDoorService(service: Service): void {
 
     /* A service re-acquire registers the handlers below afresh, so any travel the machine was rendering belonged to a presentation of the door that no longer
      * exists. The door starts standing here, which also drains whatever timer that travel had armed.
@@ -1296,16 +1255,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Doorbell Trigger",
       AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => { this.log.info("Enabling the doorbell automation trigger."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the doorbell automation trigger.");
-
-      return false;
-    }
 
     // The switch mirrors ring truth: on while the doorbell is ringing, off while it is quiet.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorbellRingRequestId !== null);
@@ -1391,16 +1342,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Lock Trigger",
       AccessReservedNames.SWITCH_LOCK_TRIGGER, () => { this.log.info("Enabling the lock automation trigger."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the lock automation trigger.");
-
-      return false;
-    }
 
     // The trigger mirrors the lock: on while anything but secured, off while secured.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
@@ -1432,16 +1375,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_DOOR_SIDE,
       () => { this.log.info("Configuring side door lock."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the side door.");
-
-      return false;
-    }
 
     // Configure the lock service.
     this.configureLockService(service, true);
@@ -1465,16 +1400,8 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Acquire the service.
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Side Door Lock Trigger",
       AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => { this.log.info("Enabling the side door lock automation trigger."); });
-
-    if(!service) {
-
-      this.log.error("Unable to add the side door lock automation trigger.");
-
-      return false;
-    }
 
     // Trigger the lock state.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
