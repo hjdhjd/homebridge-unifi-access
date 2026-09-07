@@ -13,7 +13,7 @@ import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, ultraInputMode, unlockAttribution } from "../policy.ts";
-import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, updateServices, validService } from "homebridge-plugin-utils";
+import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -1113,8 +1113,7 @@ export class AccessHub extends AccessDevice {
     const lockState = this._hkLockState;
 
     this._hkLockState = -1;
-    service.displayName = this.accessoryName;
-    service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName);
+    setServiceName(service, this.accessoryName);
     this.hkLockState = lockState;
 
     service.setPrimaryService(true);
@@ -1326,7 +1325,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Doorbell Trigger");
+    setServiceName(service, this.accessoryName + " Doorbell Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
 
     return true;
@@ -1360,7 +1359,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Lock Trigger");
+    setServiceName(service, this.accessoryName + " Lock Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
 
     return true;
@@ -1383,8 +1382,7 @@ export class AccessHub extends AccessDevice {
 
     // Initialize the lock.
     this._hkSideDoorLockState = -1;
-    service.displayName = this.accessoryName + " Side Door";
-    service.updateCharacteristic(this.hap.Characteristic.Name, this.accessoryName + " Side Door");
+    setServiceName(service, this.accessoryName + " Side Door");
     this.hkSideDoorLockState = this.hubSideDoorLockState;
 
     return true;
@@ -1418,7 +1416,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    service.updateCharacteristic(this.hap.Characteristic.ConfiguredName, this.accessoryName + " Side Door Lock Trigger");
+    setServiceName(service, this.accessoryName + " Side Door Lock Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
 
     return true;

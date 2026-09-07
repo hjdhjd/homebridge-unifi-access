@@ -100,10 +100,9 @@ function carried<T extends Service>(serviceType: new (displayName?: string, subt
  */
 function makeAccessory(services: Service[]): AccessAccessory {
 
-  return {
+  const accessory = {
 
     UUID: "uuid-" + HUB_ID,
-    _associatedHAPAccessory: { displayName: "Test Hub" },
     addService: (service: Service): Service => {
 
       services.push(service);
@@ -118,8 +117,22 @@ function makeAccessory(services: Service[]): AccessAccessory {
       return services.find(service => (service.UUID === target.UUID) && (service.subtype === subtype));
     },
     removeService: (service: Service): void => void services.splice(services.indexOf(service), 1),
-    services
+    services,
+
+    /* Homebridge's own display-name setter, transcribed rather than inherited: the homebridge package exposes PlatformAccessory as a type alone, so the class cannot
+     * be constructed here. The transcription is the whole of that method - a truthy name writes the display name, a falsy one writes nothing - and it is what the
+     * library's accessory rename writes through, so an arm reading a renamed accessory reads what Homebridge itself would have written.
+     */
+    updateDisplayName(name: string): void {
+
+      if(name) {
+
+        accessory.displayName = name;
+      }
+    }
   } as unknown as AccessAccessory;
+
+  return accessory;
 }
 
 // A door command the hub dispatched to the library, as the arm driving it sees it: the verb, the options it carried, and the rule a lock-rule command asked for.
@@ -3511,4 +3524,20 @@ test("a doorbell ring the controller refuses says so and puts the switch back on
   harness.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and a dispatch the controller refused keeps the shorter pause rather than the window");
+});
+
+test("a synchronized alias reaches the information service's names and the accessory's display name", () => {
+
+  const harness = makeHub({ existing: [new Service.AccessoryInformation("Test Hub")], options: ["Enable.Device.SyncName"],
+    record: testHub({ alias: "Front Gate \u{1F6AA}" }) });
+  const information = harness.hub.accessory.getService(Service.AccessoryInformation);
+
+  assert.ok(information, "the accessory was stood up carrying an information service, which is what a rename writes into");
+
+  assert.equal(information.getCharacteristic(Characteristic.Name).value, "Front Gate");
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Front Gate",
+    "the configured name is what a rename has to reach for the Home app to follow it");
+
+  assert.equal(harness.hub.accessoryName, "Front Gate");
+  assert.equal(harness.hub.accessory.displayName, "Front Gate", "and Homebridge's own display name follows through its own setter");
 });

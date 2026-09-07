@@ -6,7 +6,7 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, updateServices } from "homebridge-plugin-utils";
+import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -209,7 +209,9 @@ export abstract class AccessDevice extends AccessBase {
         this.refreshReachability();
 
         // Sync names, if configured to do so.
-        if(this.hints.syncName && this.uda.alias && (this.accessoryName !== sanitizeName(this.uda.alias))) {
+        const synced = this.syncedName;
+
+        if((synced !== undefined) && (this.accessoryName !== synced)) {
 
           this.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
           this.configureInfo();
@@ -273,9 +275,11 @@ export abstract class AccessDevice extends AccessBase {
   public configureInfo(): boolean {
 
     // Sync the Access name with HomeKit, if configured.
-    if(this.hints.syncName && this.uda.alias) {
+    const synced = this.syncedName;
 
-      this.accessoryName = this.uda.alias;
+    if(synced !== undefined) {
+
+      this.accessoryName = synced;
     }
 
     return this.setInfo(this.accessory, this.uda, this.mac);
@@ -432,6 +436,22 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.test("Log.Debug", this.id, this.controller.id);
   }
 
+  /* The name the controller would have HomeKit show for this device, or nothing to synchronize at all - synchronization is off, the record carries no alias, or the
+   * alias has nothing left once HomeKit's naming rules are applied to it. Every synchronization consumer reads this one derivation rather than deciding for itself,
+   * because the library refuses to write an empty name...a site deciding on its own would read that refusal as a change on every update and say so each time.
+   */
+  protected get syncedName(): string | undefined {
+
+    if(!this.hints.syncName || !this.uda.alias) {
+
+      return undefined;
+    }
+
+    const sanitized = sanitizeName(this.uda.alias);
+
+    return (sanitized.length > 0) ? sanitized : undefined;
+  }
+
   // Utility function to return the current accessory name of this device.
   public get accessoryName(): string {
 
@@ -439,16 +459,12 @@ export abstract class AccessDevice extends AccessBase {
       this.uda.alias;
   }
 
-  // Utility function to set the current accessory name of this device.
+  /* Set the current accessory name of this device. The library owns every write a rename reaches: both display names through Homebridge's own setter, and the
+   * information service's configured name beside its name through the per-service rule. A name with nothing left once HomeKit's naming rules are applied is
+   * refused rather than applied blank.
+   */
   public set accessoryName(name: string) {
 
-    const cleanedName = sanitizeName(name);
-
-    // Set all the internally managed names within Homebridge to the new accessory name.
-    this.accessory.displayName = cleanedName;
-    this.accessory._associatedHAPAccessory.displayName = cleanedName;
-
-    // Set all the HomeKit-visible names.
-    this.accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Name, cleanedName);
+    setAccessoryName(this.accessory, name);
   }
 }

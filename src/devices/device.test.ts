@@ -25,14 +25,20 @@ const CONTROLLER_ID = "112233445566";
 // The window the timer arm below arms against. Any value serves: what the arm is about is whether the deadline survives teardown, not how long it was.
 const TIMER_DELAY_MS = 10;
 
-/* The base carries no abstract members of its own, so a near-bare subclass is the whole harness the loop needs. The one wrapper exposes the protected hint
- * configuration, which is how an arm drives the real option reads and the real deviation log rather than a path it wrote itself.
+/* The base carries no abstract members of its own, so a near-bare subclass is the whole harness the loop needs. The wrappers expose the protected hint configuration
+ * and the protected synchronized-name derivation, which is how an arm drives the real option reads, the real deviation log, and the real derivation rather than
+ * paths it wrote itself.
  */
 class TestDevice extends AccessDevice {
 
   public configure(): boolean {
 
     return this.configureHints();
+  }
+
+  public synced(): string | undefined {
+
+    return this.syncedName;
   }
 }
 
@@ -185,9 +191,11 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
 }
 
 /* An accessory carrying one service that reports the availability characteristic, so the sweep has somewhere to write, and an information service that records
- * what the device stamps on it. The information sink is optional because most arms below have no interest in it.
+ * what the device stamps on it. The information sink is optional because most arms below have no interest in it, and so is the rename sink, which records every
+ * name Homebridge's own display-name setter is handed - the method the library's accessory rename writes through, so a rename an arm expects to be refused shows
+ * up here as a recorded name rather than as a silent pass.
  */
-function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: string; value: unknown }[] = []): AccessAccessory {
+function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: string; value: unknown }[] = [], renames: string[] = []): AccessAccessory {
 
   const information = {
 
@@ -205,7 +213,8 @@ function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: st
 
       testCharacteristic: (characteristic: string): boolean => characteristic === "StatusActive",
       updateCharacteristic: (characteristic: string, value: unknown): void => { statusWrites.push({ characteristic, value }); }
-    }]
+    }],
+    updateDisplayName: (name: string): void => { renames.push(name); }
   } as unknown as AccessAccessory;
 }
 
@@ -549,4 +558,52 @@ test("a typed delivery registration lands in the same map that cleanup drains", 
 
   // One map and one loop serve both kinds of handler, so a delivery listener is detached by exactly the teardown a packet listener is.
   assert.deepEqual(harness.removals, [ACCESS_WEBHOOK_EVENT_PREFIX + ACCESS_WEBHOOK_EVENTS.doorUnlock]);
+});
+
+test("a device with name synchronization off derives no name to synchronize, whatever its alias reads", () => {
+
+  const harness = makeHarness([], { construction: record({ alias: "Front Door" }) });
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites), harness.construction);
+
+  device.configure();
+
+  assert.equal(device.synced(), undefined, "a user who did not ask for synchronization has nothing synchronized, however plainly the alias reads");
+});
+
+test("a synchronized name is the alias as HomeKit's naming rules leave it", () => {
+
+  const harness = makeHarness([], { construction: record({ alias: "Front Gate \u{1F6AA}" }), options: ["Enable.Device.SyncName"] });
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites), harness.construction);
+
+  device.configure();
+
+  assert.equal(device.synced(), "Front Gate", "the alias carries a character HomeKit will not take, so what is synchronized is what survives the rules");
+});
+
+test("an alias with nothing left under HomeKit's naming rules derives no name to synchronize", () => {
+
+  const harness = makeHarness([], { construction: record({ alias: "..." }), options: ["Enable.Device.SyncName"] });
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites), harness.construction);
+
+  device.configure();
+
+  assert.equal(device.synced(), undefined, "the rules empty this alias out, and a write the library would refuse must never be attempted");
+});
+
+test("a record whose alias empties out under HomeKit's naming rules is neither written nor reported as a change", async () => {
+
+  const harness = makeHarness([record({ alias: "..." })], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
+  const renames: string[] = [];
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites, [], renames), harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+
+  // The tick genuinely moved the held record, which is what makes the assertions below mean something.
+  assert.equal(device.uda.alias, "...", "the loop must have written the record the yield carried");
+
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Name change detected")), [],
+    "a name the rules empty out is not a change, so the loop has nothing to report and cannot report it on every update");
+  assert.deepEqual(renames, [], "and the accessory is never handed a name HomeKit would refuse");
 });

@@ -98,13 +98,10 @@ class TestAccessory {
   public context: Record<string, unknown>;
   public displayName: string;
   public services: Service[];
-  // Homebridge's own view of the accessory, which the name synchronization writes through.
-  public _associatedHAPAccessory: { displayName: string };
 
   constructor(displayName: string, uuid: string) {
 
     this.UUID = uuid;
-    this._associatedHAPAccessory = { displayName };
     this.context = {};
     this.displayName = displayName;
     this.services = [];
