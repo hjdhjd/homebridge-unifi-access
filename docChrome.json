@@ -71,12 +71,14 @@
           "blurb": "granular options to allow you to show or hide specific devices, controllers, and customize behavior.",
           "file": "docs/FeatureOptions.md",
           "kind": "doc",
+          "schema": true,
           "title": "Feature Options"
         },
         {
           "blurb": "how to configure MQTT support.",
           "file": "docs/MQTT.md",
           "kind": "doc",
+          "schema": true,
           "title": "MQTT"
         },
         {
@@ -92,5 +94,6 @@
     }
   ],
   "projects": { "url": "https://raw.githubusercontent.com/hjdhjd/github-workflows/main/projects.json" },
-  "repo": { "branch": "main", "name": "homebridge-unifi-access", "owner": "hjdhjd" }
+  "repo": { "branch": "main", "name": "homebridge-unifi-access", "owner": "hjdhjd" },
+  "surfaces": { "schema": "config.schema.json" }
 }
