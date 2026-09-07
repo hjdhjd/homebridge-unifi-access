@@ -11,7 +11,7 @@
 import type { AccessApiMode, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore,
   noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
-import { AccessStatusFeed, classifyStatusError, composeStatusRows, formatUptime, narrowStatusContextRequest } from "./webui-status.ts";
+import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
 import type { StatusEvent, StatusRow } from "homebridge-plugin-utils";
@@ -28,8 +28,8 @@ const SERIAL_TWO = "AABBCCDDEE02";
 // The controller address every fixture's registry entry carries.
 const ADDRESS = "192.0.2.10";
 
-// The uptime, in seconds, that renders as "127d 14h" - the formatter's fixed arithmetic input.
-const UPTIME_127D_14H = 11023200;
+// The controller uptime, in seconds, that renders as "127.6 day" under the library's day tier - the row's fixed arithmetic input.
+const CONTROLLER_UPTIME = 11023200;
 
 // How many macrotask boundaries an arm crosses before reading a dispatched frame: the observe loops register and drain on the microtask and immediate queues, so
 // two immediates cover a dispatch chain.
@@ -271,17 +271,6 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
   assert.equal(classifyStatusError(new Error("Anything else.")), "unreachable");
 });
 
-test("formatUptime renders the two largest units that apply and degrades null to absence", () => {
-
-  // The day-tier arithmetic this arm locks in: a wrong day divisor must go red here, not render plausibly.
-  assert.equal(formatUptime(UPTIME_127D_14H), "127d 14h");
-
-  assert.equal(formatUptime(3660), "1h 1m");
-  assert.equal(formatUptime(90), "1m");
-  assert.equal(formatUptime(59), "59s");
-  assert.equal(formatUptime(null), "");
-});
-
 test("the row policy answers a wired hub's rows from the entry the store established", () => {
 
   const store = createStateStore({});
@@ -446,10 +435,10 @@ test("the row policy answers a reader its access methods row alone and the API a
   assert.deepEqual(idValues(composeStatusRows({ kind: "controller", mode: "dual", state })), [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
 
   // ...and a fetched document answers the rendered uptime.
-  store.applyRefreshDocuments({ controller: { host: { uptime: UPTIME_127D_14H } } as unknown as AccessControllerConfig,
+  store.applyRefreshDocuments({ controller: { host: { uptime: CONTROLLER_UPTIME } } as unknown as AccessControllerConfig,
     topology: doorsTopology([{ devices: [record], id: "door1" }]) });
   assert.deepEqual(idValues(composeStatusRows({ kind: "controller", mode: "dual", state: store.snapshot() })),
-    [ [ "api", "Credentials + API token" ], [ "uptime", "127d 14h" ] ]);
+    [ [ "api", "Credentials + API token" ], [ "uptime", "127.6 day" ] ]);
 });
 
 test("the access methods row states what the record's configuration rows say, in the catalog's own order", () => {
@@ -1145,7 +1134,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: { host: { uptime: UPTIME_127D_14H } } as unknown as AccessControllerConfig,
+  store.applyRefreshDocuments({ controller: { host: { uptime: CONTROLLER_UPTIME } } as unknown as AccessControllerConfig,
     topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
 
   const record = store.snapshot().devices.get("device1");
@@ -1169,7 +1158,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
 
   // The pushed snapshot is where the whole path is observed at once: the call site reads the mode off the serving client, the derivation renders it, and the row
   // reaches the panel ahead of the uptime row. A call site that composed a controller view without the mode cannot produce this frame.
-  assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "Credentials" ], [ "uptime", "127d 14h" ] ]);
+  assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "Credentials" ], [ "uptime", "127.6 day" ] ]);
 });
 
 test("a throwing door resolution degrades the view to absence and starts no door loop", async () => {

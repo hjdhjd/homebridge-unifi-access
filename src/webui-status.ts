@@ -22,8 +22,8 @@ import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallErr
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
   dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
+import { formatErrorMessage, formatSeconds, sameEntries } from "homebridge-plugin-utils";
 import type { DecoratedSerial } from "./policy.ts";
-import { formatErrorMessage } from "homebridge-plugin-utils";
 
 // The onRequest route the context extension registers - the plugin's addition to the shared status protocol. It carries the browser's controller context: each
 // configured controller's identity beside the decorated serials of the devices its kept probe answer listed, which is what lets a view request resolve the
@@ -203,46 +203,6 @@ export function classifyStatusError(error: unknown): StatusErrorReason {
   return "unreachable";
 }
 
-/**
- * Format a controller uptime, in seconds, into the row vocabulary: the two largest units that apply, so a long-lived controller reads in days and hours while a
- * freshly-rebooted one reads in minutes or seconds. A `null` reading - the controller document not yet fetched - renders the placeholder dash through the empty
- * string, the row policy's degrade-by-absence rule.
- *
- * @param seconds - The uptime in seconds, or `null` when none has been established.
- *
- * @returns The rendered duration, or the empty string.
- */
-export function formatUptime(seconds: Nullable<number>): string {
-
-  if((seconds === null) || !Number.isFinite(seconds) || (seconds < 0)) {
-
-    return "";
-  }
-
-  // The tier arithmetic: 86400 seconds to a day, 3600 to an hour, 60 to a minute.
-  const total = Math.floor(seconds);
-  const days = Math.floor(total / 86400);
-  const hours = Math.floor((total % 86400) / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-
-  if(days > 0) {
-
-    return String(days) + "d " + String(hours) + "h";
-  }
-
-  if(hours > 0) {
-
-    return String(hours) + "h " + String(minutes) + "m";
-  }
-
-  if(minutes > 0) {
-
-    return String(minutes) + "m";
-  }
-
-  return String(total) + "s";
-}
-
 // The panel's row identities, a closed union used internally to key the label and sizer records exhaustively. The wire carries a row id as a plain string; this
 // closed union is the plugin's own, so a new row must extend it here and gains its label and sizer entries at compile time rather than becoming a silently dead row.
 export type AccessStatusRowId = "api" | "door" | "lock" | "methods" | "sidedoor" | "sidelock" | "tamper" | "uptime";
@@ -298,22 +258,11 @@ function statusChoicesRow(id: AccessChoicesRowId, choices: StatusChoice[]): Stat
   return { choices, id, kind: "choices", label: STATUS_ROW_LABELS[id] };
 }
 
-// Whether two choices lists render identically: the same length, and each position naming the same choice with the same selection. This is the whole of a choices
-// row's diff, because the wire replaces the list rather than addressing one entry inside it...any difference anywhere is the one replacement.
-function sameChoices(choices: readonly StatusChoice[], previous: readonly StatusChoice[]): boolean {
+// Whether two choices render identically: the same label carrying the same selection. This is the whole of one entry's diff, because the wire replaces a choices
+// list rather than addressing an entry inside it...any difference anywhere is the one replacement.
+function sameChoice(choice: StatusChoice, previous: StatusChoice): boolean {
 
-  return (choices.length === previous.length) && choices.every((choice, index) => {
-
-    const held = previous[index];
-
-    // The lengths already agree, so every position has a held entry to compare against...one that is absent anyway can only mean the two lists differ.
-    if(held === undefined) {
-
-      return false;
-    }
-
-    return (choice.label === held.label) && (choice.selected === held.selected);
-  });
+  return (choice.label === previous.label) && (choice.selected === previous.selected);
 }
 
 /* Map the connection's API mode onto the row vocabulary. The mode a connected client reports is verified fact rather than a configuration echo: the library proves
@@ -365,6 +314,14 @@ function tamperRowValue(verdict: boolean | undefined): string {
   }
 
   return verdict ? "Detected" : "Normal";
+}
+
+// Map the controller host's uptime onto the row vocabulary, rendered through the library's duration formatting so a duration reads the same here as it does
+// everywhere else in the family. An absent reading - the controller document not yet fetched - renders the placeholder dash through the empty string, the row
+// policy's degrade-by-absence rule.
+function uptimeRowValue(uptime: Nullable<number>): string {
+
+  return (uptime === null) ? "" : formatSeconds(uptime);
 }
 
 /* Compose a reader's access methods row: every catalog method the hardware offers, in the catalog's own order, each stating whether the device's configuration
@@ -443,7 +400,7 @@ export function composeStatusRows(options: { kind: "controller"; mode: AccessApi
   // The controller arm: the console's own view states which API surfaces its connection reached, then its uptime, advancing on the library's refresh cadence.
   if(options.kind === "controller") {
 
-    return [ statusRow("api", API_ROW_VALUES[options.mode]), statusRow("uptime", formatUptime(selectControllerUptime(options.state))) ];
+    return [ statusRow("api", API_ROW_VALUES[options.mode]), statusRow("uptime", uptimeRowValue(selectControllerUptime(options.state))) ];
   }
 
   const { device, entries } = options;
@@ -857,7 +814,7 @@ export class AccessStatusFeed {
     const refreshRows = (): void => {
 
       const rows = this.#composeViewRows(client, subject);
-      const sameSet = (rows.length === lastRows.length) && rows.every((row, index) => row.id === lastRows[index]?.id);
+      const sameSet = sameEntries(rows, lastRows, (row, held) => row.id === held.id);
 
       if(!sameSet) {
 
@@ -876,7 +833,7 @@ export class AccessStatusFeed {
 
         if(row.kind === "choices") {
 
-          if(!sameChoices(row.choices, (held?.kind === "choices") ? held.choices : [])) {
+          if(!sameEntries(row.choices, (held?.kind === "choices") ? held.choices : [], sameChoice)) {
 
             this.#emit({ kind: "row", row: { choices: row.choices, id: row.id }, serialNumber: serial, session });
           }

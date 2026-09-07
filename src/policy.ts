@@ -25,6 +25,7 @@ import type { AccessControllerTokens } from "./options.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
+import { sameEntries } from "homebridge-plugin-utils";
 
 // The device type the controller reports for an Enterprise Access Hub, and the type whose per-port records carry a source_id that participates in accessory identity.
 const ENTERPRISE_HUB_DEVICE_TYPE = "UAH-Ent";
@@ -440,7 +441,7 @@ export function createMembershipIdsSelector(): (state: AccessState) => readonly 
     }
 
     // Hand back the previous array when nothing about membership moved, which is what keeps an observer asleep through the record churn a busy controller produces.
-    if((ids.length === previous.length) && ids.every((id, index) => id === previous[index])) {
+    if(sameEntries(ids, previous, (id, held) => id === held)) {
 
       return previous;
     }
@@ -493,24 +494,6 @@ export function recordByMac(mac: string, records: Iterable<AccessStateDevice>): 
   }
 
   return undefined;
-}
-
-/**
- * The HomeKit membership delta between the controller's current identity set and the identities already configured, as a pure set diff. `toAdd` is the current
- * identities not yet configured; `toRemove` is the configured identities that have left. This single diff drives the whole of device sync - one engine for both
- * arrival and departure - and isolating it makes the reconcile read as decision then effect. Order-preserving relative to the inputs.
- *
- * @param currentIds    - The controller's current membership identities.
- * @param configuredIds - The identities already configured.
- *
- * @returns The identities to add and the identities to remove.
- */
-export function membershipDelta(currentIds: readonly string[], configuredIds: readonly string[]): { toAdd: string[]; toRemove: string[] } {
-
-  const current = new Set(currentIds);
-  const configured = new Set(configuredIds);
-
-  return { toAdd: currentIds.filter(id => !configured.has(id)), toRemove: configuredIds.filter(id => !current.has(id)) };
 }
 
 /* What current membership can claim in one pass: the accessory UUIDs it accounts for, and the hardware identities it projects - the decorated serial of each MAC

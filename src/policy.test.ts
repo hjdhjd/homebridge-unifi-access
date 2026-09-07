@@ -14,7 +14,7 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
-  isSupportedAccessDevice, lockCommandRule, membershipDelta, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
+  isSupportedAccessDevice, lockCommandRule, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
   recordByMac, resolveDoorService, resolveWebhookPort, serialForm, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
@@ -319,13 +319,6 @@ test("officialDeviceModel answers an unmapped type with the type itself", () => 
   assert.equal(officialDeviceModel("UA-G3-Reader"), "UA-G3-Reader");
   assert.equal(officialDeviceModel("UAH-Ent"), "UAH-Ent");
   assert.equal(officialDeviceModel(""), "", "an empty type answers empty rather than inventing a placeholder");
-});
-
-test("membershipDelta reports additions, removals, and no movement", () => {
-
-  assert.deepEqual(membershipDelta([ "a", "b" ], ["a"]), { toAdd: ["b"], toRemove: [] });
-  assert.deepEqual(membershipDelta(["a"], [ "a", "b" ]), { toAdd: [], toRemove: ["b"] });
-  assert.deepEqual(membershipDelta([ "a", "b" ], [ "a", "b" ]), { toAdd: [], toRemove: [] });
 });
 
 test("the connect retry policy budgets authentication faults and forgives everything else", () => {

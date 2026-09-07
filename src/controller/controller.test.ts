@@ -9,11 +9,11 @@ import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficial
 import type { AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { HbpuAbortError, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
+import { HbpuAbortError, defaultRetryBackoff, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
 import { ROOT_ID, buildingTopology, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
-import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
+import { createMembershipIdsSelector, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
 import type { AccessControllerConnect } from "./controller.ts";
