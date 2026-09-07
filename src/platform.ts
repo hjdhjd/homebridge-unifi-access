@@ -25,7 +25,6 @@ interface AccessControllerReport {
 
 export class AccessPlatform implements DynamicPlatformPlugin {
 
-  public accessories: AccessAccessory[];
   public readonly api: API;
   /* The one time source every timer and every wait in the plugin reads: the controller's delayed removals, the reclaim below, each device's timer registry, and the
    * connect retry's backoff. It is the production clock in the field and a controllable one under test, so a suite drives every deadline on a virtual timeline
@@ -36,6 +35,10 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   private readonly controllers: AccessController[];
   public readonly featureOptions: FeatureOptions;
   public readonly log: Logging;
+  /* The accessories this plugin carries, restored by Homebridge or minted by a controller. The restore path and the registration methods below are its only
+   * writers, and everyone else reads it through the view beside them.
+   */
+  readonly #accessories: AccessAccessory[];
   /* The plugin's own debug channel, gated at global scope. Composed once here because the platform speaks for the plugin as a whole and has one identity to resolve
    * against, unlike a controller or a device, each of which composes its own gate over its own name.
    */
@@ -56,7 +59,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
   constructor(log: Logging, config: AccessPlatformConfig | undefined, api: API) {
 
-    this.accessories = [];
+    this.#accessories = [];
     this.api = api;
     this.clock = systemClock;
     this.controllers = [];
@@ -124,7 +127,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   public configureAccessory(accessory: AccessAccessory): void {
 
     // Add this to the accessory array so we can track it.
-    this.accessories.push(accessory);
+    this.#accessories.push(accessory);
   }
 
   /**
@@ -142,10 +145,10 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   public registerAccessory(accessory: AccessAccessory): void {
 
     this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-    this.accessories.push(accessory);
+    this.#accessories.push(accessory);
 
     // Tell Homebridge to save the updated list of accessories.
-    this.api.updatePlatformAccessories(this.accessories);
+    this.api.updatePlatformAccessories(this.#accessories);
   }
 
   /**
@@ -162,7 +165,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    */
   public unregisterAccessory(accessory: AccessAccessory): void {
 
-    const index = this.accessories.indexOf(accessory);
+    const index = this.#accessories.indexOf(accessory);
 
     if(index < 0) {
 
@@ -171,10 +174,10 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     // Unregister the accessory and delete its remnants from HomeKit and the plugin.
     this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-    this.accessories.splice(index, 1);
+    this.#accessories.splice(index, 1);
 
     // Tell Homebridge to save the updated list of accessories.
-    this.api.updatePlatformAccessories(this.accessories);
+    this.api.updatePlatformAccessories(this.#accessories);
   }
 
   /* Launch our configured controllers once all accessories have been loaded. Once we do, they will sustain themselves.
@@ -358,6 +361,19 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   public debug(message: string, ...parameters: unknown[]): void {
 
     this.#debugLog.debug(message, ...parameters);
+  }
+
+  /**
+   * The accessories this plugin carries, as everything outside its writers reads them.
+   *
+   * The view is read-only because the restore path and the registration methods above are the list's only writers by type, rather than by the convention a
+   * public array would leave them resting on.
+   *
+   * @returns The accessories.
+   */
+  public get accessories(): readonly AccessAccessory[] {
+
+    return this.#accessories;
   }
 
   /**

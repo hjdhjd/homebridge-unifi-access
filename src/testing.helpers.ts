@@ -1,6 +1,7 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * testing.helpers.ts: The fixture builders more than one suite reads - the topology documents, the configuration rows, and the managed device records.
+ * testing.helpers.ts: The fixture builders more than one suite reads - the topology documents, the configuration rows, the managed device records, and the
+ * platform double every suite stands its controllers and devices up over.
  *
  * Each export states one Access document or record shape, so every suite seeding that shape seeds the same one and a change to the shape is a change in one place.
  * A harness only one file reads stays in that file: the hub suite's real-HAP accessory, the device suite's write recorder, and the status feed's client stub are
@@ -17,7 +18,16 @@
  * dist/, so none of it reaches the published package.
  */
 /* eslint-disable camelcase */
+import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
+import type { API, Logging } from "homebridge";
 import type { AccessBootstrapConfig, AccessDeviceEntryConfig, AccessStateDevice } from "unifi-access";
+import type { Clock, HttpListener } from "homebridge-plugin-utils";
+import { featureOptionCategories, featureOptions } from "./options.ts";
+import type { AccessAccessory } from "./types.ts";
+import type { AccessOptions } from "./options.ts";
+import type { AccessPlatform } from "./platform.ts";
+import { FeatureOptions } from "homebridge-plugin-utils";
+import { TestClock } from "homebridge-plugin-utils/testing";
 
 /**
  * The building every topology document below roots at, and the location an Enterprise hub is recognized as building-hosted by.
@@ -133,4 +143,94 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
 
   return { capabilities: ["is_reader"], device_type: "UA-G2-PRO", is_managed: true, mac: "aabbccddee02", name: "Test Reader", unique_id: "reader1",
     ...overrides } as AccessStateDevice & { mac: string };
+}
+
+// The platform double.
+
+/* The platform members the plugin reads, which is what a double has to carry and all a double has to carry. The list is the receipt of a grep over the plugin's
+ * reads of its platform, so a member the plugin starts reading enters here by the same grep, and a double missing a listed member is a compile error in this one
+ * place rather than a silent fallback at every site that stands one up.
+ */
+type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "registerAccessory" |
+  "signal" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
+
+/* The Homebridge api members the plugin reads, each optional because an arm supplies only the ones its path reaches: the HAP namespace and the accessory class are
+ * whatever the arm hands over (a real class, a string stub), and the accessory calls are recorders or no-ops.
+ */
+export interface PlatformApiDouble {
+
+  hap?: unknown;
+  on?: (event: string, handler: () => void) => void;
+  platformAccessory?: unknown;
+  registerPlatformAccessories?: (pluginName: string, platformName: string, accessories: AccessAccessory[]) => void;
+  unregisterPlatformAccessories?: (pluginName: string, platformName: string, accessories: AccessAccessory[]) => void;
+  updatePlatformAccessories?: (accessories?: AccessAccessory[]) => void;
+}
+
+// What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
+export interface PlatformDoubleOptions {
+
+  accessories?: AccessAccessory[];
+  api?: PlatformApiDouble;
+  clock?: Clock;
+  config?: AccessOptions;
+  // The feature-option entries an engine is built from, when the arm does not hand over an engine of its own.
+  entries?: string[];
+  featureOptions?: FeatureOptions;
+  localAddressFor?: (host: string) => Promise<string>;
+  log?: Pick<Logging, "error" | "info" | "warn">;
+  signal?: AbortSignal;
+  webhookListener?: () => HttpListener;
+  webhookPort?: number;
+}
+
+/* Stand up the platform as a controller or a device reads it: every member the plugin reads, defaulted, with the accessory entry and exit reaching the same api calls
+ * and the same list the real ones do. The one cast lives here, stated once: the platform class carries private fields nothing structural can satisfy, so a double
+ * typed against the members the plugin reads is widened to the class at this boundary and nowhere else.
+ *
+ * @param options - What the arm varies; see {@link PlatformDoubleOptions}.
+ *
+ * @returns The platform double, typed as the platform.
+ */
+export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessPlatform {
+
+  const accessories = options.accessories ?? [];
+  const api = options.api ?? {};
+  const surface: PlatformSurface = {
+
+    accessories,
+    api: api as unknown as API,
+    clock: options.clock ?? new TestClock(),
+    config: options.config ?? { controllers: [], options: [] },
+    featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, options.entries ?? []),
+    localAddressFor: options.localAddressFor ?? (async (): Promise<string> => "10.0.0.7"),
+    log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
+    registerAccessory: (accessory: AccessAccessory): void => {
+
+      api.registerPlatformAccessories?.(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      accessories.push(accessory);
+      api.updatePlatformAccessories?.(accessories);
+    },
+    signal: options.signal ?? new AbortController().signal,
+    unregisterAccessory: (accessory: AccessAccessory): void => {
+
+      const index = accessories.indexOf(accessory);
+
+      if(index < 0) {
+
+        return;
+      }
+
+      api.unregisterPlatformAccessories?.(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      accessories.splice(index, 1);
+      api.updatePlatformAccessories?.(accessories);
+    },
+    webhookListener: options.webhookListener ?? ((): HttpListener => {
+
+      throw new Error("This platform double carries no webhook listener.");
+    }),
+    webhookPort: options.webhookPort ?? ACCESS_WEBHOOK_PORT
+  };
+
+  return surface as unknown as AccessPlatform;
 }

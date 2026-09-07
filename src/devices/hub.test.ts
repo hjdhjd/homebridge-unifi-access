@@ -19,7 +19,7 @@ import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-ut
 import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { accessMethods, officialDeviceModel } from "../policy.ts";
-import { configRows, hubRecord } from "../testing.helpers.ts";
+import { configRows, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -181,6 +181,8 @@ interface HubOptions {
   existing?: Service[];
   // A hub stood up with no door control surface at all, which is the state the base class admits through its optional handle.
   hubless?: boolean;
+  // Keep what construction said rather than clearing it, for the arms about adoption's own sentences.
+  keepAdoptionLines?: boolean;
   official?: boolean;
   options?: string[];
   record?: AccessStateDevice & { mac: string };
@@ -290,6 +292,27 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const projection = { config: record, observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ }, peek: (): undefined => undefined };
 
+  const platform = makePlatformDouble({
+
+    api: { hap: { Characteristic, Service, uuid } },
+    /* The clock every timer this hub arms is registered on, stated here rather than left to the double's own default, because a hub reading a clock no arm holds is
+     * a hub whose relocks and travels an advance would never reach.
+     */
+    clock,
+    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
+    /* The lines are captured formatted, because what a user reads is the composed sentence rather than the format string and its arguments. The plugin's debug
+     * output arrives on the warn sink, which is how the shared logger surfaces it without Homebridge's own debug flag, so that is where an arm reads it.
+     */
+    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+      info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
+      warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)) }
+  });
+
+  /* The engine a reconfiguration swaps in, written through a view of the one member it replaces. The platform declares its engine read-only because the real one
+   * reads its own once and keeps it, so this is the harness stating that restating a user's settings under a running hub is the test's own hand on the double.
+   */
+  const settings = platform as { featureOptions: FeatureOptions };
+
   const doors = new Map((options.doors ?? []).map(door => [ door.unique_id, door ]));
   const services: Service[] = [...(options.existing ?? [])];
 
@@ -354,38 +377,23 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     name: "Test Controller",
     ownershipKey: "1.2.3.4",
-    platform: {
-
-      api: { hap: { Characteristic, Service, uuid } },
-      /* The clock every timer this hub arms is registered on, stated here rather than left to the library's default, because a hub reading a clock no arm holds is
-       * a hub whose relocks and travels an advance would never reach.
-       */
-      clock,
-      featureOptions: undefined as unknown as FeatureOptions,
-      /* The lines are captured formatted, because what a user reads is the composed sentence rather than the format string and its arguments. The plugin's debug
-       * output arrives on the warn sink, which is how the shared logger surfaces it without Homebridge's own debug flag, so that is where an arm reads it.
-       */
-      log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-        info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
-        warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)) }
-    },
+    platform,
     resolveDeviceModel: (): string => "UA Hub",
     signal: new AbortController().signal,
     spawnLoop: (): void => undefined,
     uda: null
   };
 
-  let featureEngine = new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []);
-
-  controller.platform.featureOptions = featureEngine;
-
   const hub = new AccessHub(controller as unknown as AccessController, projection as unknown as AccessDeviceProjection, makeAccessory(services), record,
     options.hubless ? undefined : hubProjection as unknown as AccessHubProjection);
 
-  // Construction narrates itself, and every arm below is about what a delivery or a write does rather than about what adoption said.
-  debugs.length = 0;
-  errors.length = 0;
-  lines.length = 0;
+  // Construction narrates itself, and every arm but the ones about adoption reads from a clean slate rather than from what adoption said.
+  if(!options.keepAdoptionLines) {
+
+    debugs.length = 0;
+    errors.length = 0;
+    lines.length = 0;
+  }
 
   return {
 
@@ -427,8 +435,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
      */
     reconfigure: (entries: string[]): void => {
 
-      featureEngine = new FeatureOptions(featureOptionCategories, featureOptions, entries);
-      controller.platform.featureOptions = featureEngine;
+      settings.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, entries);
     },
     release: (): void => {
 
@@ -3259,6 +3266,36 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
   assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), false,
     "and it answers where the device stands now rather than what was last written to it");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
+});
+
+test("the services an arm hands the harness are copied, so what the hub creates never reaches the arm's own list", () => {
+
+  const own: Service[] = [];
+  const harness = makeHub({ existing: own });
+
+  restateRecord(harness, { configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ] });
+
+  assert.ok(harness.services.length > 0, "the record puts services on the accessory, which is what gives this arm something to look for");
+  assert.equal(own.length, 0, "the accessory grew and the list the arm handed over did not, which a harness holding it by reference would fail");
+});
+
+test("the side door position sensor announces its creation at adoption and its retirement when the option turns it off", () => {
+
+  const created = makeGate({ keepAdoptionLines: true });
+
+  assert.equal(lineCount(created, "Enabling the side door position sensor."), 1, "a gate discovering its side door says so once as it creates the sensor");
+  assert.ok(hasContactSensor(created, AccessReservedNames.CONTACT_DPS_SIDE), "and the sensor it announced is the one it carries");
+
+  const retired = makeGate({ existing: [carried(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE)], keepAdoptionLines: true,
+    options: ["Disable.Hub.SideDoor.DPS"] });
+
+  assert.equal(lineCount(retired, "Disabling the side door position sensor."), 1, "a sensor the user turned off is said to be going once as it goes");
+  assert.ok(!hasContactSensor(retired, AccessReservedNames.CONTACT_DPS_SIDE), "and the accessory does not carry it");
+
+  const plain = makeGate();
+
+  assert.equal(lineCount(plain, "Enabling the side door position sensor."), 0,
+    "a harness that clears construction's lines keeps none of them, which is what tells the option apart from a clear that stopped running");
 });
 
 test("a hub constructed while the tampering alert is off reads normal, and the alert returning is published and not announced", () => {

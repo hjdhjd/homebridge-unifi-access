@@ -3,25 +3,22 @@
  * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
-  PLUGIN_NAME } from "../settings.ts";
+import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
 import type { AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { FeatureOptions, HbpuAbortError, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
+import { HbpuAbortError, defaultRetryBackoff, retry } from "homebridge-plugin-utils";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
-import { ROOT_ID, buildingTopology, hubRecord } from "../testing.helpers.ts";
+import { ROOT_ID, buildingTopology, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, membershipDelta, serialForm } from "../policy.ts";
-import { featureOptionCategories, featureOptions } from "../options.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
 import type { AccessControllerConnect } from "./controller.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
-import type { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
@@ -233,42 +230,13 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     updatePlatformAccessories: (): void => undefined
   };
 
-  const platform = {
-
-    accessories,
-    api,
-    /* The clock every deadline this controller owns is armed on, stated here rather than left to the library's default, because a controller reading a clock no
-     * arm holds is a controller whose timers an advance would never reach.
-     */
-    clock,
-    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
+  /* The clock every deadline this controller owns is armed on is the one this arm holds, rather than the fresh one the double would otherwise default to, because a
+   * controller reading a clock no arm holds is a controller whose timers an advance would never reach. The accessory entry and exit the double defaults to reach
+   * this arm's own api recorders and this arm's own list, which is what lets an adoption and a retirement be read here.
+   */
+  const platform = makePlatformDouble({ accessories, api, clock, entries: options.options ?? [],
     log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
-      warn: (): void => undefined },
-
-    // The platform's one entry an accessory arrives in HomeKit through, standing in for the real one so an adoption reaches the same api calls and the same list.
-    registerAccessory: (accessory: AccessAccessory): void => {
-
-      api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      accessories.push(accessory);
-      api.updatePlatformAccessories();
-    },
-    signal: shutdown.signal,
-
-    // The platform's one exit an accessory leaves HomeKit through, standing in for the real one so a retirement reaches the same api calls and the same list.
-    unregisterAccessory: (accessory: AccessAccessory): void => {
-
-      const index = accessories.indexOf(accessory);
-
-      if(index < 0) {
-
-        return;
-      }
-
-      api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      accessories.splice(index, 1);
-      api.updatePlatformAccessories();
-    }
-  };
+      warn: (): void => undefined }, signal: shutdown.signal });
 
   // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
   const client = clientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
@@ -277,7 +245,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
    * its bridge from the plugin's lifetime to its own, so aborting the plugin would leave that controller's terminal signal standing and prove nothing about what
    * the abort reaches. An arm that is about some other identity states one, and its own configuration wins.
    */
-  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4", tokens: { access: "t" }, ...options.config },
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" }, ...options.config },
     async (): Promise<AccessClient> => client);
 
   controller.client = client;
@@ -1128,15 +1096,9 @@ test("login reports the identity outcome its exit took", async (t) => {
 
   let connects = 0;
 
-  const gatedPlatform = {
+  const gatedPlatform = makePlatformDouble({ entries: ["Disable.Device"], signal: shutdown.signal });
 
-    clock: new TestClock(),
-    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, ["Disable.Device"]),
-    log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
-    signal: shutdown.signal
-  };
-
-  const gated = new AccessController(gatedPlatform as unknown as AccessPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
+  const gated = new AccessController(gatedPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
 
     connects++;
 
@@ -1171,14 +1133,13 @@ test("a login whose connect exhausts its authentication budget reports no identi
 
   let attempts = 0;
 
-  const platform = { clock, featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, []),
-    log: { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal };
+  const platform = makePlatformDouble({ clock, signal: shutdown.signal });
 
   /* Credentials the controller refuses on every attempt. Auth faults get a small consecutive budget so a controller still sorting out its own auth state
    * recovers, and this spends the whole of it...the waits between attempts are armed on the platform's clock, so the drain below walks the ladder on virtual time
    * and the arm reads what the policy waited rather than waiting it out.
    */
-  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
+  const controller = new AccessController(platform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
 
     attempts++;
 
@@ -1483,9 +1444,8 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     entries.push("Enable.Controller.Webhooks");
   }
 
-  const platform = {
+  const platform = makePlatformDouble({
 
-    accessories: [] as AccessAccessory[],
     api: {
 
       hap: { uuid: { generate: (input: string): string => "uuid-" + input } },
@@ -1496,7 +1456,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     },
     clock,
     config: { controllers: options.controllers ?? [{ address: "1.2.3.4" }], options: [] },
-    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, entries),
+    entries,
     localAddressFor: options.hostResolution ?? (async (): Promise<string> => "10.0.0.7"),
     log: {
 
@@ -1504,8 +1464,6 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
       info: (message: string, ...parameters: unknown[]): void => void lines.push("info: " + format(message, ...parameters)),
       warn: (message: string, ...parameters: unknown[]): void => void lines.push("warn: " + format(message, ...parameters))
     },
-    // The webhook arms adopt nothing, but the entry is stated all the same so no double answers a shape the real platform does not have.
-    registerAccessory: (): void => undefined,
     signal: shutdown.signal,
     // The double stands in for the listener, cast at the injection site exactly as the double's own documentation states: both classes carry private fields, so
     // nothing structural assigns one to the other and the cast is this file's own statement that the substitution is deliberate.
@@ -1516,10 +1474,10 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
       return listener as unknown as HttpListener;
     },
     webhookPort: 10120
-  };
+  });
 
   const connect: AccessControllerConnect = async (): Promise<AccessClient> => client;
-  const controller = new AccessController(platform as unknown as AccessPlatform, { address: "1.2.3.4", tokens: { access: "t" } }, connect);
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, connect);
 
   return {
 

@@ -7,6 +7,7 @@ import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessS
 import { FeatureOptions, mqttTopic } from "homebridge-plugin-utils";
 import { deviceModel, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
+import { hubRecord, makePlatformDouble } from "../testing.helpers.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -16,7 +17,6 @@ import type { DecoratedSerial } from "../policy.ts";
 import { TestClock } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
-import { hubRecord } from "../testing.helpers.ts";
 import test from "node:test";
 
 // The controller every device below belongs to, in the casing a controller's own identity carries.
@@ -166,7 +166,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     getDeviceName: (): string => "Test Hub [UA Hub]",
     id: CONTROLLER_ID,
     name: "Test Controller",
-    platform: {
+    platform: makePlatformDouble({
 
       api: { hap: { Characteristic: { FirmwareRevision: "FirmwareRevision", Manufacturer: "Manufacturer", Model: "Model", Name: "Name",
         SerialNumber: "SerialNumber", StatusActive: "StatusActive" }, Service: { AccessoryInformation: "AccessoryInformation" } } },
@@ -174,7 +174,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
       featureOptions: engine,
       log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
         warn: (message: string): void => { warnings.push(message); } }
-    },
+    }),
     resolveDeviceModel: (device: AccessStateDevice): string => deviceModel(device),
     signal: new AbortController().signal,
     spawnLoop: (_title: string, body: () => Promise<void>): void => { loop = body; }

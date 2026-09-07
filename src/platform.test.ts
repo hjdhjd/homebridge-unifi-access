@@ -181,7 +181,7 @@ test("an accessory the platform is not carrying leaves its one exit untouched, w
   const carried = cachedAccessory("uuid-carried", "Carried", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:01" });
   const stranger = cachedAccessory("uuid-stranger", "Stranger", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:02" });
 
-  platform.accessories.push(carried);
+  platform.configureAccessory(carried);
 
   /* An accessory this platform never carried, handed to the exit anyway. The list is deliberately not empty, because an implementation that reached for a position
    * it never found would take the accessory at the end of the list, and an empty list would hide that.
@@ -240,7 +240,7 @@ test("a skipped controller entry fences the reclaim off", async () => {
   const reporting = { reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
 
   // The accessory the mechanism arm below removes under an open fence, so what this arm asserts about is the fence rather than an unremovable fixture.
-  platform.accessories.push(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 
@@ -264,7 +264,7 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   const reporting = { reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
   const silent = { reclaimKeys: { currentKey: "5.6.7.8", priorKey: undefined } } as unknown as AccessController;
 
-  platform.accessories.push(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 
@@ -286,7 +286,7 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
     login: async (): Promise<never> => { throw new Error("Connection refused."); },
     reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
 
-  wiredPlatform.accessories.push(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  wiredPlatform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const wiredInner = platformInternals(wiredPlatform);
 
@@ -310,10 +310,9 @@ test("a stranded accessory is reclaimed once every configured controller has rep
   const reporting = { reclaimClaims: (): MembershipClaims => claims,
     reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
 
-  platform.accessories.push(
-    cachedAccessory("uuid-kept-key", "Kept By Key", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:07" }),
-    cachedAccessory("uuid-kept-claim", "Kept By Claim", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }),
-    cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-kept-key", "Kept By Key", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:07" }));
+  platform.configureAccessory(cachedAccessory("uuid-kept-claim", "Kept By Claim", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }));
+  platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 
@@ -339,9 +338,8 @@ test("a stranded reclaim honors the global removal delay and re-checks before fi
   const reporting = { reclaimClaims: (): MembershipClaims => ({ serials: new Set(projected.map(serialForm)), uuids: new Set<string>() }),
     reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
 
-  platform.accessories.push(
-    cachedAccessory("uuid-returning", "Returning", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }),
-    cachedAccessory("uuid-gone", "Gone", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-returning", "Returning", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }));
+  platform.configureAccessory(cachedAccessory("uuid-gone", "Gone", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 
@@ -363,7 +361,7 @@ test("a stranded reclaim honors the global removal delay and re-checks before fi
   /* The teardown wire, on a fixture of its own: queue a fresh stranded accessory, fire the platform's shutdown, and let the delay pass with nothing further
    * removed - which is what proves the queue was cleared. A coda re-asserting on timers that have already fired would prove nothing.
    */
-  platform.accessories.push(cachedAccessory("uuid-late", "Late", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:43" }));
+  platform.configureAccessory(cachedAccessory("uuid-late", "Late", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:43" }));
 
   await inner.reclaimStranded([Promise.resolve({ controller: reporting, outcome: "reporting" })]);
 
@@ -391,7 +389,7 @@ test("a shutdown that lands before the fence closes removes nothing", async () =
   const waiting = { login: async (): Promise<AccessLoginOutcome> => pending,
     reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
 
-  platform.accessories.push(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 
@@ -427,10 +425,9 @@ test("a disabled controller contributes its keys and is never asked for claims",
   /* This asserts the decision's letter at this layer rather than a production scenario: by the time the pass runs, a controller the user disabled has already taken
    * every accessory its keys would spare out of HomeKit, so the first fixture is constructible only with a double.
    */
-  platform.accessories.push(
-    cachedAccessory("uuid-kept-disabled", "Kept By A Disabled Key", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:08" }),
-    cachedAccessory("uuid-kept-claim", "Kept By Claim", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }),
-    cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+  platform.configureAccessory(cachedAccessory("uuid-kept-disabled", "Kept By A Disabled Key", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:08" }));
+  platform.configureAccessory(cachedAccessory("uuid-kept-claim", "Kept By Claim", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }));
+  platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
   const inner = platformInternals(platform);
 

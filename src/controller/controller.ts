@@ -870,12 +870,6 @@ export class AccessController {
         this.removeHomeKitDevice(accessDevice.accessory);
       }
     }
-
-    // Refresh the accessory cache when membership actually moved, rather than on a cadence.
-    if(toAdd.length || toRemove.length) {
-
-      this.platform.api.updatePlatformAccessories(this.platform.accessories);
-    }
   }
 
   /* Reclaim cached accessories current membership cannot account for. Homebridge restores previously-registered accessories at startup, so a device unpaired

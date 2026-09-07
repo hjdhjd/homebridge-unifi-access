@@ -45,7 +45,8 @@ export default hbPluginUtils({
   // The webUI library directory holds a build-time copy of the homebridge-plugin-utils webUI framework rather than anything authored here, so linting it would report
   // findings against code this repository does not own. The ignore stops being needed once that framework is consumed as a versioned bundle rather than a flat copy.
   ignores: ["homebridge-ui/public/lib/**"],
-  js: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs", "homebridge-ui/server.js", "eslint.config.mjs" ],
+  js: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs", "homebridge-ui/server.js", "homebridge-ui/users-census.js",
+    "eslint.config.mjs" ],
   ts: ["src/**/*.ts"],
   ui: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs" ]
 });

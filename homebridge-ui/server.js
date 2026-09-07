@@ -13,6 +13,7 @@ import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } 
 import { accessMethodChoices, composeConnectIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
+import { officialUsers } from "./users-census.js";
 import util from "node:util";
 
 // The adapter's process generation: an opaque per-process value whose only requirement is uniqueness across this plugin's helper processes, so a panel that outlived
@@ -32,31 +33,6 @@ const byName = (a, b) => {
   const bCase = nonEmpty(b.alias, b.name, b.model, b.display_model).toLowerCase();
 
   return (aCase > bCase) ? 1 : ((bCase > aCase) ? -1 : 0);
-};
-
-// The page the official users listing answers by, large enough that a typical site's census arrives in one round trip.
-const USERS_PAGE_SIZE = 100;
-
-/* The official users census, every page the endpoint answers in one list, for labeling the door guard picker. The first page says how many there are, and the
- * rest are read together rather than one after another. A failure answers the empty list rather than the probe's failure: the census only labels a picker, so a
- * token without the users permission still lists every device, and the guards those devices list carry their identifiers as labels.
- */
-const officialUsers = async (official) => {
-
-  try {
-
-    const first = await official.users.fetchAll({ pageNum: 1, pageSize: USERS_PAGE_SIZE });
-    const pagination = first.pagination;
-    const pages = (pagination && (pagination.page_size > 0)) ? Math.ceil(pagination.total / pagination.page_size) : 1;
-    const rest = await Promise.all(Array.from({ length: Math.max(pages - 1, 0) },
-      (_, index) => official.users.fetchAll({ pageNum: index + 2, pageSize: USERS_PAGE_SIZE })));
-
-    return [ ...first.data, ...rest.flatMap(page => page.data) ];
-  } catch {
-
-    // The census is a courtesy for the labels, and the device list never fails on its account.
-    return [];
-  }
 };
 
 /* The adopted devices as the OFFICIAL API answers them, decorated into the same shape a topology device carries so the browser renders both through one path.
