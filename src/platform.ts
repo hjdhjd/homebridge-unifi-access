@@ -74,7 +74,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     if(webhookPort.source === "invalid") {
 
-      this.log.warn("The webhook port setting %s is not a whole number from 0 to 65535. The default port %s will be used.", webhookPort.value, webhookPort.port);
+      this.log.warn("The webhook port setting %s is not a whole number from 1 to 65535. The default port %s will be used.", webhookPort.value, webhookPort.port);
     }
 
     this.#webhookPort = webhookPort.port;
@@ -394,8 +394,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     return this.#shutdownController.signal;
   }
 
-  // The port the webhook listener binds. The registered endpoint URL names this rather than whatever port the server has actually bound, because a registration is
-  // composed the moment a controller connects and the bind completes on its own schedule.
+  // The port the webhook listener binds, and the port the registered endpoint URL names - one port by construction, because the setting refuses 0 and the listener
+  // retries the configured port on every bind attempt, so a registration composed before the bind completes still names the port the bind will hold.
   public get webhookPort(): number {
 
     return this.#webhookPort;

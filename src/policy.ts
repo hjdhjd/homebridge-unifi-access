@@ -1201,14 +1201,14 @@ export function isManagedRecord(device: AccessStateDevice): device is AccessStat
 }
 
 /* What the webhook port setting resolves to. A setting that is absent or turned off is the default, silently: nothing was said. A setting that is present and a whole
- * number from 0 to 65535 is the port. Anything else present is invalid, answered as the default with the value that was rejected, so the one reader can say so
- * once, at read time, rather than each controller discovering it when the listener refuses to bind.
+ * number from 1 to 65535 is the port, with 0 refused because an ephemeral port cannot be registered. Anything else present is invalid, answered as the default with
+ * the value that was rejected, so the one reader can say so once, at read time, rather than each controller discovering it when the listener refuses to bind.
  */
 export type AccessWebhookPortResolution = { readonly port: number; readonly source: "configured" | "default" } |
   { readonly port: number; readonly source: "invalid"; readonly value: string };
 
 /**
- * Resolve the webhook port setting: a whole number from 0 to 65535 as written, the default for a setting that is absent or turned off, and the default with the
+ * Resolve the webhook port setting: a whole number from 1 to 65535 as written, the default for a setting that is absent or turned off, and the default with the
  * rejected value for anything else.
  *
  * @param value - The setting's raw value: the string as configured, `undefined` when absent, `null` when turned off.
@@ -1225,12 +1225,21 @@ export function resolveWebhookPort(value: Nullable<string | undefined>): AccessW
   const text = value.trim();
 
   // A port is digits alone: no sign, no decimal point, no exponent, and nothing a looser numeric parse would quietly accept.
-  if(!/^\d{1,5}$/.test(text) || (Number.parseInt(text, 10) > 65535)) {
+  if(!/^\d{1,5}$/.test(text)) {
 
     return { port: ACCESS_WEBHOOK_PORT, source: "invalid", value: text };
   }
 
-  return { port: Number.parseInt(text, 10), source: "configured" };
+  const port = Number.parseInt(text, 10);
+
+  // 0 asks the operating system for an ephemeral port, which changes on every start and can never be the port a registration tells the controller to deliver to, so
+  // the first port a setting can name is 1 and the last is 65535.
+  if((port < 1) || (port > 65535)) {
+
+    return { port: ACCESS_WEBHOOK_PORT, source: "invalid", value: text };
+  }
+
+  return { port, source: "configured" };
 }
 
 /**

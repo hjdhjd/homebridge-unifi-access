@@ -10,8 +10,10 @@ import { APIEvent } from "homebridge-plugin-utils";
 import type { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { format } from "node:util";
 import { makeControllerDouble } from "./testing.helpers.ts";
+import { once } from "node:events";
 import { serialForm } from "./policy.ts";
 import { settle } from "homebridge-plugin-utils/testing";
 
@@ -77,6 +79,32 @@ function makeHarness(): Harness {
 
   return { events, handlers, lines, make: (config: AccessPlatformConfig): AccessPlatform => new AccessPlatform(log as unknown as Logging, config,
     api as unknown as API), registered, unregistered, updated };
+}
+
+/* A port nothing on this machine is holding: asked of the kernel exactly the way an ephemeral bind asks for one, then released, so the arm below binds a real socket
+ * on a port it can state rather than contending for a fixed one anything else might already hold.
+ *
+ * @returns The port the kernel chose and then let go of.
+ */
+async function freePort(): Promise<number> {
+
+  const server = createServer();
+
+  server.listen(0);
+
+  await once(server, "listening");
+
+  const address = server.address();
+
+  assert.ok(address && (typeof address === "object"), "a listening socket reports its address as an object, which is what carries the port the kernel chose");
+
+  const port = address.port;
+
+  server.close();
+
+  await once(server, "close");
+
+  return port;
 }
 
 /* The platform's own plumbing as the arms below drive it: the controllers it constructed, the launch that starts them, and the reclaim that consumes their
@@ -443,7 +471,7 @@ test("a webhook port setting that is not a port is said once and the default is 
 
   assert.equal(refusedPlatform.webhookPort, 10120, "a setting outside the range of a port leaves the default standing");
   assert.deepEqual(refused.lines.filter(line => line.startsWith("warn: The webhook port setting")),
-    ["warn: The webhook port setting 70000 is not a whole number from 0 to 65535. The default port 10120 will be used."],
+    ["warn: The webhook port setting 70000 is not a whole number from 1 to 65535. The default port 10120 will be used."],
     "and it is reported once as a configuration problem, naming the setting and the port that will be used instead");
 
   const stated = makeHarness();
@@ -463,11 +491,12 @@ test("a webhook port setting that is not a port is said once and the default is 
 test("the platform builds one real listener, on its own clock and lifetime, and the shutdown ends it", async (t) => {
 
   const harness = makeHarness();
-  /* The ephemeral port, so this arm binds a real socket without contending for one anything else on the machine might hold. Everything else about the listener -
-   * the clock its bind retry waits on, the label its own lines carry, the signal that ends it - is what the platform composes, and this is the only arm that
-   * runs that composition rather than substituting for it.
+  const port = await freePort();
+  /* The property this arm is here for: the listener binds the port the setting named, which is the port the registration names, so the two can never disagree.
+   * Everything else about the listener - the clock its bind retry waits on, the label its own lines carry, the signal that ends it - is what the platform composes,
+   * and this is the only arm that runs that composition rather than substituting for it.
    */
-  const platform = harness.make({ options: ["Enable.Controller.Webhooks.Port.0"], platform: "UniFi Access" });
+  const platform = harness.make({ options: ["Enable.Controller.Webhooks.Port=" + port.toString()], platform: "UniFi Access" });
   const listener = platform.webhookListener();
 
   // Registered here rather than at the end, so an arm failing partway still releases the port instead of leaving the run hanging on a bound server.
@@ -478,7 +507,7 @@ test("the platform builds one real listener, on its own clock and lifetime, and 
 
   await listener.ready;
 
-  assert.ok(listener.boundPort > 0, "an ephemeral port resolves to a real one the operating system chose");
+  assert.equal(listener.boundPort, port, "the listener binds the port the setting named, which is the port the registered URL names");
 
   // Homebridge's own shutdown ends it, through the handler the platform registered for itself before it looked at any controller configuration.
   harness.handlers.get(APIEvent.SHUTDOWN)?.();
