@@ -14,7 +14,8 @@ import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validService } from "homebridge-plugin-utils";
+import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic,
+  validService } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
@@ -71,12 +72,13 @@ const DPS_LABEL = "Door Position Sensor";
 // The HomeKit-facing name of the side door position sensor, beside the main door's for the same reason.
 const SIDE_DOOR_DPS_LABEL = "Side Door Position Sensor";
 
-/* Which pass a sensor configure path is running as. At adoption, the sensors the accessory arrived carrying - restored from Homebridge's accessory cache with the
- * values they last held and none of their handlers - have been dressed by nobody, so every sensor the pass acquires is dressed. On every later pass, the re-gate a
- * device update or a door-state delivery runs, those sensors were dressed at adoption, so only a sensor the pass creates is. The pass states the one fact the
- * library cannot know: its creation callback tells a created sensor from a found one, and only the caller knows whether a found sensor was dressed already.
+/* Which pass a configure path is running as. At adoption, the services the accessory arrived carrying - restored from Homebridge's accessory cache with the values
+ * they last held and none of their handlers - have been dressed by nobody, so every service the pass acquires is dressed: its handlers, its primary marking, and its
+ * starting values. On every later pass, the re-gate a device update or a door-state delivery runs, those services were dressed at adoption, so only a service the
+ * pass creates is. The pass states the one fact the library cannot know: its creation callback tells a created service from a found one, and only the caller knows
+ * whether a found service was dressed already.
  */
-interface SensorPass {
+interface ConfigurePass {
 
   readonly initialized: boolean;
 }
@@ -148,6 +150,10 @@ export class AccessHub extends AccessDevice {
   #doorStateApplying: boolean;
   // Where the main door's travel stands. Only the main door has an opener, so only the main door runs a machine.
   #doorTransition: DoorTransition;
+  /* The doorbell get subscription's own lifetime, created where the doorbell is dressed and aborted where the service retires, so the topic answers exactly while
+   * the service exists. The device's own end releases the registration through the composed signal without anything here having to touch it.
+   */
+  #doorbellTopic: AbortController | undefined;
   // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
   // rows we have already folded be told from one carrying news.
   #foldedConfigValues: Map<AccessMethodKey, boolean> | undefined;
@@ -180,6 +186,7 @@ export class AccessHub extends AccessDevice {
     // A door we have not been asked to move is standing still, which is the only honest reading before anything has been commanded.
     this.#doorStateApplying = false;
     this.#doorTransition = { phase: "idle" };
+    this.#doorbellTopic = undefined;
     this.#foldedConfigValues = undefined;
     this.#gateDoors = [];
 
@@ -257,7 +264,7 @@ export class AccessHub extends AccessDevice {
    *
    * @returns The doors whose identity this discovery moved.
    */
-  private discoverDoorIds({ initialized }: SensorPass): readonly DrivenDoor[] {
+  private discoverDoorIds({ initialized }: ConfigurePass): readonly DrivenDoor[] {
 
     const doors: AccessStateDoor[] = [...this.controller.client.state.snapshot().doors.values()];
 
@@ -364,8 +371,33 @@ export class AccessHub extends AccessDevice {
     }
   }
 
+  /* Every evidence-gated and capability-gated service this hub offers, configured from the record as it stands. It runs once at construction and again on every
+   * device update, so a capability appearing or disappearing, a port rebound in Access, and a wiring change all reach HomeKit without a restart.
+   *
+   * A UA Gate re-resolves its doors first, so every service below reads the current enumeration, and the doors that moved are seeded last, once their services
+   * exist. The order within is the construction order the position sensor's dependency fixes: the terminal inputs before the lock, so the position sensor exists
+   * when a garage door opener derives its state from it. Each path is silent on repeat by construction, so a pass over a record that did not change costs a
+   * handful of service lookups and writes nothing.
+   *
+   * @param pass - The pass these paths are running as.
+   */
+  #configureServices(pass: ConfigurePass): void {
+
+    const rebound = (this.uda.device_type === "UGT") ? this.discoverDoorIds(pass) : [];
+
+    this.configureTerminalInputs(pass);
+    this.configureSideDoorTerminalInputs(pass);
+    this.configureLock(pass);
+    this.configureLockTrigger(pass);
+    this.configureSideDoorLock(pass);
+    this.configureSideDoorLockTrigger(pass);
+    this.configureDoorbell(pass);
+    this.configureDoorbellTrigger(pass);
+    this.initializeDoorStates(rebound);
+  }
+
   // Initialize and configure the light accessory for HomeKit.
-  private configureDevice(): boolean {
+  private configureDevice(): void {
 
     this._hkLockState = this.hubLockState;
     this._hkSideDoorDpsState = this.hubSideDoorDpsState;
@@ -428,23 +460,8 @@ export class AccessHub extends AccessDevice {
     // Configure access method switches, if we're a reader device.
     this.configureAccessMethodSwitches();
 
-    // Configure the sensors connected to terminal inputs. This must be done before configuring the lock so that the DPS contact sensor exists when configuring a
-    // GarageDoorOpener service, which derives its state from the DPS sensor. This is adoption, so nothing has dressed anything yet and every sensor these two
-    // acquire is dressed from what we hold.
-    this.configureTerminalInputs({ initialized: false });
-    this.configureSideDoorTerminalInputs({ initialized: false });
-
-    // Configure the lock, if we're a hub device.
-    this.configureLock();
-    this.configureLockTrigger();
-
-    // Configure the side door lock, if we're a UA Gate device.
-    this.configureSideDoorLock();
-    this.configureSideDoorLockTrigger();
-
-    // Configure the doorbell, if we have one.
-    this.configureDoorbell();
-    this.configureDoorbellTrigger();
+    // The service pass, run here as adoption: nothing has dressed anything on this accessory yet, so every service the pass acquires is dressed from what we hold.
+    this.#configureServices({ initialized: false });
 
     // Configure MQTT services.
     this.configureMqtt();
@@ -462,22 +479,16 @@ export class AccessHub extends AccessDevice {
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
 
     /* A UA Gate subscribes to remote unlocks by event name, because the controller delivers them under the door's identity rather than the hub's, and ownership is
-     * settled at delivery from the doors discovery resolved - so a door rebound mid-run needs no second registration. The seed runs after every service exists, for
-     * the reason the seed's own comment gives.
+     * settled at delivery from the doors discovery resolved - so a door rebound mid-run needs no second registration.
      */
     if(this.uda.device_type === "UGT") {
 
-      const rebound = this.discoverDoorIds({ initialized: false });
-
       this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, handler);
-      this.initializeDoorStates(rebound);
     }
-
-    return true;
   }
 
   // Configure the access method switches for HomeKit.
-  private configureAccessMethodSwitches(): boolean {
+  private configureAccessMethodSwitches(): void {
 
     /* Switches are created and retired from what we actually know about this device's access methods, and never from what we have yet to hear. A record carrying
      * configuration rows answers synchronously, right here; a record carrying none is answered by the official settings read the dispatch below launches. Until one
@@ -490,7 +501,7 @@ export class AccessHub extends AccessDevice {
 
       this.#dispatchAccessMethodSeed();
 
-      return true;
+      return;
     }
 
     // The methods the user selected switches for, read afresh on every pass so a changed selection is what the next pass materializes or retires, and read
@@ -590,8 +601,6 @@ export class AccessHub extends AccessDevice {
       // Initialize the switch from the same model its reads answer from, so what HomeKit is handed and what the handler would answer agree from the first pass.
       service.updateCharacteristic(this.hap.Characteristic.On, this.#accessMethodEnabled(accessMethod.key));
     }
-
-    return true;
   }
 
   // Whether a method reads on. A model nothing has seeded answers off for every method, which is the same answer a seeded model gives for a method it holds no
@@ -923,20 +932,38 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Configure the doorbell service for HomeKit.
-  private configureDoorbell(): boolean {
+  // Configure the doorbell service for HomeKit. A repeat pass finds the doorbell dressed and leaves it, which is what keeps its primary marking and its topic
+  // exactly as the pass that created them left them.
+  private configureDoorbell({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.Doorbell, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell"))) {
 
-      return false;
+      // The topic follows the service out, so nothing answers on it once the doorbell is gone.
+      this.#doorbellTopic?.abort();
+      this.#doorbellTopic = undefined;
+
+      return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => { this.log.info("Enabling the doorbell."); });
+    const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => {
+
+      initialized = false;
+      this.log.info("Enabling the doorbell.");
+    });
+
+    if(initialized) {
+
+      return;
+    }
 
     service.setPrimaryService(true);
 
-    return true;
+    /* The get topic is registered with the service it answers for, once per service lifetime, so a doorbell appearing mid-run answers on its topic and one
+     * withdrawn stops. The lifetime is handed to the registration and composed with the device's own, so either end releases it.
+     */
+    this.#doorbellTopic = new AbortController();
+    this.mqttSubscribeGet(mqttTopics.doorbell, () => (this.doorbellRingRequestId !== null) ? "true" : "false", this.#doorbellTopic.signal);
   }
 
   /* Configure our contact sensors for HomeKit. Eligibility is what the hardware reports as wired, taken together with the user's feature option, so a sensor is
@@ -946,7 +973,7 @@ export class AccessHub extends AccessDevice {
    * being removed, the acquire helper only when one is created, and a sensor is dressed only the first time this hub holds it - at adoption, or at its creation on
    * a later pass.
    */
-  private configureTerminalInputs({ initialized }: SensorPass): boolean {
+  private configureTerminalInputs({ initialized }: ConfigurePass): void {
 
     this.configureDpsSensor({ initialized });
 
@@ -975,18 +1002,16 @@ export class AccessHub extends AccessDevice {
       // Acquire the sensor, dressed with the input's own reading the first time this hub holds it.
       this.#acquireSensor({ initialized, label, reading: this.#contactReading(facts), subtype: reservedId });
     }
-
-    return true;
   }
 
   /* Acquire a contact sensor under its reserved subtype and dress it the first time this hub holds it. The library's callback tells a created sensor from one
    * found on the accessory, and the pass tells whether a found sensor is one an earlier pass dressed: restored from the accessory cache, it carries the values it
-   * last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting values; every
-   * change after it reaches the sensor through the sweeps alone.
+   * last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting values, with the
+   * tamper attach below the one exception; every change after it reaches the sensor through the sweeps alone.
    *
    * @param options - The pass this acquire runs as, the sensor's label, the reading it is dressed with, and the reserved subtype it is acquired under.
    */
-  #acquireSensor({ initialized, label, reading, subtype }: SensorPass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): void {
+  #acquireSensor({ initialized, label, reading, subtype }: ConfigurePass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): void {
 
     const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, subtype, () => {
 
@@ -995,32 +1020,50 @@ export class AccessHub extends AccessDevice {
       this.log.info("Enabling the " + label.toLowerCase() + ".");
     });
 
+    /* The tamper characteristic's presence follows the capability in both directions on every pass: the library attaches it where the hardware reports tampering and
+     * removes it where the hardware stopped, so a sensor dressed before the capability arrived gains the characteristic and one carried from a cache the hardware
+     * does not back loses it. The transition the call answers is what decides the one write below.
+     */
+    const tamper = validCharacteristic({ characteristic: this.hap.Characteristic.StatusTampered, service, validate: isTamperCapable(this.uda) });
+
     if(!initialized) {
 
       this.#dressSensor(service, reading);
     }
+
+    /* The tamper status is written from the held verdict on exactly two occasions: this pass put the characteristic on the sensor, or the sensor is being dressed
+     * and the characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose characteristic stood
+     * already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
+     */
+    if((tamper === "attached") || (!initialized && (tamper === "kept"))) {
+
+      service.updateCharacteristic(this.hap.Characteristic.StatusTampered, this.#tamperRendering(this.tamperVerdict));
+    }
   }
 
-  /* Dress a sensor the first time this hub holds it: its reading, its availability, and its tamper status. HomeKit carries an optional characteristic only once
-   * something has written it, so the availability and tamper writes are what put those characteristics on the sensor at all, which is what lets the two sweeps
-   * reach every sensor without the hub keeping a roster. The availability handler answers every later read from the live composition, so HomeKit sees where the
-   * device stands even when nothing has pushed since the composition last moved. The tamper status states the tracked verdict and never the record, so a dressing
-   * can never move the baseline a genuine change is measured against; nothing established renders normal, because HomeKit has no third value and a status restored
-   * from the accessory cache with no reading behind it is not one this plugin can assert.
+  /* Dress a sensor the first time this hub holds it: its reading and its availability. HomeKit carries an optional characteristic only once something has written
+   * it, so the availability write is what puts that characteristic on the sensor at all, which is what lets the availability sweep reach every sensor without the
+   * hub keeping a roster. The availability handler answers every later read from the live composition, so HomeKit sees where the device stands even when nothing
+   * has pushed since the composition last moved. The tamper status is written by the acquire above, where the presence reconcile left the characteristic standing,
+   * which is what lets the tamper sweep reach every sensor for the same reason.
    */
   #dressSensor(service: Service, reading: CharacteristicValue): void {
 
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, reading);
     service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
     service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
+  }
 
-    if(!isTamperCapable(this.uda)) {
+  /* How a tamper verdict renders in HomeKit - the one statement of it, read by the acquire's own write and by the projection's sweep. Nothing established renders
+   * normal, because HomeKit has no third value and a status restored from the accessory cache with no reading behind it is not one this plugin can assert.
+   *
+   * @param verdict - The tracked verdict to render.
+   *
+   * @returns What HomeKit is handed for that verdict.
+   */
+  #tamperRendering(verdict: boolean | undefined): CharacteristicValue {
 
-      return;
-    }
-
-    service.updateCharacteristic(this.hap.Characteristic.StatusTampered, this.tamperVerdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
-      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
+    return verdict ? this.hap.Characteristic.StatusTampered.TAMPERED : this.hap.Characteristic.StatusTampered.NOT_TAMPERED;
   }
 
   /* Configure the door position sensor. It stands apart from the loop above because its eligibility comes from the door-state model rather than a wiring-key pair,
@@ -1030,7 +1073,7 @@ export class AccessHub extends AccessDevice {
    * The door-state delivery calls this too, so a change in wiring evidence re-gates the sensor on that rail as well rather than waiting for a device update. Like
    * the loop above, it is a no-op on repeat by construction.
    */
-  private configureDpsSensor({ initialized }: SensorPass): boolean {
+  private configureDpsSensor({ initialized }: ConfigurePass): void {
 
     /* A UA Gate offers the sensor on the strength of the hardware being a gate, exactly as it always has: that hardware drives two doors, and the library derives
      * no topology facts for a device it cannot tell the doors of apart, so there is no evidence here to gate on and its own handlers own the state behind it.
@@ -1052,22 +1095,20 @@ export class AccessHub extends AccessDevice {
       return isValid;
     }, AccessReservedNames.CONTACT_DPS)) {
 
-      return false;
+      return;
     }
 
     // The reading is the projection the delivery path maintains, so a dressing writes what we already hold rather than a fresh read of the record.
     this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, subtype: AccessReservedNames.CONTACT_DPS });
-
-    return true;
   }
 
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
-  private configureSideDoorTerminalInputs({ initialized }: SensorPass): boolean {
+  private configureSideDoorTerminalInputs({ initialized }: ConfigurePass): void {
 
     // We only configure side door terminal inputs for UA Gate hubs that have the side door enabled.
     if(!this.hints.hasSideDoor) {
 
-      return false;
+      return;
     }
 
     // Validate whether we should have this service enabled. We check the hasSideDoorDps hint, which already incorporates the feature option check.
@@ -1081,17 +1122,15 @@ export class AccessHub extends AccessDevice {
       return this.hints.hasSideDoorDps;
     }, AccessReservedNames.CONTACT_DPS_SIDE)) {
 
-      return false;
+      return;
     }
 
     // The reading is the projection the side door's delivery maintains, for the same reason the main door's is.
     this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, subtype: AccessReservedNames.CONTACT_DPS_SIDE });
-
-    return true;
   }
 
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
-  private configureLock(): boolean {
+  private configureLock({ initialized }: ConfigurePass): void {
 
     // First, remove any previous service types that are no longer selected.
     const serviceTypes = [ this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener ];
@@ -1113,11 +1152,19 @@ export class AccessHub extends AccessDevice {
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, selectedService, isHub(this.uda))) {
 
-      return false;
+      return;
     }
 
-    const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined,
-      () => { this.log.info("Configuring door as %s service.", this.doorServiceType); });
+    const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined, () => {
+
+      initialized = false;
+      this.log.info("Configuring door as %s service.", this.doorServiceType);
+    });
+
+    if(initialized) {
+
+      return;
+    }
 
     // Configure based on service type.
     if(this.doorServiceType === "GarageDoorOpener") {
@@ -1137,8 +1184,6 @@ export class AccessHub extends AccessDevice {
     this.hkLockState = lockState;
 
     service.setPrimaryService(true);
-
-    return true;
   }
 
   // Configure a LockMechanism service.
@@ -1264,18 +1309,28 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => false);
   }
 
-  // Configure a switch to manually trigger a doorbell ring event for HomeKit.
-  private configureDoorbellTrigger(): boolean {
+  // Configure a switch to manually trigger a doorbell ring event for HomeKit. A repeat pass finds the switch dressed and leaves it, which is what keeps a pending
+  // ring's trigger on rather than pushing it back off underneath the ring.
+  private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.Switch, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger"),
       AccessReservedNames.SWITCH_DOORBELL_TRIGGER)) {
 
-      return false;
+      return;
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Doorbell Trigger",
-      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => { this.log.info("Enabling the doorbell automation trigger."); });
+      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => {
+
+        initialized = false;
+        this.log.info("Enabling the doorbell automation trigger.");
+      });
+
+    if(initialized) {
+
+      return;
+    }
 
     // The switch mirrors ring truth: on while the doorbell is ringing, off while it is quiet.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorbellRingRequestId !== null);
@@ -1347,22 +1402,31 @@ export class AccessHub extends AccessDevice {
     // Initialize the switch.
     setServiceName(service, this.accessoryName + " Doorbell Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    return true;
   }
 
-  // Configure a switch to automate lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service.
-  private configureLockTrigger(): boolean {
+  /* Configure a switch to automate lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service. A
+   * repeat pass finds the switch dressed and leaves it, which is what keeps an unlocked door's trigger on rather than pushing it back off underneath the door.
+   */
+  private configureLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.Switch, isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger"),
       AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
 
-      return false;
+      return;
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => { this.log.info("Enabling the lock automation trigger."); });
+      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => {
+
+        initialized = false;
+        this.log.info("Enabling the lock automation trigger.");
+      });
+
+    if(initialized) {
+
+      return;
+    }
 
     // The trigger mirrors the lock: on while anything but secured, off while secured.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
@@ -1381,21 +1445,28 @@ export class AccessHub extends AccessDevice {
     // Initialize the switch.
     setServiceName(service, this.accessoryName + " Lock Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    return true;
   }
 
-  // Configure the side door for HomeKit (UA Gate only) - always uses Lock service.
-  private configureSideDoorLock(): boolean {
+  // Configure the side door for HomeKit (UA Gate only) - always uses Lock service. A repeat pass finds the lock dressed and leaves it, so the reading it stands at
+  // is whatever the rails last put there.
+  private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hints.hasSideDoor, AccessReservedNames.LOCK_DOOR_SIDE)) {
 
-      return false;
+      return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_DOOR_SIDE,
-      () => { this.log.info("Configuring side door lock."); });
+    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_DOOR_SIDE, () => {
+
+      initialized = false;
+      this.log.info("Configuring side door lock.");
+    });
+
+    if(initialized) {
+
+      return;
+    }
 
     // Configure the lock service.
     this.configureLockService(service, true);
@@ -1404,22 +1475,31 @@ export class AccessHub extends AccessDevice {
     this._hkSideDoorLockState = -1;
     setServiceName(service, this.accessoryName + " Side Door");
     this.hkSideDoorLockState = this.hubSideDoorLockState;
-
-    return true;
   }
 
-  // Configure a switch to automate side door lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure service.
-  private configureSideDoorLockTrigger(): boolean {
+  /* Configure a switch to automate side door lock and unlock events in HomeKit beyond what HomeKit might allow for a lock service that gets treated as a secure
+   * service. A repeat pass finds the switch dressed and leaves it, for the reason the main door's trigger gives.
+   */
+  private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.Switch, this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger"),
       AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER)) {
 
-      return false;
+      return;
     }
 
     const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Side Door Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => { this.log.info("Enabling the side door lock automation trigger."); });
+      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => {
+
+        initialized = false;
+        this.log.info("Enabling the side door lock automation trigger.");
+      });
+
+    if(initialized) {
+
+      return;
+    }
 
     // Trigger the lock state.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
@@ -1438,26 +1518,16 @@ export class AccessHub extends AccessDevice {
     // Initialize the switch.
     setServiceName(service, this.accessoryName + " Side Door Lock Trigger");
     service.updateCharacteristic(this.hap.Characteristic.On, false);
-
-    return true;
   }
 
-  // Configure the MQTT topics this device answers on and listens to.
-  private configureMqtt(): boolean {
+  // Configure the MQTT topics this device answers on and listens to for the whole of its run. The doorbell's get topic is not among them: it is registered with the
+  // doorbell service, whose own lifetime it follows.
+  private configureMqtt(): void {
 
-    // MQTT doorbell status.
-    if(this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell")) {
-
-      this.mqttSubscribeGet(mqttTopics.doorbell, () => {
-
-        return this.doorbellRingRequestId !== null ? "true" : "false";
-      });
-    }
-
-    // The remaining MQTT subscriptions are hub-specific (lock, DPS, side door).
+    // The MQTT subscriptions below are hub-specific (lock, DPS, side door).
     if(!isHub(this.uda)) {
 
-      return true;
+      return;
     }
 
     // MQTT DPS status.
@@ -1476,7 +1546,6 @@ export class AccessHub extends AccessDevice {
         case this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED:
 
           return "false";
-
 
         case this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED:
 
@@ -1601,8 +1670,6 @@ export class AccessHub extends AccessDevice {
         }
       });
     }
-
-    return true;
   }
 
   // The client's live entry for one door, absent only where neither source had anything to say about that door.
@@ -2642,36 +2709,37 @@ export class AccessHub extends AccessDevice {
     // Project tampering ahead of the re-gate, so a sensor the re-gate creates on this delivery is dressed once, from the verdict this delivery established.
     this.projectTamperState();
 
-    /* Re-derive every input's eligibility from the evidence this update brought with it. Running it unconditionally is what lets a wiring change or a multiplex flip
-     * re-gate its services mid-run on any hub family rather than only on the one that happened to be checked for it, and the call is cheap and silent on repeat by
-     * construction. The pass dresses a sensor it creates and nothing else, because every sensor already standing was dressed at adoption.
+    /* Re-gate every service this record can move, from the evidence this update brought with it. Running the whole pass unconditionally is what lets a capability
+     * arriving or going, a rebound port, and a wiring change reach HomeKit mid-run on any hub family rather than only on the one that happened to be checked for
+     * it, and the pass is cheap and silent on repeat by construction. It dresses a service it creates and nothing else, because every service already standing was
+     * dressed at adoption.
      */
-    this.configureTerminalInputs({ initialized: true });
+    this.#configureServices({ initialized: true });
   }
 
   /* Project tampering. The condition lives on this rail alone: the configure path adopts a baseline and dresses the sensors from it, and every change after that
-   * arrives here, ahead of the delivery's re-gate. A reading that agrees with the one we hold is not a change, and nothing below describes anything but a change -
-   * the characteristic, the topic, and the log alike - so a restated record moves none of them. A reading that is a change lands in the held verdict before the
-   * re-gate runs, so a sensor the re-gate creates on this delivery is dressed once, from the verdict this delivery established.
+   * arrives here, ahead of the delivery's service pass. A reading that agrees with the one we hold is not a change, and nothing below describes anything but a
+   * change - the characteristic, the topic, and the log alike - so a restated record moves none of them. A reading that is a change lands in the held verdict
+   * before the pass runs, which is what lets a sensor the pass creates, and a sensor the pass attaches the characteristic to, read the verdict this delivery
+   * established rather than the one it moved past.
    *
    * The characteristic and the topic both carry the condition itself, so each moves on every change, an adoption included. The characteristic reaches every
-   * contact sensor through the library's sweep because every one of them carries it from creation, and the topic spells the reading's three answers as they are,
-   * with unknown standing in for nothing established, so a subscriber holding unknown hears the reading return the moment it does. The log announces transitions
-   * alone, because a reading seen for the first time is not one anybody observed. A reading the library withdraws - the console's tampering alert switched off,
-   * so the hardware has stopped revising its tamper input - is a transition from a held verdict: a raised status clears, the change is said once, and the verdict
-   * is forgotten so that the next reading to arrive is adopted on the log in silence exactly as a first sighting is.
+   * contact sensor of capable hardware through the library's sweep, the pass being what puts it on each sensor and what takes it off again, and the topic spells
+   * the reading's three answers as they are, with unknown standing in for nothing established, so a subscriber holding unknown hears the reading return the moment
+   * it does. The log announces transitions alone, because a reading seen for the first time is not one anybody observed. A reading the library withdraws - the
+   * console's tampering alert switched off, so the hardware has stopped revising its tamper input - is a transition from a held verdict: a raised status clears,
+   * the change is said once, and the verdict is forgotten so that the next reading to arrive is adopted on the log in silence exactly as a first sighting is.
+   * Hardware that stops reporting the capability at all is that same transition with its own sentence, and the characteristic leaves every sensor through the pass
+   * rather than through the sweep here, so nothing is written to a characteristic that is about to go; the return of either the capability or the reading is
+   * adopted in silence, as every first sighting is.
    *
    * A raise and clear that both fall inside a connectivity gap is undetectable on any rail, since the controller keeps no tamper history and the notification
    * frames name no device...so what we project after a gap is simply where the hardware stands now.
    */
   private projectTamperState(): void {
 
-    if(!isTamperCapable(this.uda)) {
-
-      return;
-    }
-
-    const verdict = tamperState(this.uda);
+    const capable = isTamperCapable(this.uda);
+    const verdict = capable ? tamperState(this.uda) : undefined;
 
     if(verdict === this.tamperVerdict) {
 
@@ -2681,8 +2749,12 @@ export class AccessHub extends AccessDevice {
     const held = this.tamperVerdict;
 
     this.tamperVerdict = verdict;
-    updateServices(this.accessory, this.hap.Characteristic.StatusTampered, verdict ? this.hap.Characteristic.StatusTampered.TAMPERED :
-      this.hap.Characteristic.StatusTampered.NOT_TAMPERED);
+
+    if(capable) {
+
+      updateServices(this.accessory, this.hap.Characteristic.StatusTampered, this.#tamperRendering(verdict));
+    }
+
     this.mqttPublish(mqttTopics.tamper, String(verdict ?? "unknown"));
 
     // A first sighting is adopted without a word.
@@ -2696,7 +2768,8 @@ export class AccessHub extends AccessDevice {
 
       case undefined:
 
-        this.log.info("Tampering alerts are turned off on the controller, so the tamper status reads normal until they are turned on again.");
+        this.log.info(capable ? "Tampering alerts are turned off on the controller, so the tamper status reads normal until they are turned on again." :
+          "The device no longer reports tamper detection, so its tamper status is withdrawn until it does.");
 
         break;
 

@@ -193,13 +193,16 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
 /* An accessory carrying one service that reports the availability characteristic, so the sweep has somewhere to write, and an information service that records
  * what the device stamps on it. The information sink is optional because most arms below have no interest in it, and so is the rename sink, which records every
  * name Homebridge's own display-name setter is handed - the method the library's accessory rename writes through, so a rename an arm expects to be refused shows
- * up here as a recorded name rather than as a silent pass.
+ * up here as a recorded name rather than as a silent pass. The information service answers the name the accessory was stood up under, because the device reads its
+ * current name from that characteristic before it decides whether a record's alias is a change: a double answering nothing there falls back to the record's own
+ * alias, which the tick has already written, and can never see one.
  */
-function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: string; value: unknown }[] = [], renames: string[] = []): AccessAccessory {
+function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: string; value: unknown }[] = [], renames: string[] = [],
+  name?: string): AccessAccessory {
 
   const information = {
 
-    getCharacteristic: (): { value: undefined } => ({ value: undefined }),
+    getCharacteristic: (characteristic: string): { value: string | undefined } => ({ value: (characteristic === "Name") ? name : undefined }),
     updateCharacteristic: (characteristic: string, value: unknown): void => { infoWrites.push({ characteristic, value }); }
   };
 
@@ -211,6 +214,9 @@ function makeAccessory(statusWrites: unknown[], infoWrites: { characteristic: st
     getService: (service: string): unknown => (service === "AccessoryInformation") ? information : undefined,
     services: [{
 
+      // The library tells one service from another by UUID, so a double standing in for a HAP service carries one. A double with none matches the information
+      // service's own absent UUID, and the accessory rename would then be handed this carrier where it meant to write the information service's name.
+      UUID: "StatusCarrier",
       testCharacteristic: (characteristic: string): boolean => characteristic === "StatusActive",
       updateCharacteristic: (characteristic: string, value: unknown): void => { statusWrites.push({ characteristic, value }); }
     }],
@@ -606,4 +612,22 @@ test("a record whose alias empties out under HomeKit's naming rules is neither w
   assert.deepEqual(harness.infoLines.filter(line => line.includes("Name change detected")), [],
     "a name the rules empty out is not a change, so the loop has nothing to report and cannot report it on every update");
   assert.deepEqual(renames, [], "and the accessory is never handed a name HomeKit would refuse");
+});
+
+test("a record whose alias changed re-synchronizes the accessory name through the loop and says so once", async () => {
+
+  const harness = makeHarness([record({ alias: "Back Door" })], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
+  const renames: string[] = [];
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory(harness.statusWrites, [], renames, "Front Door"), harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+
+  /* The positive half of the arm above it. The distinguishing input is the name the information service answers: without one the current-name read falls back to
+   * the alias the tick has already written, the two compare equal, and no rename is ever attempted.
+   */
+  assert.equal(device.uda.alias, "Back Door", "the loop must have written the record the yield carried");
+  assert.deepEqual(renames, ["Back Door"], "the library's setter is handed the new name exactly once");
+  assert.equal(harness.infoLines.filter(line => line.includes("Name change detected")).length, 1, "and the change is reported once");
 });

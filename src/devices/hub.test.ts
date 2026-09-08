@@ -37,6 +37,10 @@ const HUB_MAC = "aabbccddee01";
 const HUB_SERIAL = "AABBCCDDEE01";
 const MAIN_DOOR = "740785e0-ef1d-4a2b-a720-3c8804feea9c";
 const SIDE_DOOR = "8f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
+// The doors a rebind moves a gate's ports onto. The topology the harness stands up knows neither of them, so an announcement naming one names it by its identity,
+// which is what tells a door read from the record apart from a name read from the topology.
+const NEW_MAIN = "b21c4d5e-6f70-4a2b-8193-c4d5e6f70819";
+const NEW_SIDE = "c32d5e6f-7081-4b3c-9204-d5e6f7081920";
 const READER_ID = "d8b3706bb73b";
 
 // The identity every unlock this plugin sends names itself by, written as a literal so the assertions prove the spelling rather than agreeing with whatever the constant
@@ -463,6 +467,20 @@ function makeHub(options: HubOptions = {}): HubHarness {
     setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry),
     updates
   };
+}
+
+/* The extension a controller publishes one of a gate's port-to-door bindings through, in the shape the wire sends it. The port's own name is what tells the side
+ * door's binding from the main door's, and the target is the door that port serves.
+ *
+ * @param name   - The port name the controller writes beside the binding.
+ * @param doorId - The door the port is bound to.
+ *
+ * @returns The extension.
+ */
+function portBinding(name: string, doorId: string): Record<string, unknown> {
+
+  return { device_id: HUB_ID, extension_name: "port_setting", target_config: [], target_name: name, target_type: "door", target_value: doorId,
+    unique_id: "ext-" + name };
 }
 
 // A UA Gate with both of its doors discovered and a credentialed client behind it, which is what the location endpoint behind its opening direction needs.
@@ -1508,13 +1526,22 @@ test("every MQTT registration is bound to the device's lifetime and leaves with 
 
   const gate = makeGate();
 
-  // A UA Gate with a doorbell registers the whole topic surface: the doorbell, the door position, the lock in both directions, and the side door's lock in
-  // both directions and its position.
+  /* A UA Gate with a doorbell registers the whole topic surface: the doorbell, the door position, the lock in both directions, and the side door's lock in both
+   * directions and its position. The doorbell's get is the one registration with a lifetime of its own composed with the device's, because it follows the doorbell
+   * service the record can withdraw rather than the device.
+   */
   assert.deepEqual(gate.mqtt.subscriptions.map(entry => entry.topic).sort(), [ mqttGetTopic(HUB_SERIAL + "/doorbell"), mqttGetTopic(HUB_SERIAL + "/dps"),
     mqttGetTopic(HUB_SERIAL + "/lock"), mqttSetTopic(HUB_SERIAL + "/lock"), mqttGetTopic(HUB_SERIAL + "/sidedoor/dps"),
     mqttGetTopic(HUB_SERIAL + "/sidedoor/lock"), mqttSetTopic(HUB_SERIAL + "/sidedoor/lock") ].sort());
 
   for(const entry of gate.mqtt.subscriptions) {
+
+    if(entry.topic === mqttGetTopic(HUB_SERIAL + "/doorbell")) {
+
+      assert.notEqual(entry.init.signal, gate.hub.signal, "the doorbell get registration must carry a lifetime of its own rather than the device's");
+
+      continue;
+    }
 
     assert.equal(entry.init.signal, gate.hub.signal, "the " + entry.topic + " registration must carry the device's own lifetime signal");
   }
@@ -2063,6 +2090,175 @@ test("a gate ignores a remote unlock naming a door it does not drive", () => {
   assert.deepEqual(lockPayloads(gate), [], "a door this gate does not drive moves its main lock nowhere");
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [], "and its side door lock nowhere");
   assert.deepEqual(gate.lines, [], "and nothing is announced for it");
+});
+
+test("a repeat pass leaves an unlocked door's lock trigger on and writes nothing to it", async () => {
+
+  const harness = makeHub({ options: ["Enable.Hub.Lock.Trigger"] });
+
+  deliverDoorState(harness, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "an unlocked door puts the trigger on");
+
+  const writes = recordWrites(trigger);
+
+  restateRecord(harness, {});
+
+  assert.deepEqual(writes, [], "a repeat pass finds the switch dressed and writes nothing to it");
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "so the unlocked door is still showing");
+  assert.equal(await trigger.getCharacteristic(Characteristic.On).handleGetRequest(), true, "and the handler the creation registered still answers");
+});
+
+test("a repeat pass does not halt a running travel", async () => {
+
+  const opener = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+
+  await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+  restateRecord(opener, {});
+
+  assert.equal(openerService(opener).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING,
+    "the travel the write started is still running, which a pass re-entering the opener's own configuration would have halted");
+
+  // A halt drains the travel's timer, so a door it halted would stand at the transitional reading forever. Settling on the evidence is what proves the timer survived.
+  opener.clock.advance(TRAVEL_MS);
+
+  assert.equal(openerService(opener).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED,
+    "and settles on its own timer, showing what the door reports by then");
+});
+
+test("a restated record with nothing changed writes nothing to any service and creates none", () => {
+
+  for(const harness of [ makeHub({ options: [ "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger" ], record: wiredHub("on") }),
+    makeGate({ options: ["Enable.Hub.Door.Service=Lock"] }) ]) {
+
+    const before = [...harness.services];
+    const recorded = before.map(service => ({ service, writes: recordWrites(service) }));
+
+    restateRecord(harness, {});
+
+    for(const { service, writes } of recorded) {
+
+      assert.deepEqual(writes, [], "a pass over a record that did not change writes nothing to the " + service.displayName + " service");
+    }
+
+    /* Read the services member for member rather than by count alone: a pass that re-created one instead of finding it would leave a list of the same length whose
+     * members the recorder never wrapped, and every write to those would go unseen above.
+     */
+    assert.equal(harness.services.length, before.length, "and creates none beside the ones it found");
+
+    for(const [ index, service ] of before.entries()) {
+
+      assert.equal(harness.services[index], service, "and each position carries the service the pass found rather than one it built");
+    }
+  }
+});
+
+test("a gate whose record rebinds its ports mid-run follows the rebind", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  // What the controller has established about the door the main port is about to be bound to, which is what the seed of a moved identity reads.
+  gate.setDoorState({ dps: "open", location_id: NEW_MAIN, lock: "unlock" });
+
+  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
+    "the door the main port now names is seeded from the map");
+  assert.deepEqual(lockPayloads(gate), [], "silently, as every seed is");
+  assert.equal(lineCount(gate, "Gate unlocked."), 0);
+
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
+    "the identity the gate left behind is nobody's, so nothing delivered under it reaches the gate");
+
+  deliverDoorState(gate, { dps: "close", location_id: NEW_MAIN, lock: "lock" });
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED,
+    "while the door it moved onto reaches it through the rail as every reading does");
+  assert.deepEqual(lockPayloads(gate), ["true"]);
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: NEW_SIDE });
+
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "the side port's new door is owned from the rebind on");
+  assert.equal(lineCount(gate, "Side door unlocked."), 1);
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: SIDE_DOOR });
+
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and the one it left behind owns nothing");
+
+  // The topology carries neither door, so each announcement names the identity the binding gave it.
+  assert.equal(lineCount(gate, "The gate's main door is now " + NEW_MAIN + "."), 1);
+  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1);
+});
+
+test("a gate announces each door whose identity moved by its topology name, and a record whose bindings did not move is silent", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  // The two roles swapped over the doors the topology knows, so each announcement can be read for the name it renders rather than for the identity behind it.
+  restateRecord(gate, { extensions: [ portBinding("oper1", SIDE_DOOR), portBinding("oper2", MAIN_DOOR) ] });
+
+  assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 1, "a moved identity is announced under the name the topology carries for it");
+  assert.equal(lineCount(gate, "The gate's side door is now Main Gate."), 1);
+  assert.equal(gate.lines.length, 2, "and nothing else is said for the pass that moved them");
+
+  restateRecord(gate, { extensions: [ portBinding("oper1", SIDE_DOOR), portBinding("oper2", MAIN_DOOR) ] });
+
+  assert.equal(gate.lines.length, 2, "a record whose bindings did not move moves no identity, so it says nothing");
+  assert.deepEqual(lockPayloads(gate), [], "and no seed of either pass reaches the topic");
+});
+
+test("a gate whose side door binding is withdrawn says so once and keeps the side door's services at their last reading", () => {
+
+  // A topology of one door, so the side arm's name and two-door fallbacks answer nothing and the side door is the binding's to name or to withhold.
+  const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], options: ["Enable.Hub.Door.Service=Lock"] });
+
+  restateRecord(gate, { extensions: [ portBinding("oper1", MAIN_DOOR), portBinding("oper2", NEW_SIDE) ] });
+
+  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1, "the binding names a side door the topology never resolved");
+
+  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+
+  assert.equal(warnCount(gate, "The gate's side door binding was withdrawn, so its services stand at their last reading."), 1,
+    "and the binding going is warned, because a role nothing occupies is not a role the gate can drive");
+  assert.ok(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), "the side door's lock is option-gated, so it stands where the user asked for it");
+
+  deliverDoorState(gate, { dps: "open", location_id: NEW_SIDE, lock: "unlock" });
+
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [], "and nothing delivered under the withdrawn identity moves it");
+
+  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+
+  assert.equal(warnCount(gate, "The gate's side door binding was withdrawn, so its services stand at their last reading."), 1,
+    "a role that was already vacant did not move, so the warning is not repeated");
+});
+
+test("a rebind retires the relock window opened for the door that left the role", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "the unlock opens the window");
+  assert.equal(lineCount(gate, "Gate unlocked."), 1);
+
+  gate.setDoorState({ dps: "open", location_id: NEW_MAIN, lock: "unlock" });
+  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "the seed of the door that took the role agrees with what the gate already reads, so it is silent");
+
+  gate.clock.advance(RELOCK_DELAY_MS);
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "a window of ours belongs to the door it was opened for, so it leaves with that door");
+  assert.equal(lineCount(gate, "Gate locked."), 0, "and fires against neither the door that took the role nor the one that left it");
+
+  deliverDoorState(gate, { dps: "close", location_id: NEW_MAIN, lock: "lock" });
+
+  assert.deepEqual(lockPayloads(gate), [ "false", "true" ], "the controller's own report of the new door still reaches it through the rail");
+  assert.equal(lineCount(gate, "Gate locked."), 1);
 });
 
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {
@@ -2814,10 +3010,21 @@ const REL_PAIR_LIVE = wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_r
 // The request to exit pair a UA Hub Door Mini reports its one input through.
 const D1_PAIR_LIVE = wiringRows({ "wiring_state_d1-button-neg": "on", "wiring_state_d1-button-pos": "on" });
 
+/* The rows a UA Hub reports every terminal input through, stated beside the record so an arm laying other rows next to them takes the same list the record does.
+ *
+ * @param reading - What each input reports.
+ *
+ * @returns The rows.
+ */
+function wiredRows(reading: string): AccessDeviceEntryConfig[] {
+
+  return [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": reading, "input_state_ren": reading, "input_state_rex": reading }) ];
+}
+
 // A UA Hub reporting every terminal input wired, with each input reading whatever the arm names.
 function wiredHub(reading: string): AccessStateDevice & { mac: string } {
 
-  return testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": reading, "input_state_ren": reading, "input_state_rex": reading }) ] });
+  return testHub({ configs: wiredRows(reading) });
 }
 
 // A UA Hub Door Mini reporting its one terminal input wired, reading whatever the arm names.
@@ -2906,6 +3113,9 @@ function tamperUltra(rows: Record<string, string>, mode = "rex", reading = "on")
 
 // What a hub says when the controller's tampering alert is switched off, spelled once here so every arm counts the sentence a user actually reads.
 const TAMPER_WITHDRAWN = "Tampering alerts are turned off on the controller, so the tamper status reads normal until they are turned on again.";
+
+// And what it says when its hardware stops reporting the capability at all, which is the other cause of a status reading normal.
+const TAMPER_UNREPORTED = "The device no longer reports tamper detection, so its tamper status is withdrawn until it does.";
 
 // A doorbell-capable reader hanging off this hub, as the client's device snapshot carries it, which is the device a dispatched ring is addressed to.
 const READER_RECORD = testHub({ capabilities: [ "is_reader", "remote_view" ], connected_uah_id: HUB_ID, device_type: "UA-G2-PRO", unique_id: READER_ID });
@@ -3395,6 +3605,110 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
 });
 
+test("a tamper capability appearing mid-run dresses every standing sensor once, from the verdict the delivery brings", () => {
+
+  const harness = makeHub({ record: wiredHub("on") });
+  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+
+  for(const { sensor } of recorded) {
+
+    assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "hardware reporting no capability carries the characteristic on no sensor");
+  }
+
+  restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ], configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] });
+
+  for(const { sensor, writes } of recorded) {
+
+    assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+      "the capability arriving reaches every sensor already standing, reading the verdict that same delivery established");
+    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+      [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }],
+      "written exactly once, which a pass run ahead of the projection would fail by writing normal and then the verdict over it");
+  }
+
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "the topic carries the verdict the projection adopted");
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "and a reading seen for the first time is not announced");
+});
+
+test("a tamper capability appearing while alerts are off dresses every standing sensor as not tampered", () => {
+
+  const harness = makeHub({ record: wiredHub("on") });
+  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+
+  restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ], configs: wiredRows("on") });
+
+  for(const { sensor, writes } of recorded) {
+
+    assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
+      "a capability arriving with no reading behind it still puts the characteristic on the sensor, reading normal");
+    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+      [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.NOT_TAMPERED }],
+      "written once, which dropping the write the attach earns would fail by leaving the characteristic bare");
+  }
+
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "the verdict did not move, so the projection publishes nothing");
+  assert.deepEqual(harness.lines, [], "and says nothing");
+});
+
+test("a tamper capability withdrawn mid-run takes the characteristic off every sensor without writing it, publishes unknown, says why once, " +
+  "and a return is adopted in silence", () => {
+
+  const harness = makeHub({ record: testHub({ capabilities: [ "is_hub", "tamper_proofing" ],
+    configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] }) });
+  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+
+  for(const { sensor } of recorded) {
+
+    assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+      "adoption dresses every sensor from the reading the record arrived with");
+  }
+
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "and says nothing about it, adoption being silent");
+
+  // The rows stand; the capability alone is gone, which is what tells hardware that stopped reporting from a reading that changed.
+  restateRecord(harness, { capabilities: ["is_hub"] });
+
+  for(const { sensor, writes } of recorded) {
+
+    assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "the capability going takes the characteristic off every sensor");
+    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID), [],
+      "and nothing is written to a characteristic the pass is about to remove, which a sweep run without its capability guard would fail");
+  }
+
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["unknown"], "the topic carries nothing established");
+  assert.equal(lineCount(harness, TAMPER_UNREPORTED), 1, "the withdrawal is said once, as the withdrawal it is");
+  assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 0, "rather than as the controller's alert being switched off");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ] });
+
+  for(const { sensor, writes } of recorded) {
+
+    assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
+      "the capability returning puts the characteristic back, reading what the record still reports");
+    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+      [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }], "written exactly once for the return");
+  }
+
+  assert.deepEqual(topicPayloads(harness, "tamper"), [ "unknown", "true" ], "and the reading is published as the first sighting a forgotten verdict makes it");
+  assert.equal(warnCount(harness, "Tampering detected."), 0, "rather than announced");
+});
+
+test("a sensor the accessory arrived carrying loses its tamper characteristic at adoption when the hardware reports no capability", () => {
+
+  // The cache of a run on hardware that reported the capability: a raised status with nothing behind it any more.
+  const restored = carried(Service.ContactSensor, AccessReservedNames.CONTACT_REL);
+
+  restored.updateCharacteristic(Characteristic.StatusTampered, Characteristic.StatusTampered.TAMPERED);
+
+  const harness = makeHub({ existing: [restored], record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
+
+  assert.equal(contactSensor(harness, AccessReservedNames.CONTACT_REL), restored, "the hub acquires the sensor the accessory arrived carrying");
+  assert.ok(!restored.testCharacteristic(Characteristic.StatusTampered),
+    "and takes the characteristic off it, hardware reporting no capability having nothing to say through it");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "a cached characteristic is not a held verdict, so nothing is published for its going");
+  assert.equal(lineCount(harness, TAMPER_UNREPORTED), 0, "and nothing is said about it");
+});
+
 test("the services an arm hands the harness are copied, so what the hub creates never reaches the arm's own list", () => {
 
   const own: Service[] = [];
@@ -3412,6 +3726,7 @@ test("the side door position sensor announces its creation at adoption and its r
 
   assert.equal(lineCount(created, "Enabling the side door position sensor."), 1, "a gate discovering its side door says so once as it creates the sensor");
   assert.ok(hasContactSensor(created, AccessReservedNames.CONTACT_DPS_SIDE), "and the sensor it announced is the one it carries");
+  assert.deepEqual(created.lines.filter(line => line.includes("The gate's")), [], "the construction pass says nothing about door identities");
 
   const retired = makeGate({ existing: [carried(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE)], keepAdoptionLines: true,
     options: ["Disable.Hub.SideDoor.DPS"] });
@@ -3638,6 +3953,50 @@ test("a doorbell ring the controller refuses says so and puts the switch back on
   harness.clock.advance(REVERT_DELAY_MS);
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and a dispatch the controller refused keeps the shorter pause rather than the window");
+});
+
+test("a doorbell capability appearing mid-run creates the doorbell and its trigger, a repeat pass leaves a pending ring's trigger on, and the capability " +
+  "withdrawn at a refresh retires both", async () => {
+
+  const harness = makeHub({ options: ["Enable.Hub.Doorbell.Trigger"], record: testHub({ capabilities: ["is_hub"] }) });
+
+  // How many registrations the broker holds for the doorbell's get topic. A registration whose own lifetime aborts leaves the double's list, so this counts
+  // whether the topic answers at all rather than what it answers.
+  const doorbellGets = (): number => harness.mqtt.subscriptions.filter(entry => entry.topic === mqttGetTopic(HUB_SERIAL + "/doorbell")).length;
+
+  assert.ok(!hasDoorbell(harness), "hardware reporting no doorbell carries neither the doorbell");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER), "nor its automation trigger");
+  assert.equal(doorbellGets(), 0, "and nothing is registered on the topic that would answer for one");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "door_bell" ] });
+
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
+
+  assert.ok(hasDoorbell(harness), "the capability arriving creates the doorbell on that delivery rather than at the next restart");
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and its trigger, seeded off");
+  assert.equal(lineCount(harness, "Enabling the doorbell."), 1, "each announcing itself once, as a creation does");
+  assert.equal(lineCount(harness, "Enabling the doorbell automation trigger."), 1);
+  assert.equal(doorbellGets(), 1, "and the get topic is registered with the service it answers for");
+  assert.equal(await harness.mqttGet("doorbell"), "false", "answering the quiet doorbell it was registered beside");
+
+  harness.emit("access.remote_view", ringPacket([]));
+
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "a ring puts the trigger on");
+
+  const writes = recordWrites(trigger);
+
+  restateRecord(harness, {});
+
+  assert.deepEqual(writes, [], "a repeat pass finds both dressed and writes nothing to either");
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "so the pending ring is still showing");
+  assert.equal(doorbellGets(), 1, "and the topic is registered once rather than a second time beside the first");
+  assert.equal(await harness.mqttGet("doorbell"), "true", "answering the ring the hub is holding");
+
+  restateRecord(harness, { capabilities: ["is_hub"] });
+
+  assert.ok(!hasDoorbell(harness), "the capability going retires the doorbell");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER), "and its trigger");
+  assert.equal(doorbellGets(), 0, "and releases the topic, so a subscriber asking after the withdrawal is answered by nobody");
 });
 
 test("a synchronized alias reaches the information service's names and the accessory's display name", () => {

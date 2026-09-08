@@ -6,7 +6,7 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
+import { TimerRegistry, composeSignals, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -178,7 +178,7 @@ export abstract class AccessDevice extends AccessBase {
     this.listeners = new Map();
     this.mac = admission.mac;
     this.projection = projection;
-    this.signal = AbortSignal.any([ controller.signal, this.#deviceController.signal ]);
+    this.signal = composeSignals(controller.signal, this.#deviceController.signal);
     // Every deadline this device arms reads the platform's clock, so a device timer and a controller timer share one timeline rather than each finding their own.
     this.timers = new TimerRegistry({ clock: this.platform.clock, signal: this.signal });
     this.uda = projection.config;
@@ -345,12 +345,16 @@ export abstract class AccessDevice extends AccessBase {
    * by. The call stays direct on the client rather than going through the controller: registering is synchronous and returns no promise, so there is no outcome
    * for a chokepoint to route.
    *
+   * A registration that should end before the device does - a topic answering for a service the record can withdraw - hands its own lifetime, which is composed
+   * with the device's so that either end releases it, and the client drops the broker subscription with the last handler on the topic.
+   *
    * @param entry    - The catalog entry naming the topic tail and the label.
    * @param getValue - The getter answering the topic's current value.
+   * @param lifetime - An optional lifetime shorter than the device's own, for a registration that ends with what it answers for.
    */
-  protected mqttSubscribeGet(entry: MqttTopicEntry, getValue: MqttGetHandler): void {
+  protected mqttSubscribeGet(entry: MqttTopicEntry, getValue: MqttGetHandler, lifetime?: AbortSignal): void {
 
-    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, entry.topic), entry.label, getValue, { signal: this.signal });
+    this.controller.mqtt?.subscribeGet(mqttTopic(this.id, entry.topic), entry.label, getValue, { signal: composeSignals(this.signal, lifetime) });
   }
 
   /* Register a setter on one of this device's own topics, under the same composition and the same lifetime as the getter above.
