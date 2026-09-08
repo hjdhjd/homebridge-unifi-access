@@ -14,7 +14,7 @@
  * the library's own published vocabulary, which is read through rather than restated anywhere here.
  */
 import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, AccessAuthError, isEnterpriseHubRecord, isHub, isReader, normalizeActorType,
-  normalizeMacAddress, selectAccessPoints } from "unifi-access";
+  normalizeMacAddress, selectAccessPoints, terminalInput } from "unifi-access";
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
@@ -641,30 +641,6 @@ export function hasDpsEvidence(entry: AccessDoorStateEntry | undefined): boolean
 }
 
 /**
- * The mode a UA Ultra's single terminal input is configured for - the one statement of the multiplex traversal.
- *
- * The Ultra carries one terminal input that is selectable between door-position and request-to-exit duty, and the selection lives in the first extension's target
- * configuration under `rex_button_mode`. Observed as `dps` and `rex`.
- *
- * The answer is that entry's value only when the value is a string. The library types a configuration value as a string, a number, or a boolean, so the narrowing
- * is what makes the declared return type hold...and a non-string value is absent evidence, the same posture the library's own flag reader takes toward a value it
- * has never been observed to write.
- *
- * Both consumers reach the traversal here - the position sensor's eligibility read and the request-to-exit input's wiring proxy - so the two cannot drift apart on
- * which extension or which key carries the mode.
- *
- * @param device - The device record to read.
- *
- * @returns The configured mode, or `undefined` when the record carries no readable one.
- */
-export function ultraInputMode(device: AccessStateDevice): string | undefined {
-
-  const mode = device.extensions?.[0]?.target_config.find(entry => entry.config_key === "rex_button_mode")?.config_value;
-
-  return (typeof mode === "string") ? mode : undefined;
-}
-
-/**
  * The main and side door locations a UA Gate resolves to, from its device record and the topology's doors collection - the one statement of the gate's
  * door-discovery heuristic.
  *
@@ -748,10 +724,11 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
  * reads.
  *
  * Each family answers from what its own hardware establishes. A UA Gate answers no: it drives two doors, the library derives no topology facts for it, and its
- * sensor follows the paths its hardware has always used rather than an evidence read. A UA Ultra answers from its multiplex, because it carries no wiring pair at
- * all and the mode its single input is configured for is the only evidence its record offers - an input serving request-to-exit duty is not a door position
- * sensor, whatever the door's state entry happens to carry - while a record that carries no extensions at all offers no multiplex to read, so it answers from the
- * door-state model like every other family. Every other family answers from that model through {@link hasDpsEvidence}.
+ * sensor follows the paths its hardware has always used rather than an evidence read. A UA Ultra answers from the library's terminal read of its position input,
+ * where the duty its one input is assigned to stands in for the wiring pair that hardware never carries - an input serving request-to-exit duty is not a door
+ * position sensor, whatever the door's state entry happens to carry. Where that read establishes neither verdict - no port extension, no readable duty, a duty
+ * outside the two the library knows, or no numbered reading rows for it to key the family on - the Ultra falls back to the door-state model like every other
+ * family, which is where every other family answers from through {@link hasDpsEvidence}.
  *
  * @param options - The device record and the door's state entry, `undefined` where nothing has been established about the door.
  *
@@ -769,7 +746,7 @@ export function dpsSensorEligible(options: { device: AccessStateDevice; entry: A
 
     case "UA-ULTRA":
 
-      return (device.extensions === undefined) ? hasDpsEvidence(entry) : (ultraInputMode(device) === "dps");
+      return terminalInput(device, "dps").wired ?? hasDpsEvidence(entry);
 
     default:
 

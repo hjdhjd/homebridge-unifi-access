@@ -32,7 +32,7 @@ export type AccessConsumedWebhookDelivery<K extends AccessConsumedWebhookEventNa
 export interface AccessHints {
 
   hasSideDoor: boolean;
-  hasWiringSideDoorDps: boolean;
+  hasSideDoorDps: boolean;
   logDoorbell: boolean;
   logDps: boolean;
   logLock: boolean;
@@ -171,7 +171,7 @@ export abstract class AccessDevice extends AccessBase {
     this.#deviceController = new AbortController();
     // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
     // states each one the user's settings actually decide.
-    this.hints = { hasSideDoor: false, hasWiringSideDoorDps: false, logDoorbell: false, logDps: false, logLock: false, logRel: false, logRen: false,
+    this.hints = { hasSideDoor: false, hasSideDoorDps: false, logDoorbell: false, logDps: false, logLock: false, logRel: false, logRen: false,
       logRex: false, syncName: false };
     this.hubProjection = hubProjection;
     this.id = deviceSerial(admission);

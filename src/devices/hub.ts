@@ -2,17 +2,17 @@
  *
  * hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState } from "unifi-access";
+import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState, terminalInput } from "unifi-access";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
-  AccessStateDoor, OfficialApi } from "unifi-access";
+  AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts, OfficialApi } from "unifi-access";
 import type { AccessMethodKey, DoorServiceType } from "../policy.ts";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
-  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, ultraInputMode, unlockAttribution } from "../policy.ts";
+  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validService } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -45,10 +45,11 @@ interface AccessEventDeviceUpdateV2 {
   access_method?: Partial<Record<AccessMethodKey, string>>;
 }
 
-/* The dry contact inputs that share one shape: a wiring-evidence gate, a state reading taken from one table, and an MQTT tail of their own. Each input's
- * HomeKit-facing name and the catalog entry its MQTT topic tail comes from sit here together, so that configuration and live updates cannot drift on either. The
- * entry is named rather than its tail spelled, so the catalog stays the one place a topic is written. The label is carried in the title case a service name wants;
- * the log lines derive the other casings they need from it, so each input is spelled here exactly once.
+/* The dry contact inputs that share one shape: a wiring-evidence gate, a state reading, and an MQTT tail of their own. Each input's HomeKit-facing name and the
+ * catalog entry its MQTT topic tail comes from sit here together, so that configuration and live updates cannot drift on either. The entry is named rather than its
+ * tail spelled, so the catalog stays the one place a topic is written. The library's own name for the terminal sits beside the HomeKit name, so the reading, the
+ * option, and the topic of one input are spelled together. The label is carried in the title case a service name wants; the log lines derive the other casings they
+ * need from it, so each input is spelled here exactly once.
  *
  * The door position sensor is deliberately not one of them. All three of the things that shape a terminal input differ for it - where its eligibility comes from,
  * where its state comes from, and how it reaches HomeKit - so it is configured and updated on its own rather than forced through a loop that would have to special
@@ -56,12 +57,12 @@ interface AccessEventDeviceUpdateV2 {
  */
 const terminalInputs = [
 
-  { input: "Rel", label: "Remote Release", topic: mqttTopics.rel },
-  { input: "Ren", label: "Request to Enter Sensor", topic: mqttTopics.ren },
-  { input: "Rex", label: "Request to Exit Sensor", topic: mqttTopics.rex }
-] as const satisfies readonly { input: string; label: string; topic: MqttTopicEntry }[];
+  { input: "Rel", label: "Remote Release", terminal: "rel", topic: mqttTopics.rel },
+  { input: "Ren", label: "Request to Enter Sensor", terminal: "ren", topic: mqttTopics.ren },
+  { input: "Rex", label: "Request to Exit Sensor", terminal: "rex", topic: mqttTopics.rex }
+] as const satisfies readonly { input: string; label: string; terminal: AccessTerminalInput; topic: MqttTopicEntry }[];
 
-// The inputs themselves, derived from the table so the names are spelled in one place and every table keyed by them stays complete.
+// The inputs themselves, derived from the table so the names are spelled in one place and every type keyed by them stays complete.
 type SensorInput = typeof terminalInputs[number]["input"];
 
 // The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
@@ -87,47 +88,8 @@ function sentenceCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase();
 }
 
-// Define the sensor wiring - the per-model wiring-key pairs whose live circuit detection says an input is actually connected. The per-device-type inconsistency is
-// the controller's own; a model naming no pair for an input simply offers no wiring evidence about it.
-const sensorWiring: Record<SensorInput, Record<string, string[]>> = {
-
-  Rel: {
-
-    UAH: [ "wiring_state_rel-neg", "wiring_state_rel-pos" ]
-  },
-  Ren: {
-
-    UAH: [ "wiring_state_ren-neg", "wiring_state_ren-pos" ]
-  },
-  Rex: {
-
-    "UA-Hub-Door-Mini": [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos" ],
-    UAH: [ "wiring_state_rex-neg", "wiring_state_rex-pos" ]
-  }
-};
-
-// The configuration row each model reports an input's live reading under. The per-device-type inconsistency is the controller's own, exactly as it is for the wiring
-// table above, and a model naming no row for an input simply offers no reading of it.
-const sensorStateRows: Record<SensorInput, Record<string, string>> = {
-
-  Rel: {
-
-    UAH: "input_state_rel"
-  },
-  Ren: {
-
-    UAH: "input_state_ren"
-  },
-  Rex: {
-
-    "UA-Hub-Door-Mini": "input_d1_button",
-    "UA-ULTRA": "input_d1_button",
-    UAH: "input_state_rex"
-  }
-};
-
-// The hint that says whether an input's readings are announced in the log, named from the same input list the tables above are keyed by so a new input cannot be
-// added without a hint to go with it.
+// The hint that says whether an input's readings are announced in the log, named from the same input list the table above states so a new input cannot be added
+// without a hint to go with it.
 type LogHintKey = Extract<keyof AccessHints, `log${SensorInput}`>;
 
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
@@ -236,7 +198,7 @@ export class AccessHub extends AccessDevice {
     super.configureHints();
 
     this.hints.hasSideDoor = (this.uda.device_type === "UGT") && this.hasFeature("Hub.SideDoor");
-    this.hints.hasWiringSideDoorDps = this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.DPS");
+    this.hints.hasSideDoorDps = this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.DPS");
     this.hints.logDoorbell = this.hasFeature("Log.Doorbell");
     this.hints.logDps = this.hasFeature("Log.DPS");
     this.hints.logLock = this.hasFeature("Log.Lock");
@@ -931,10 +893,11 @@ export class AccessHub extends AccessDevice {
 
     this.configureDpsSensor({ initialized });
 
-    for(const { input, label } of terminalInputs) {
+    for(const { input, label, terminal } of terminalInputs) {
 
+      const facts = terminalInput(this.uda, terminal);
       const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
-      const gate = capabilityGate({ capability: this.isWired(input), toggle: this.hasFeature("Hub." + input.toUpperCase()) });
+      const gate = capabilityGate({ capability: facts.wired === true, toggle: this.hasFeature("Hub." + input.toUpperCase()) });
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
@@ -953,7 +916,7 @@ export class AccessHub extends AccessDevice {
       }
 
       // Acquire the sensor, dressed with the input's own reading the first time this hub holds it.
-      this.#acquireSensor({ initialized, label, reading: this.terminalInputState(input), subtype: reservedId });
+      this.#acquireSensor({ initialized, label, reading: this.#contactReading(facts), subtype: reservedId });
     }
 
     return true;
@@ -1050,15 +1013,15 @@ export class AccessHub extends AccessDevice {
       return false;
     }
 
-    // Validate whether we should have this service enabled. We check the hasWiringSideDoorDps hint which already incorporates the feature option check.
+    // Validate whether we should have this service enabled. We check the hasSideDoorDps hint, which already incorporates the feature option check.
     if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
 
-      if(!this.hints.hasWiringSideDoorDps && hasService) {
+      if(!this.hints.hasSideDoorDps && hasService) {
 
         this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
       }
 
-      return this.hints.hasWiringSideDoorDps;
+      return this.hints.hasSideDoorDps;
     }, AccessReservedNames.CONTACT_DPS_SIDE)) {
 
       return false;
@@ -1560,7 +1523,7 @@ export class AccessHub extends AccessDevice {
       // MQTT side door DPS status (UA Gate only).
       this.mqttSubscribeGet(mqttTopics.sidedoorDps, () => {
 
-        if(!this.isSideDoorDpsWired) {
+        if(this.#sideDoorFacts.wired !== true) {
 
           return "unknown";
         }
@@ -2398,18 +2361,10 @@ export class AccessHub extends AccessDevice {
     this.updateDoorServiceState(true);
   }
 
-  // Return the current state of the side door DPS on the UA Gate hub.
+  // The side door's position as the library reads it, which is closed wherever nothing is wired to that terminal.
   private get hubSideDoorDpsState(): CharacteristicValue {
 
-    // If we don't have the wiring connected for the side door DPS, we report our default closed state.
-    if(!this.isSideDoorDpsWired) {
-
-      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    // Return our side door DPS state. If it's anything other than on, we assume it's open.
-    return (this.uda.configs?.find(entry => entry.key === "input_door_dps")?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
-      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+    return this.#contactReading(this.#sideDoorFacts);
   }
 
   /* Return the state of the main gate's lock relay on a UA Gate hub. Only that hardware answers from its record here: every other family's lock reading comes from
@@ -2441,63 +2396,24 @@ export class AccessHub extends AccessDevice {
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
   }
 
-  /* What a terminal input reads: closed unless the input is wired and the row its model reports it under says anything but on. A model naming no row offers no
-   * reading of that input at all, which renders as the same closed answer, so nothing downstream has to tell the two apart.
+  /* What a terminal input reads: closed unless the terminal is in service and its reading says open. A terminal the hardware reports nothing about and one whose
+   * row the library did not qualify both render as the same closed contact, so nothing downstream has to tell the two apart.
    *
-   * @param input - The terminal input to read.
+   * @param facts - What the library's read established about the terminal.
    *
-   * @returns The contact sensor state the input's live reading renders as.
+   * @returns The contact sensor state the terminal's live reading renders as.
    */
-  private terminalInputState(input: SensorInput): CharacteristicValue {
+  #contactReading(facts: AccessTerminalInputFacts): CharacteristicValue {
 
-    const row = sensorStateRows[input][this.uda.device_type];
-
-    if(!row || !this.isWired(input)) {
-
-      return this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
-    }
-
-    return (this.uda.configs?.find(relay => relay.key === row)?.value === "on") ? this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED :
-      this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+    return ((facts.wired === true) && (facts.state === false)) ? this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED :
+      this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
   }
 
-  // Return the wiring state of the side door DPS on UA Gate hubs. The side door DPS uses different wiring keys than the main gate DPS.
-  private get isSideDoorDpsWired(): boolean {
+  // The library's read of the side door's position terminal. It is the one terminal read taken outside the input table, because that sensor's existence follows the
+  // user's option rather than the wiring.
+  get #sideDoorFacts(): AccessTerminalInputFacts {
 
-    // Side door DPS is only available on UA Gate.
-    if(this.uda.device_type !== "UGT") {
-
-      return false;
-    }
-
-    return this.isPairLive([ "wiring_state_door-dps-neg", "wiring_state_door-dps-pos" ]);
-  }
-
-  // Whether both halves of a wiring pair report a live circuit. Both must read on for the pair to mean anything: a single connected terminal is a half-wired sensor,
-  // which is not a sensor. The one statement of that reading, so the two callers cannot come to differ on what counts as wired.
-  private isPairLive(wires: string[]): boolean {
-
-    return wires.every(wire => this.uda.configs?.some(e => (e.key === wire) && (e.value === "on")));
-  }
-
-  // Utility to check the wiring state of a given terminal input.
-  private isWired(input: SensorInput): boolean {
-
-    // The Ultra multiplexes its one terminal input and carries no wiring pair at all, so what that input is configured for is the only evidence its record offers.
-    if(this.uda.device_type === "UA-ULTRA") {
-
-      return (input === "Rex") && (ultraInputMode(this.uda) === "rex");
-    }
-
-    // Find the wiring keys for this model.
-    const wires = sensorWiring[input][this.uda.device_type];
-
-    if(!wires) {
-
-      return false;
-    }
-
-    return this.isPairLive(wires);
+    return terminalInput(this.uda, "sideDps");
   }
 
   // Utility to retrieve a contact sensor state.
@@ -2640,7 +2556,7 @@ export class AccessHub extends AccessDevice {
 
     // Process any terminal input update events if our state has changed. Keying off whether the sensor exists is what replaces a cached eligibility reading: an
     // input with no service contributes nothing, and one created mid-run is picked up on the very next update.
-    for(const { input, label, topic } of terminalInputs) {
+    for(const { input, label, terminal, topic } of terminalInputs) {
 
       const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
 
@@ -2649,8 +2565,9 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
+      const facts = terminalInput(this.uda, terminal);
       const logKey = ("log" + input) as LogHintKey;
-      const reading = this.terminalInputState(input);
+      const reading = this.#contactReading(facts);
 
       if(reading === this.getContactSensorState(reservedId)) {
 
@@ -2659,7 +2576,7 @@ export class AccessHub extends AccessDevice {
 
       this.setContactSensorState(reservedId, reading);
 
-      if(this.isWired(input)) {
+      if(facts.wired === true) {
 
         const contactDetected = this.isClosed(reading);
 

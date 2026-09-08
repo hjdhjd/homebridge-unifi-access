@@ -2814,16 +2814,61 @@ function doorMiniHub(reading: string): AccessStateDevice & { mac: string } {
   return testHub({ configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": reading }) ], device_type: "UA-Hub-Door-Mini" });
 }
 
+// The port rows a UA Ultra reports its two terminal families through, each reading whatever the arm names, which is what the library keys those families on.
+function ultraRows(reading: string): AccessDeviceEntryConfig[] {
+
+  return inputRows({ "input_d1_button": reading, "input_d1_dps": reading });
+}
+
 /* A UA Ultra whose one multiplexed terminal input is configured for the mode an arm names, carried in the port setting extension the controller reports it through.
  *
- * @param mode - What the input is configured for.
+ * @param mode    - What the input is configured for.
+ * @param reading - What the port rows report, which is what a sensor built on them answers with.
  *
  * @returns The record.
  */
-function ultraRecord(mode: string): AccessStateDevice & { mac: string } {
+function ultraRecord(mode: string, reading = "on"): AccessStateDevice & { mac: string } {
 
-  return testHub({ device_type: "UA-ULTRA", extensions: [{ device_id: HUB_ID, extension_name: "port_setting",
+  return testHub({ configs: ultraRows(reading), device_type: "UA-ULTRA", extensions: [{ device_id: HUB_ID, extension_name: "port_setting",
     target_config: [{ config_key: "rex_button_mode", config_tag: "", config_value: mode }], target_type: "device", unique_id: "extension-1" }] });
+}
+
+/* The rows the field has shown each family reporting about its terminals, so what the library reads for a fixture is what it would read for the hardware. It is
+ * distinct from wiredHub, which also carries the d1-button pair a UA Hub never reports: that record is offered so an arm can hand a family every evidence there is,
+ * where this one is the family's own report.
+ *
+ * @param deviceType - The hardware family the record stands for.
+ *
+ * @returns The record.
+ */
+function familyRecord(deviceType: string): AccessStateDevice & { mac: string } {
+
+  switch(deviceType) {
+
+    case "UA-Hub-Door-Mini":
+
+      return testHub({ configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": "on" }) ], device_type: deviceType });
+
+    case "UA-ULTRA":
+
+      return ultraRecord("rex");
+
+    case "UAH-Ent":
+
+      return testHub({ configs: [ ...wiringRows({ "wiring_state_d1-button-neg": "on", "wiring_state_d1-button-pos": "on", "wiring_state_d2-button-neg": "on",
+        "wiring_state_d2-button-pos": "on" }), ...inputRows({ "input_d1_button": "on", "input_d2_button": "on" }) ], device_type: deviceType });
+
+    case "UGT":
+
+      return testHub({ configs: inputRows({ "input_door_dps": "on", "input_gate_dps": "on" }), device_type: deviceType });
+
+    default:
+
+      // The UA Hub, whose three fixed pairs and the three rows beside them are the vocabulary every other family here is read against.
+      return testHub({ configs: [ ...wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_rel-pos": "on", "wiring_state_ren-neg": "on",
+        "wiring_state_ren-pos": "on", "wiring_state_rex-neg": "on", "wiring_state_rex-pos": "on" }),
+      ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ], device_type: deviceType });
+  }
 }
 
 // The rows a record carries its tamper reading and its tampering-alert setting through, which is what the tamper arms vary against each other.
@@ -2835,14 +2880,16 @@ function tamperRows(rows: Record<string, string>): AccessDeviceEntryConfig[] {
 /* A UA Ultra whose hardware detects tampering, reporting whatever tamper rows the arm names. The Ultra is the hub family carrying that capability today, and its
  * multiplexed terminal input is what gives the record a contact sensor to carry the characteristic at all.
  *
- * @param rows - The tamper rows the record reports.
- * @param mode - What the multiplexed terminal input is configured for, which is what decides whether the request to exit sensor exists.
+ * @param rows    - The tamper rows the record reports.
+ * @param mode    - What the multiplexed terminal input is configured for, which is what decides whether the request to exit sensor exists.
+ * @param reading - What the port rows report, which is what that sensor answers with.
  *
  * @returns The record.
  */
-function tamperUltra(rows: Record<string, string>, mode = "rex"): AccessStateDevice & { mac: string } {
+function tamperUltra(rows: Record<string, string>, mode = "rex", reading = "on"): AccessStateDevice & { mac: string } {
 
-  return testHub({ capabilities: [ "is_hub", "tamper_proofing" ], configs: tamperRows(rows), device_type: "UA-ULTRA", extensions: ultraRecord(mode).extensions });
+  return testHub({ capabilities: [ "is_hub", "tamper_proofing" ], configs: [ ...ultraRows(reading), ...tamperRows(rows) ], device_type: "UA-ULTRA",
+    extensions: ultraRecord(mode).extensions });
 }
 
 // What a hub says when the controller's tampering alert is switched off, spelled once here so every arm counts the sentence a user actually reads.
@@ -2917,17 +2964,21 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
     assert.equal(lineCount(bare, sentence), 0, "and nothing announces a sensor that was never made: " + sentence);
   }
 
-  // One terminal of a pair is a half-wired sensor, which is not a sensor.
-  const half = makeHub({ record: testHub({ configs: wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_ren-neg": "on", "wiring_state_rex-neg": "on" }) }) });
+  // One terminal of a pair is a half-wired sensor, which is not a sensor. The reading rows are carried so the withholding is the pair's own rather than an absent
+  // family's.
+  const half = makeHub({ record: testHub({ configs: [ ...wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_ren-neg": "on", "wiring_state_rex-neg": "on" }),
+    ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ] }) });
 
   for(const subtype of TERMINAL_SUBTYPES) {
 
     assert.ok(!hasContactSensor(half, subtype), "a UA Hub reporting one terminal of a pair carries no " + subtype);
   }
 
-  // A UA Gate and an Enterprise hub drive no terminal input at all, so the most generous evidence a record can carry still says nothing about them.
-  const gate = makeGate({ record: testHub({ configs: EVERY_PAIR_LIVE, device_type: "UGT" }) });
-  const enterprise = makeHub({ record: testHub({ configs: EVERY_PAIR_LIVE, device_type: "UAH-Ent" }) });
+  /* A UA Gate reports its gate position and its side door position, and an Enterprise hub reports one request to exit per port. Neither reports a terminal input
+   * this loop drives: the gate's rows belong to other families altogether, and the Enterprise hub names so many ports that no single family answers for it.
+   */
+  const gate = makeGate({ record: familyRecord("UGT") });
+  const enterprise = makeHub({ record: familyRecord("UAH-Ent") });
 
   for(const subtype of TERMINAL_SUBTYPES) {
 
@@ -2956,11 +3007,15 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
     assert.ok(!hasContactSensor(positioned, subtype), "a UA Ultra configured for a door position sensor carries no " + subtype);
     assert.ok(!hasContactSensor(unconfigured, subtype), "and a UA Ultra reporting no extensions at all carries no " + subtype);
   }
+
+  // The duty is read for the position input the same way, which is the other half of the same evidence: the mode that withholds one input is what offers the other.
+  assert.ok(hasContactSensor(positioned, AccessReservedNames.CONTACT_DPS), "the position duty is what makes a UA Ultra's position sensor eligible");
+  assert.ok(!hasContactSensor(ultra, AccessReservedNames.CONTACT_DPS), "and the exit-button duty is what withholds it");
 });
 
 test("a hub keeps a terminal input's sensor through a silence about its wiring and retires it only when the user turns the option off", () => {
 
-  const harness = makeHub({ record: testHub({ configs: REL_PAIR_LIVE }) });
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the pair reporting live is what creates the sensor");
 
@@ -2978,7 +3033,8 @@ test("a hub keeps a terminal input's sensor through a silence about its wiring a
   assert.equal(lineCount(harness, "Disabling the remote release."), 1, "and the retirement is announced exactly once");
 
   // A hub adopted with the toggle already off never carries the sensor, whatever its wiring reports.
-  const disabled = makeHub({ options: ["Disable.Hub.REL"], record: testHub({ configs: EVERY_PAIR_LIVE }) });
+  const disabled = makeHub({ options: ["Disable.Hub.REL"], record: testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on",
+    "input_state_ren": "on", "input_state_rex": "on" }) ] }) });
 
   assert.ok(!hasContactSensor(disabled, AccessReservedNames.CONTACT_REL), "and a hub adopted with the toggle off never carries it");
   assert.ok(hasContactSensor(disabled, AccessReservedNames.CONTACT_REN), "while the inputs the user left alone are untouched by it");
@@ -3075,6 +3131,51 @@ test("a terminal input whose wiring falls silent keeps its sensor, reads closed,
   assert.equal(lineCount(harness, "Remote release closed."), 0, "and not a change to announce");
 });
 
+/* A UA Gate carrying whatever side door terminal rows an arm names, over a topology of one door. The one-door topology is what keeps the construction seed off the
+ * side door: with no side door resolved there is nothing in the door-state map to seed from, so the sensor and the topic answer the terminal read itself, while the
+ * user's option leaves the sensor and the topic standing either way.
+ *
+ * @param rows - The configuration rows the record carries.
+ *
+ * @returns The gate.
+ */
+function sideDoorGate(rows: AccessDeviceEntryConfig[]): HubHarness {
+
+  return makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], record: testHub({ configs: rows, device_type: "UGT" }) });
+}
+
+test("a UA Gate reads its side door position from the library's terminal read, and its topic answers unknown where nothing is wired", async () => {
+
+  const opened = sideDoorGate([ ...wiringRows({ "wiring_state_door-dps-neg": "on", "wiring_state_door-dps-pos": "on" }),
+    ...inputRows({ "input_door_dps": "off" }) ]);
+
+  assert.equal(contactSensor(opened, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
+    Characteristic.ContactSensorState.CONTACT_NOT_DETECTED, "a terminal in service whose row reads off is an open contact");
+  assert.equal(await opened.mqttGet("sidedoor/dps"), "true", "and the topic carries that reading");
+
+  // A gate reporting nothing about the terminal reads closed, and its topic says the reading is not established rather than answering the default as a reading.
+  const silent = sideDoorGate([]);
+
+  assert.equal(contactSensor(silent, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
+    Characteristic.ContactSensorState.CONTACT_DETECTED, "a terminal nothing is wired to renders closed");
+  assert.equal(await silent.mqttGet("sidedoor/dps"), "unknown", "and answers unknown on its topic");
+
+  // The same pair behind a row reading on is the other direction of the same read.
+  const closed = sideDoorGate([ ...wiringRows({ "wiring_state_door-dps-neg": "on", "wiring_state_door-dps-pos": "on" }),
+    ...inputRows({ "input_door_dps": "on" }) ]);
+
+  assert.equal(await closed.mqttGet("sidedoor/dps"), "false", "a terminal in service whose row reads on is a closed contact");
+
+  /* One half of the pair is no pair, and a gate has no duty selector to fall back on, so the row beside it is a reading nothing qualified. This is the REL, REN,
+   * and REX loop's half-wired fixture on the one path that does not go through it.
+   */
+  const halfWired = sideDoorGate([ ...wiringRows({ "wiring_state_door-dps-neg": "on" }), ...inputRows({ "input_door_dps": "off" }) ]);
+
+  assert.equal(contactSensor(halfWired, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
+    Characteristic.ContactSensorState.CONTACT_DETECTED, "a half-wired terminal renders closed whatever its row says");
+  assert.equal(await halfWired.mqttGet("sidedoor/dps"), "unknown", "and answers unknown for the same reason");
+});
+
 test("a hub's wiring table and the option catalog's model lists agree about which family drives which terminal input", () => {
 
   const families = [ "UAH", "UA-Hub-Door-Mini", "UA-ULTRA", "UGT", "UAH-Ent" ];
@@ -3086,7 +3187,7 @@ test("a hub's wiring table and the option catalog's model lists agree about whic
    */
   for(const deviceType of families) {
 
-    const harness = makeHub({ record: (deviceType === "UA-ULTRA") ? ultraRecord("rex") : testHub({ configs: EVERY_PAIR_LIVE, device_type: deviceType }) });
+    const harness = makeHub({ record: familyRecord(deviceType) });
 
     for(const { name, subtype } of inputs) {
 
@@ -3215,7 +3316,8 @@ test("a reading withdrawn from a quiet one still says why and publishes unknown,
 
 test("a hub whose hardware cannot detect tampering carries the characteristic on no sensor, announces nothing, and publishes nothing", () => {
 
-  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...tamperRows({ "tamper_event": "true" }) ] }) });
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }),
+    ...tamperRows({ "tamper_event": "true" }) ] }) });
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the wired pair is what gives this hub a sensor at all");
 
@@ -3224,7 +3326,7 @@ test("a hub whose hardware cannot detect tampering carries the characteristic on
   assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "hardware without the capability carries the characteristic nowhere, whatever its rows say");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "and publishes nothing for a reading it does not project");
 
-  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...tamperRows({ "tamper_event": "false" }) ]);
+  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }), ...tamperRows({ "tamper_event": "false" }) ]);
 
   assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "a reading changing on such hardware still reaches no characteristic");
   assert.equal(warnCount(harness, "Tampering detected."), 0, "and neither sentence is written for it");
@@ -3261,7 +3363,7 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
   restored.updateCharacteristic(Characteristic.StatusTampered, Characteristic.StatusTampered.TAMPERED);
   restored.updateCharacteristic(Characteristic.StatusActive, false);
 
-  const harness = makeHub({ existing: [restored], record: tamperUltra({}) });
+  const harness = makeHub({ existing: [restored], record: tamperUltra({}, "rex", "off") });
   const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
   const carriers = harness.services.filter(service => (service.UUID === Service.ContactSensor.UUID) && (service.subtype === AccessReservedNames.CONTACT_REX));
 
@@ -3350,7 +3452,7 @@ test("a sensor the re-gate creates on the delivery that changes the verdict read
   assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "an Ultra multiplexed onto its position sensor carries no request to exit sensor yet");
 
   // One delivery carries both the input mode that creates the sensor and the reading that raises the verdict, so the two land together rather than in sequence.
-  restateRecord(harness, { configs: tamperRows({ "tamper_event": "true" }), extensions: ultraRecord("rex").extensions });
+  restateRecord(harness, { configs: [ ...ultraRows("on"), ...tamperRows({ "tamper_event": "true" }) ], extensions: ultraRecord("rex").extensions });
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "the input mode changing is what creates the sensor on this delivery");
 

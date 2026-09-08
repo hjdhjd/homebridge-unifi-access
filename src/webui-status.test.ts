@@ -318,6 +318,7 @@ test("the row policy refuses a rex-configured Ultra's door row and serves a dps-
   const store = createStateStore({});
   const ultra = (mode: string): Record<string, unknown> => bareHub("device1", MAC_ONE, {
 
+    configs: configRows({ deviceId: "device1", entries: { "input_d1_dps": "on" }, tag: "input" }),
     device_type: "UA-ULTRA",
     extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
       target_name: "port1" }]

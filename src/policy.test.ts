@@ -15,7 +15,7 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
   isSupportedAccessDevice, lockCommandRule, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
-  recordByMac, resolveDoorService, resolveWebhookPort, serialForm, ultraInputMode, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
+  recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -457,41 +457,6 @@ test("a Door Mini's position flows from its topology seed and is corrected by a 
   assert.equal(flipped?.lock, "unlocked");
 });
 
-test("ultraInputMode reads the multiplex out of the entry that carries it and nothing else", () => {
-
-  // The captured extension shape, in which the mode sits among unrelated settings and several neighbouring values are not strings at all.
-  const withMode = (mode: unknown): AccessStateDevice => ({
-
-    extensions: [{
-
-      device_id: "device1",
-      extension_name: "port_setting",
-      source_id: "port1",
-      target_config: [
-
-        { config_key: "lock_unlock_time", config_tag: "device_setting", config_value: 60 },
-        { config_key: "button_reverse", config_tag: "device_setting", config_value: false },
-        { config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode },
-        { config_key: "dps_reverse", config_tag: "device_setting", config_value: false }
-      ],
-      target_name: "port1",
-      target_type: "door",
-      unique_id: "ext1"
-    }]
-  } as unknown as AccessStateDevice);
-
-  // Both observed modes, read out of a multi-entry configuration. A traversal filtering on the wrong key would answer one of the neighbours here rather than pass.
-  assert.equal(ultraInputMode(withMode("dps")), "dps");
-  assert.equal(ultraInputMode(withMode("rex")), "rex");
-
-  // A value outside the string domain is absent evidence rather than a mode, which is what makes the declared return type honest.
-  assert.equal(ultraInputMode(withMode(false)), undefined);
-  assert.equal(ultraInputMode(withMode(60)), undefined);
-
-  // A record carrying no extensions at all.
-  assert.equal(ultraInputMode({} as AccessStateDevice), undefined);
-});
-
 test("lockCommandRule maps every configured interval onto the verb that expresses it", () => {
 
   // A door left on the default has no rule governing it, so there is nothing a relock could act on and the command is refused outright.
@@ -786,6 +751,25 @@ test("discoverDoorLocations computes a side door only where one is in scope", ()
   assert.equal(ineligible.mainDoorLocationId, "door1", "the main resolution stands regardless of the side arm");
 });
 
+/* An Ultra whose record carries the multiplex, in whichever mode, alongside the port row the library keys its position family on. An arm hands `[]` for the rows to
+ * withhold that row, which leaves the library no family to read a verdict from at all.
+ *
+ * @param mode - What the record says the multiplexed terminal input is configured for.
+ * @param rows - The configuration rows the record carries.
+ *
+ * @returns The record.
+ */
+function multiplexed(mode: string, rows = configRows({ entries: { "input_d1_dps": "on" }, tag: "input" })): AccessStateDevice {
+
+  return hubRecord({
+
+    configs: rows,
+    device_type: "UA-ULTRA",
+    extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
+      target_name: "port1" }]
+  });
+}
+
 test("dpsSensorEligible answers each hardware family from its own evidence", () => {
 
   const withDps = { dps: "close", location_id: "door1" } as AccessDoorStateEntry;
@@ -797,15 +781,8 @@ test("dpsSensorEligible answers each hardware family from its own evidence", () 
 
   // The Ultra answers from its input multiplex in both directions, never from the entry: a request-to-exit input refuses even beside dps evidence, and a
   // door-position input accepts even before the entry establishes anything.
-  const ultra = (mode: string): AccessStateDevice => hubRecord({
-
-    device_type: "UA-ULTRA",
-    extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
-      target_name: "port1" }]
-  });
-
-  assert.equal(dpsSensorEligible({ device: ultra("rex"), entry: withDps }), false);
-  assert.equal(dpsSensorEligible({ device: ultra("dps"), entry: withoutDps }), true);
+  assert.equal(dpsSensorEligible({ device: multiplexed("rex"), entry: withDps }), false);
+  assert.equal(dpsSensorEligible({ device: multiplexed("dps"), entry: withoutDps }), true);
 
   // Every other family answers from the door-state model through hasDpsEvidence: established position accepts, a positive unwired report refuses, and an absent
   // entry refuses.
@@ -950,14 +927,6 @@ test("a UA Ultra record carrying no extensions answers position eligibility from
   const open = { dps: "open", location_id: "door1" } as AccessDoorStateEntry;
   const unwired = { dps: "none", location_id: "door1" } as AccessDoorStateEntry;
 
-  // An Ultra whose record carries the multiplex, in whichever mode.
-  const multiplexed = (mode: string): AccessStateDevice => hubRecord({
-
-    device_type: "UA-ULTRA",
-    extensions: [{ extension_name: "port_setting", target_config: [{ config_key: "rex_button_mode", config_tag: "device_setting", config_value: mode }],
-      target_name: "port1" }]
-  });
-
   const projected = coreRecord({ device_type: "UA-ULTRA" });
 
   /* Carrying no extensions at all is not the same as carrying a multiplex set to the exit button, and the contrasting pair is what tells the two apart: the same
@@ -969,6 +938,25 @@ test("a UA Ultra record carrying no extensions answers position eligibility from
   // The multiplex still outranks an absent entry in the other direction, and an absent multiplex still refuses a positive unwired report.
   assert.equal(dpsSensorEligible({ device: multiplexed("dps"), entry: undefined }), true);
   assert.equal(dpsSensorEligible({ device: projected, entry: unwired }), false);
+});
+
+test("a UA Ultra whose record establishes no duty answers its position eligibility from the door-state model", () => {
+
+  const open = { dps: "open", location_id: "door1" } as AccessDoorStateEntry;
+  const unwired = { dps: "none", location_id: "door1" } as AccessDoorStateEntry;
+
+  /* A duty outside the two the library knows establishes nothing in either direction, so the entry is what answers. Reading both entries against it is what tells
+   * a fallback apart from a read that refused outright, which answers false whatever the entry says.
+   */
+  assert.equal(dpsSensorEligible({ device: multiplexed("unknown"), entry: open }), true);
+  assert.equal(dpsSensorEligible({ device: multiplexed("unknown"), entry: unwired }), false);
+
+  // A duty the library does know is a verdict of its own, and it outranks whatever the entry establishes.
+  assert.equal(dpsSensorEligible({ device: multiplexed("rex"), entry: open }), false);
+
+  // The duty reads here, but a record carrying no reading row offers no family for it to qualify, so there is no verdict to outrank the entry with.
+  assert.equal(dpsSensorEligible({ device: multiplexed("dps", []), entry: open }), true);
+  assert.equal(dpsSensorEligible({ device: multiplexed("dps", []), entry: unwired }), false);
 });
 
 test("discoverDoorLocations ranks the controller's own live binding above the name heuristics", () => {
