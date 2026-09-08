@@ -21,8 +21,8 @@ import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
 import { format } from "node:util";
+import { signWebhookDelivery } from "unifi-access/testing";
 import test from "node:test";
 
 // The controller's own MAC, in the raw form an accessory context carries and the normalized form feature options resolve against.
@@ -1324,12 +1324,6 @@ function endpointRecord(overrides: { endpoint?: string; id: string; name?: strin
     secret: overrides.secret ?? "secret-" + overrides.id };
 }
 
-// Sign a body exactly as the controller does, so a delivery arm can present a genuine one.
-function sign(secret: string, timestampSeconds: number, body: string): string {
-
-  return "t=" + timestampSeconds.toString() + ",v1=" + createHmac("sha256", secret).update(timestampSeconds.toString()).update(".").update(body).digest("hex");
-}
-
 function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
 
   const calls: string[] = [];
@@ -1826,9 +1820,9 @@ test("the route admits a genuine delivery once and refuses everything else about
    * add a second line, or a forger could fill the log at will.
    */
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
-    headers: { signature: sign("the-wrong-secret", now(), body) } }).status, 401);
+    headers: { signature: signWebhookDelivery({ body, secret: "the-wrong-secret", timestamp: now() }) } }).status, 401);
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
-    headers: { signature: sign("the-wrong-secret", now(), body) } }).status, 401);
+    headers: { signature: signWebhookDelivery({ body, secret: "the-wrong-secret", timestamp: now() }) } }).status, 401);
   assert.equal(harness.lines.filter(line => line.includes("failed signature verification")).length, 1, "the breadcrumb is once per registration");
 
   /* A `signature` header a sender wrote twice, in the comma-joined form Node hands a consumer for an ordinary repeated header rather than the array a test could
@@ -1836,13 +1830,14 @@ test("the route admits a genuine delivery once and refuses everything else about
    * valid over this body: the first carries no valid code at all, and the second appends a forgery after an authentic value, which is the pair the parse reads.
    */
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: "t=1,v1=aa, t=2,v1=bb" } }).status, 401);
-  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
-    headers: { signature: sign("minted-secret", now(), body) + ", " + sign("the-wrong-secret", now(), body) } }).status, 401);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature:
+    signWebhookDelivery({ body, secret: "minted-secret", timestamp: now() }) + ", " + signWebhookDelivery({ body, secret: "the-wrong-secret", timestamp: now() })
+  } }).status, 401);
 
   /* Authentic, and fresh when it was signed - but the host's own clock moves past the window before it arrives, which is the age the check is about. Moving time
    * rather than backdating the header is what proves the judgment reads this clock at all.
    */
-  const dated = sign("minted-secret", now(), body);
+  const dated = signWebhookDelivery({ body, secret: "minted-secret", timestamp: now() });
 
   harness.clock.advance(ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS + 1000);
 
@@ -1850,9 +1845,9 @@ test("the route admits a genuine delivery once and refuses everything else about
 
   // Authentic and fresh, but not JSON at all.
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from("not json"),
-    headers: { signature: sign("minted-secret", now(), "not json") } }).status, 401);
+    headers: { signature: signWebhookDelivery({ body: "not json", secret: "minted-secret", timestamp: now() }) } }).status, 401);
 
-  const genuine = sign("minted-secret", now(), body);
+  const genuine = signWebhookDelivery({ body, secret: "minted-secret", timestamp: now() });
 
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: genuine } }).status, 200);
   assert.equal(harness.deliveries.length, 1, "an admitted delivery reaches the accessories");
@@ -1872,7 +1867,8 @@ test("a request the route does not claim is answered before the controller ever 
 
   const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
     event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "unclaimed1" });
-  const request = { body: Buffer.from(body), headers: { signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) } };
+  const request = { body: Buffer.from(body),
+    headers: { signature: signWebhookDelivery({ body, secret: "minted-secret", timestamp: Math.floor(harness.clock.now() / 1000) }) } };
 
   /* Both answers are the listener's, and neither costs the controller a verdict: a path this controller never claimed is nobody's, and the route accepts POST
    * alone because that is how a delivery arrives. An authentic body is used for both, so what makes each one refuse is the addressing and not the payload.
@@ -1896,7 +1892,7 @@ test("an authentic delivery this plugin does not model is answered without being
    * is nothing here that could read it.
    */
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
-    headers: { signature: sign("minted-secret", Math.floor(harness.clock.now() / 1000), body) } }).status, 200);
+    headers: { signature: signWebhookDelivery({ body, secret: "minted-secret", timestamp: Math.floor(harness.clock.now() / 1000) }) } }).status, 200);
   assert.equal(harness.deliveries.length, 0);
 });
 

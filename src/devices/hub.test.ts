@@ -232,7 +232,12 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const releases: (() => void)[] = [];
   const requests: string[] = [];
   const rings: { cancel: boolean; readerId: string }[] = [];
-  const handlers = new Map<string, (payload: unknown) => void>();
+  /* The controller's event rail, doubled with the emitter's own semantics: a registration under a key joins the list already there rather than replacing it, off
+   * removes the single registration it names, and a delivery reaches every handler under the key in registration order. The hub binds one handler and registers
+   * that same reference under several keys, so a key registered twice holds one reference twice and fires twice - which is the leak an arm has to be able to
+   * see. A rail keeping one handler per key, or one deduplicating by reference, answers a doubled registration as a single one and hides it.
+   */
+  const handlers = new Map<string, ((payload: unknown) => void)[]>();
   const record = options.record ?? testHub();
 
   /* The client's door state map, which is where a hub reads every door it drives. An arm that named one door's entry has it keyed here under that entry's own
@@ -380,8 +385,28 @@ function makeHub(options: HubOptions = {}): HubHarness {
     config: { address: "1.2.3.4" },
     events: {
 
-      off: (event: string): void => void handlers.delete(event),
-      on: (event: string, handler: (payload: unknown) => void): void => void handlers.set(event, handler)
+      off: (event: string, handler: (payload: unknown) => void): void => {
+
+        const registered = handlers.get(event) ?? [];
+        const index = registered.lastIndexOf(handler);
+
+        if(index >= 0) {
+
+          registered.splice(index, 1);
+        }
+
+        if(!registered.length) {
+
+          handlers.delete(event);
+        }
+      },
+      on: (event: string, handler: (payload: unknown) => void): void => {
+
+        const registered = handlers.get(event) ?? [];
+
+        registered.push(handler);
+        handlers.set(event, registered);
+      }
     },
     getDeviceName: (): string => "Test Hub [UA Hub]",
     id: undefined,
@@ -419,17 +444,26 @@ function makeHub(options: HubOptions = {}): HubHarness {
     debugs,
     deliver: (event: string, delivery: unknown): void => {
 
-      const handler = handlers.get(ACCESS_WEBHOOK_EVENT_PREFIX + event);
+      const registered = handlers.get(ACCESS_WEBHOOK_EVENT_PREFIX + event) ?? [];
 
-      assert.ok(handler, "the hub should have registered a handler for " + event);
-      handler(delivery);
+      assert.ok(registered.length, "the hub should have registered a handler for " + event);
+
+      // The fire walks a copy, so a handler that unregisters itself or a sibling mid-delivery cannot make the rail skip the neighbor behind it.
+      for(const handler of [...registered]) {
+
+        handler(delivery);
+      }
     },
     emit: (event: string, packet: unknown): void => {
 
-      const handler = handlers.get(event);
+      const registered = handlers.get(event) ?? [];
 
-      assert.ok(handler, "the hub should have registered a handler for " + event);
-      handler(packet);
+      assert.ok(registered.length, "the hub should have registered a handler for " + event);
+
+      for(const handler of [...registered]) {
+
+        handler(packet);
+      }
     },
     errors,
     fetches,
