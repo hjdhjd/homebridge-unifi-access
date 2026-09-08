@@ -162,6 +162,12 @@ export class AccessHub extends AccessDevice {
    * hub on the controller receives reads it without building one.
    */
   #gateDoors: readonly DrivenDoor[];
+  /* Which pass the next switch loop runs as. The loop's first seeded run is the switches' adoption whatever call reached it, because a record carrying configuration
+   * rows seeds synchronously at construction and one carrying none seeds from the settings read, so the pass is held here rather than read from the call site. It
+   * flips once the loop has run, and it dies with the instance, so a hub re-adopted on the same accessory dresses every switch again - which is what the handlers
+   * require, being closures over this instance.
+   */
+  #switchPass: ConfigurePass;
 
   // Create an instance.
   constructor(controller: AccessController, projection: AccessDeviceProjection, accessory: AccessAccessory, admission: AccessStateDevice & { mac: string },
@@ -189,6 +195,8 @@ export class AccessHub extends AccessDevice {
     this.#doorbellTopic = undefined;
     this.#foldedConfigValues = undefined;
     this.#gateDoors = [];
+    // No switch loop has run on this instance, so the first one is the switches' adoption.
+    this.#switchPass = { initialized: false };
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
     if((this.lockDelayInterval !== undefined) && (this.lockDelayInterval < 0)) {
@@ -517,90 +525,108 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
-      const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " " + accessMethod.name, accessMethod.subtype);
+      let initialized = this.#switchPass.initialized;
 
-      // Retrieve the state when requested.
-      service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.#accessMethodEnabled(accessMethod.key));
+      const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " " + accessMethod.name, accessMethod.subtype, () => {
 
-      // Set the state when requested. Writes route official-first with a read-back for certainty; reads answer from the access method state model, which the
-      // record's configuration rows, the official settings read, and the v2 access method events each feed.
-      service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+        // A switch created on this pass was dressed by nobody, whichever pass this is.
+        initialized = false;
+      });
 
-        const enabled = value === true;
-        const official = this.controller.client.official;
+      /* The handlers are registered the first time this hub holds the switch: they read the model live and are closures over this instance, so a repeat pass
+       * registers nothing on a switch already standing.
+       */
+      if(!initialized) {
 
-        // This gate is what narrows the nullable reference for the parameter pass below...a narrowing cannot cross a method boundary, so the method takes it
-        // already narrowed.
-        if(official) {
+        // Retrieve the state when requested.
+        service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.#accessMethodEnabled(accessMethod.key));
 
-          const verdict = await this.#writeAccessMethodOfficial(official, accessMethod, enabled);
+        // Set the state when requested. Writes route official-first with a read-back for certainty; reads answer from the access method state model, which the
+        // record's configuration rows, the official settings read, and the v2 access method events each feed.
+        service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
-          switch(accessMethodWriteFollowup({ transport: this.controller.client.transport !== null, verdict })) {
+          const enabled = value === true;
+          const official = this.controller.client.official;
 
-            case "complete":
+          // This gate is what narrows the nullable reference for the parameter pass below...a narrowing cannot cross a method boundary, so the method takes it
+          // already narrowed.
+          if(official) {
 
-              /* The switch already carries the value HomeKit wrote, and the model takes it too: a confirmed write is the freshest thing anyone knows about the
-               * method, so a read arriving before the controller's own echo answers what the controller confirmed rather than the rows it has yet to restate. The
-               * v2 access method events and the record rail keep the model current from there.
-               */
-              this.#foldMethodValue(accessMethod.key, enabled);
+            const verdict = await this.#writeAccessMethodOfficial(official, accessMethod, enabled);
 
-              return;
+            switch(accessMethodWriteFollowup({ transport: this.controller.client.transport !== null, verdict })) {
 
-            case "decline":
+              case "complete":
 
-              // The controller answered success while leaving the setting unchanged, which only the read-back can reveal. It answered and refused, so the raw
-              // endpoint is not asked to second-guess it, and the switch reverts to the truth the read-back showed.
-              this.log.error("The controller declined the %s access method change.", accessMethod.name);
-              this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
-
-              return;
-
-            case "fallback":
-
-              // A thrown official error keeps controllers without the official settings surface working, and an absent verdict covers a method the official map
-              // cannot see on this device while the raw endpoint still can.
-              if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
-
+                /* The switch already carries the value HomeKit wrote, and the model takes it too: a confirmed write is the freshest thing anyone knows about the
+                 * method, so a read arriving before the controller's own echo answers what the controller confirmed rather than the rows it has yet to restate. The
+                 * v2 access method events and the record rail keep the model current from there.
+                 */
                 this.#foldMethodValue(accessMethod.key, enabled);
 
                 return;
-              }
 
-              break;
+              case "decline":
 
-            case "revert":
+                // The controller answered success while leaving the setting unchanged, which only the read-back can reveal. It answered and refused, so the raw
+                // endpoint is not asked to second-guess it, and the switch reverts to the truth the read-back showed.
+                this.log.error("The controller declined the %s access method change.", accessMethod.name);
+                this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
 
-              // No path can carry the write, so the generic tail below surfaces the failure and puts the switch back.
-              break;
-          }
-        } else if(this.controller.client.transport) {
+                return;
 
-          // Without an official path, the raw credential write carries the change on its own.
-          if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
+              case "fallback":
 
-            this.#foldMethodValue(accessMethod.key, enabled);
+                // A thrown official error keeps controllers without the official settings surface working, and an absent verdict covers a method the official map
+                // cannot see on this device while the raw endpoint still can.
+                if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
+
+                  this.#foldMethodValue(accessMethod.key, enabled);
+
+                  return;
+                }
+
+                break;
+
+              case "revert":
+
+                // No path can carry the write, so the generic tail below surfaces the failure and puts the switch back.
+                break;
+            }
+          } else if(this.controller.client.transport) {
+
+            // Without an official path, the raw credential write carries the change on its own.
+            if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
+
+              this.#foldMethodValue(accessMethod.key, enabled);
+
+              return;
+            }
+          } else {
+
+            // This arm is type-totality rather than a served population: a connected client holds the official surface, a credential transport, or both. Both
+            // getters are nullable by type, and the flow must be total over them.
+            this.log.error("Changing an access method requires the official Access API or UniFi Access controller credentials.");
+            this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
 
             return;
           }
-        } else {
 
-          // This arm is type-totality rather than a served population: a connected client holds the official surface, a credential transport, or both. Both
-          // getters are nullable by type, and the flow must be total over them.
-          this.log.error("Changing an access method requires the official Access API or UniFi Access controller credentials.");
+          // Nothing carried the write, so we surface the failure and revert our switch state.
+          this.log.error("Unable to %s the %s access method.", enabled ? "activate" : "deactivate", accessMethod.name);
           this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
+        });
+      }
 
-          return;
-        }
-
-        // Nothing carried the write, so we surface the failure and revert our switch state.
-        this.log.error("Unable to %s the %s access method.", enabled ? "activate" : "deactivate", accessMethod.name);
-        this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
-      });
-
-      // Initialize the switch from the same model its reads answer from, so what HomeKit is handed and what the handler would answer agree from the first pass.
+      /* Initialize the switch from the same model its reads answer from, so what HomeKit is handed and what the handler would answer agree from the first pass. The
+       * push runs on every pass, dressed or not: it is the restatement a completed refresh and a device update deliver to HomeKit, which the read handler alone
+       * cannot, because a client sees a pushed value and re-reads only when it asks for one.
+       */
       service.updateCharacteristic(this.hap.Characteristic.On, this.#accessMethodEnabled(accessMethod.key));
     }
+
+    // Every switch this pass left standing is dressed, so the next pass is a repeat.
+    this.#switchPass = { initialized: true };
   }
 
   // Whether a method reads on. A model nothing has seeded answers off for every method, which is the same answer a seeded model gives for a method it holds no
@@ -772,8 +798,9 @@ export class AccessHub extends AccessDevice {
     return accessMethodValuesFromOfficialSettings({ methods: accessMethods, settings: settings.access_methods });
   }
 
-  /* Materialize the switches a settled read has made knowable, and run the sweep beside them. The one statement of that settle-time pass, shared by the seed and the
-   * refresh so what a completed read leaves HomeKit holding cannot differ between them.
+  /* Materialize the switches a settled read has made knowable, and run the sweep beside them. The one statement of that pass, shared by the seed, the refresh, and
+   * the device update, so what a completed read or a delivery leaves HomeKit holding cannot differ between them. The pass is silent on repeat by construction: a
+   * switch is dressed the first time this hub holds it, and created and retired from what the model holds.
    *
    * A model some faster path seeded while a read failed is materialized here too, which is the honest reading of a model that holds the truth however it arrived.
    */
@@ -2715,6 +2742,12 @@ export class AccessHub extends AccessDevice {
      * dressed at adoption.
      */
     this.#configureServices({ initialized: true });
+
+    /* The switches follow the record the same way: a method capability arriving or going reaches HomeKit on this delivery, from what the seeded model holds. A pass
+     * over an unchanged record finds every switch dressed, registers nothing, and restates each switch's value; an unseeded model runs no pass at all, as the guard
+     * inside states.
+     */
+    this.#materializeSeededSwitches();
   }
 
   /* Project tampering. The condition lives on this rail alone: the configure path adopts a baseline and dresses the sensors from it, and every change after that

@@ -24,6 +24,7 @@ import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
+import type { Mock } from "node:test";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
@@ -1022,6 +1023,68 @@ test("a reader whose record carries no configuration rows takes its switches fro
   // The settings map is sparse, so a capability the answer never mentioned still gets its switch and reads off, exactly as a capability with no row does above.
   assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "a capability the sparse answer omits still gets a switch");
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), false);
+});
+
+test("a switch is dressed the first time the hub holds it, a repeat pass registers nothing on one already standing, and the record creates and retires", async (t) => {
+
+  const harness = makeReader({
+
+    existing: [carried(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN)],
+    official: true,
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ], configs: undefined }),
+    settings: async (): Promise<unknown> => ({ access_methods: { nfc: { enabled: "yes" }, pin_code: { enabled: "yes" } } })
+  });
+
+  await settle();
+
+  /* The adoption polarity, read from both sides. The PIN switch is one the accessory arrived carrying, restored with none of its handlers, so an answer from it can
+   * only come from a registration this hub made on a switch it never created. The QR switch is one this pass created, dressed from the same sparse model. NFC is the
+   * third case: the model holds it on, but the record carries no capability for it, so no switch exists to dress.
+   */
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "a switch the accessory carried is dressed at the first seeded pass");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), false, "and a switch the pass created is dressed from the same model");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "a method the model holds and the record has no capability for gets no switch");
+
+  /* The spies watch the registration calls themselves rather than the handlers behind them. A second registration would install a fresh closure over the same
+   * instance - identical in what it answers, and invisible from the characteristic's own value - so the call is the only place a repeat can be seen.
+   */
+  const spyHandlers = (subtype: string): { gets: Mock<Characteristic["onGet"]>; sets: Mock<Characteristic["onSet"]> } => {
+
+    const on = switchService(harness, subtype).getCharacteristic(Characteristic.On);
+
+    return { gets: t.mock.method(on, "onGet"), sets: t.mock.method(on, "onSet") };
+  };
+
+  const pin = spyHandlers(AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
+  const qr = spyHandlers(AccessReservedNames.SWITCH_ACCESSMETHOD_QR);
+
+  // A device update over an unchanged record, which is a pass across switches that are all standing and were all dressed above.
+  restateRecord(harness, {});
+
+  assert.equal(pin.gets.mock.callCount(), 0, "a repeat pass finds the switch dressed and registers nothing on it");
+  assert.equal(pin.sets.mock.callCount(), 0, "neither its read handler nor its write one");
+  assert.equal(qr.gets.mock.callCount(), 0, "and the same for a switch this hub created itself");
+  assert.equal(qr.sets.mock.callCount(), 0);
+  assert.equal(harness.fetches.length, 1, "the pass ran from the model rather than reaching for a second settings read");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "and the handler the first pass registered still answers");
+
+  /* The record moving is what a pass on every delivery is for: NFC arrives as a capability and QR goes, and each reaches HomeKit on the delivery that carried it.
+   * The model already holds NFC on, so the switch this pass creates is dressed with a handler that can say so.
+   */
+  restateRecord(harness, { capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ] });
+
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), true,
+    "a switch this pass created reads the model on the delivery that brought its capability, rather than at the next restart");
+
+  /* The read alone cannot tell a dressed switch from an undressed one: the value push runs on every pass, and a characteristic carrying no handler answers whatever
+   * was last pushed onto it. A write is what only a registration can carry, so the write is what says the switch was dressed on the pass that created it.
+   */
+  await switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC).getCharacteristic(Characteristic.On).handleSetRequest(true);
+
+  assert.deepEqual(harness.updates, [{ access_methods: { nfc: { enabled: "yes" } } }], "and it carries a write from HomeKit, which only a registered handler can");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "and a capability the record has dropped retires its switch on the same delivery");
+  assert.equal(pin.gets.mock.callCount(), 0, "while the switch that stood through both deliveries was registered on neither");
+  assert.equal(pin.sets.mock.callCount(), 0);
 });
 
 test("a settings read the controller refused keeps every switch the accessory carries, creates none, and says so", async () => {
