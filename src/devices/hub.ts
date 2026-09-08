@@ -486,13 +486,12 @@ export class AccessHub extends AccessDevice {
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
 
-    /* A UA Gate subscribes to remote unlocks by event name, because the controller delivers them under the door's identity rather than the hub's, and ownership is
-     * settled at delivery from the doors discovery resolved - so a door rebound mid-run needs no second registration.
+    /* Every hub subscribes to remote unlocks by event name. The controller delivers them under the identity of the door for a gate and under the identity of the hub
+     * that performed the unlock for everything else, and the rail emits each packet under its event name and under that identity alike - so the subscription is by
+     * name for every family, ownership is settled at delivery from the identity the packet names, and the general packet handler leaves this event alone, which is
+     * what keeps the rail's second emission under this hub's own identity from being a second delivery.
      */
-    if(this.uda.device_type === "UGT") {
-
-      this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, handler);
-    }
+    this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, (packet) => this.handleRemoteUnlock(packet));
   }
 
   // Configure the access method switches for HomeKit.
@@ -1781,6 +1780,26 @@ export class AccessHub extends AccessDevice {
     return door.isSideDoor ? "side" : "main";
   }
 
+  /* Which of this hub's doors a remote unlock names, or null when it names none of them.
+   *
+   * The controller reports this notification in two identity spaces: hub-class hardware names the device that performed the unlock, and a gate names the door. So the
+   * read tolerates both - the performing device is this hub's main door, and anything else is either a door this hub drives or nothing of this hub's at all. A hub
+   * inside its removal grace drives no doors, so it answers null through the ownership read above exactly as every other path does.
+   *
+   * @param packet - The remote unlock as the controller reported it.
+   *
+   * @returns Which of this hub's doors the unlock names, or null.
+   */
+  #remoteUnlockDoor(packet: AccessEventPacket): Nullable<"main" | "side"> {
+
+    if(packet.event_object_id === this.uda.unique_id) {
+
+      return "main";
+    }
+
+    return this.#ownedDoor(packet.event_object_id);
+  }
+
   /* Whether this hub has positive evidence of a wired door position sensor - the one predicate every consumer of that question reads. The family-by-family answer
    * is the policy module's shared eligibility statement; this getter binds it to the live record and the guarded door-state read.
    *
@@ -2660,29 +2679,29 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Handle remote unlock events.
+  // A remote unlock the controller reported, applied to the door the packet names.
   private handleRemoteUnlock(packet: AccessEventPacket): void {
 
-    // For UA Gate hubs, determine which door was unlocked based on the event_object_id.
+    const door = this.#remoteUnlockDoor(packet);
+
+    if(door === null) {
+
+      return;
+    }
+
     if(this.uda.device_type === "UGT") {
-
-      const door = this.#ownedDoor(packet.event_object_id);
-
-      if(door === null) {
-
-        return;
-      }
 
       // The same hardware window a command of ours opens, begun on the controller's side instead, so it is settled and announced through the same helper.
       this.#openGateLockWindow(door === "side");
-    } else {
 
-      /* A hub other than a gate has no window of its own to open: its relock is the controller's own relay, reported back over the door-state rail. So the unlock
-       * is applied here as one more reported reading, and an unlock the door-state rail has already delivered finds the door settled and stays silent rather than
-       * announcing the same unlock a second time.
-       */
-      this.#applyLockState(false, this.hap.Characteristic.LockCurrentState.UNSECURED);
+      return;
     }
+
+    /* A hub other than a gate has no window of its own to open: its relock is the controller's own relay, reported back over the door-state rail. So the unlock
+     * is applied here as one more reported reading, and an unlock the door-state rail has already delivered finds the door settled and stays silent rather than
+     * announcing the same unlock a second time.
+     */
+    this.#applyLockState(false, this.hap.Characteristic.LockCurrentState.UNSECURED);
   }
 
   /* Handle a device update, delivered once our own record has folded.
@@ -2995,12 +3014,6 @@ export class AccessHub extends AccessDevice {
   private eventHandler(packet: AccessEventPacket): void {
 
     switch(packet.event) {
-
-      case ACCESS_REMOTE_UNLOCK_EVENT:
-
-        this.handleRemoteUnlock(packet);
-
-        break;
 
       case ACCESS_DEVICE_UPDATE_EVENT:
 

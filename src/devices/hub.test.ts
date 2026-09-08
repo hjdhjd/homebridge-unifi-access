@@ -2503,16 +2503,24 @@ test("a door hub announces what the controller reports under its own door's name
   assert.deepEqual(hub.lines.filter(line => line.endsWith(": Unlocked.") || line.endsWith(": Locked.")), []);
 });
 
-test("a door hub announces one remote unlock once, whichever of its two rails reports it first", () => {
+test("a door hub announces one remote unlock once, whichever of its two rails reports it first", (t) => {
 
   /* The controller reports an unlock on its remote-unlock rail and reports the door unlocked on the door-state rail, and either can arrive first. One physical
-   * event is one announcement whichever ordering this hub sees.
+   * event is one announcement whichever ordering this hub sees. The packet names the hub itself, which is how hub-class hardware reports the unlock it performed.
    */
   const first = makeHub();
+  const packet = { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: HUB_ID };
 
-  first.emit(HUB_ID, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+  /* The rail delivers one packet twice to a hub registered under both its event name and its own identity, and whether that reaches the handler once or twice is not
+   * observable from the lock, whose guarded write swallows a repeat. So the handler itself is what this half counts, which is why the arm reaches for a private one.
+   */
+  const handled = t.mock.method(first.hub as unknown as { handleRemoteUnlock: (delivered: unknown) => void }, "handleRemoteUnlock");
+
+  first.emit(ACCESS_REMOTE_UNLOCK_EVENT, packet);
+  first.emit(HUB_ID, packet);
   deliverDoorState(first, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
+  assert.equal(handled.mock.callCount(), 1, "the rail's two emissions of one packet reach the handler once");
   assert.deepEqual(lockPayloads(first), ["false"]);
   assert.equal(lineCount(first, "Door unlocked."), 1);
   assert.equal(lockService(first).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
@@ -2521,7 +2529,8 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
   const second = makeHub();
 
   deliverDoorState(second, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
-  second.emit(HUB_ID, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+  second.emit(ACCESS_REMOTE_UNLOCK_EVENT, packet);
+  second.emit(HUB_ID, packet);
 
   assert.deepEqual(lockPayloads(second), ["false"]);
   assert.equal(lineCount(second, "Door unlocked."), 1);
@@ -2533,6 +2542,34 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
   assert.deepEqual(lockPayloads(second), [ "false", "true" ]);
   assert.equal(lineCount(second, "Door locked."), 1);
   assert.equal(lockService(second).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
+});
+
+test("a remote unlock is settled by the identity it names: the hub that performed it, one of its doors, or another device altogether", () => {
+
+  /* The controller reports this notification in two identity spaces - hub-class hardware names the device that performed the unlock, and a gate names the door - and
+   * every hub on the controller sees every one of them under the event name, so what a hub applies is settled by the identity the packet names and nothing else.
+   */
+  const foreign = makeHub();
+
+  foreign.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: "another-hub" });
+
+  assert.deepEqual(lockPayloads(foreign), [], "an unlock another device performed moves this hub's lock nowhere");
+  assert.deepEqual(foreign.lines, [], "and nothing is announced for it");
+  assert.equal(lockService(foreign).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
+
+  const byDoor = makeHub();
+
+  byDoor.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+
+  assert.deepEqual(lockPayloads(byDoor), ["false"], "a packet naming this hub's door in the gate's identity space is applied as the same unlock");
+  assert.equal(lineCount(byDoor, "Door unlocked."), 1);
+
+  const gate = makeGate();
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: HUB_ID });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "and a gate named by its own identity reads it as its main door");
+  assert.equal(lineCount(gate, "Gate unlocked."), 1);
 });
 
 test("the lock logging preference silences a door's lock lines and never its topic", async () => {
