@@ -963,7 +963,8 @@ test("discoverDoorLocations ranks the controller's own live binding above the na
 
   const doors = [ stateDoor("door1", "Side Gate"), stateDoor("door2", "Utility") ];
 
-  // The embedded door member still wins outright: it is the binding the topology document states about this device directly.
+  // The embedded door member wins over every fallback below it, as the binding the topology document states about this device directly, and only a published port
+  // binding outranks it.
   assert.deepEqual(discoverDoorLocations({ device: { door: { unique_id: "d1" }, location_id: "d2" } as unknown as AccessStateDevice,
     doors: [ stateDoor("d1", "Alpha"), stateDoor("d2", "Beta") ], sideDoorEligible: false }), { mainDoorLocationId: "d1" });
 
@@ -980,6 +981,35 @@ test("discoverDoorLocations ranks the controller's own live binding above the na
    */
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "door2" } as AccessStateDevice, doors, sideDoorEligible: true }),
     { mainDoorLocationId: "door2", sideDoorLocationId: "door1" });
+});
+
+test("discoverDoorLocations ranks a port binding above every fallback, whichever order the controller delivered the bindings in", () => {
+
+  const binding = (name: string, doorId: string): Record<string, string> => ({ extension_name: "port_setting", target_name: name, target_value: doorId });
+  const doors = [ stateDoor("door1", "Main Gate"), stateDoor("door2", "Pedestrian Gate") ];
+
+  /* A record whose every fallback points somewhere else: its embedded door member names door1, its location names door2, and the topology carries a door named
+   * like a main gate and a door named like a side one. Only the published bindings answer with doorA and doorB, so nothing but the bindings can produce this pair.
+   */
+  const bound = (extensions: Record<string, string>[]): AccessStateDevice => ({ door: { unique_id: "door1" }, extensions,
+    location_id: "door2" } as unknown as AccessStateDevice);
+
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB") ]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB") ]), doors, sideDoorEligible: false }),
+    { mainDoorLocationId: "doorA" });
+
+  // The controller delivers its bindings in whatever order it likes, so the ports name the roles rather than the positions do.
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper2", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
+
+  // A record binding the side door's port alone names its side door and lets the main door fall through to the arms below, which is the embedded member here.
+  assert.deepEqual(discoverDoorLocations({ device: bound([binding("oper2", "doorB")]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
+
+  // A binding naming no port is still a binding, and it is the main door's: the side door then falls to the names, which is where it always fell.
+  assert.deepEqual(discoverDoorLocations({ device: bound([{ extension_name: "port_setting", target_value: "doorA" }]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "doorA", sideDoorLocationId: "door2" });
 });
 
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {

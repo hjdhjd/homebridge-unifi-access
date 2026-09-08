@@ -14,7 +14,7 @@
  * the library's own published vocabulary, which is read through rather than restated anywhere here.
  */
 import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, AccessAuthError, isEnterpriseHubRecord, isHub, isReader, normalizeActorType,
-  normalizeMacAddress, selectAccessPoints, terminalInput } from "unifi-access";
+  normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
@@ -640,6 +640,11 @@ export function hasDpsEvidence(entry: AccessDoorStateEntry | undefined): boolean
   return (position !== undefined) && (position !== "none");
 }
 
+/* The name the controller writes beside a UA Gate's side door binding, from the one field report of a gate's port names. The library passes a binding's name
+ * through uninterpreted, because which port serves a side door is policy rather than protocol, so that is stated here and nowhere else.
+ */
+const SIDE_DOOR_PORT = "oper2";
+
 /**
  * The main and side door locations a UA Gate resolves to, from its device record and the topology's doors collection - the one statement of the gate's
  * door-discovery heuristic.
@@ -651,9 +656,11 @@ export function hasDpsEvidence(entry: AccessDoorStateEntry | undefined): boolean
  * The side arm runs only when the caller says a side door is in scope, because what makes one eligible differs by consumer: the hub gates it on the user's
  * side-door preference, while an evidence-only consumer asks on the hardware class alone.
  *
- * The main-door arms rank two bindings the record itself carries above any reading of a door's name. The embedded door member is a topology snapshot, which the
- * official surface never carries, while the location the record names is the controller's own live binding and both surfaces carry it...so a door the controller
- * itself points at outranks a name that merely looks like a main gate.
+ * The port binding the controller publishes for a port outranks everything else here, because it is the same binding the library's own single-door resolution
+ * reads. The side door's port is the one the controller names `oper2`, and the main door is whichever binding is not that one, in whatever order the controller
+ * delivered them...so a record carrying a single binding named `oper2` names its side door alone and lets the main door fall through to the arms below. The
+ * embedded door member and the location the record names fall behind the bindings as topology snapshots - the first of which the official surface never carries -
+ * while both still outrank a name that merely looks like a main gate.
  *
  * An options object because a positional boolean beside two structural arguments would read as noise at the call site.
  *
@@ -668,35 +675,42 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
 
   const discovered: { mainDoorLocationId?: string; sideDoorLocationId?: string } = {};
 
+  // The doors this record's own ports are bound to, told apart by the port each one names.
+  const bindings = portBindings(device);
+  const sideBinding = bindings.find(binding => binding.name === SIDE_DOOR_PORT);
+  const mainBinding = bindings.find(binding => binding !== sideBinding);
+
   // Get the primary door ID from the device record, which may be undefined.
   const primaryDoorId = device.door?.unique_id;
 
-  // Strategy 1: Use the device's bound door as the main door.
-  if(primaryDoorId) {
+  // Strategy 1: Use the door the record's own port binding names as the main door.
+  if(mainBinding) {
 
+    discovered.mainDoorLocationId = mainBinding.doorId;
+  } else if(primaryDoorId) {
+
+    // Strategy 2: Use the device's bound door as the main door.
     discovered.mainDoorLocationId = primaryDoorId;
   } else if(doors.some(door => door.unique_id === device.location_id)) {
 
-    // Strategy 2: Use the location the controller binds this device to, where it names one of the doors we were handed.
+    // Strategy 3: Use the location the controller binds this device to, where it names one of the doors we were handed.
     discovered.mainDoorLocationId = device.location_id;
   } else if(doors.length >= 1) {
 
-    // Strategy 3: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
+    // Strategy 4: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
     const mainDoor = doors.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) && !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name));
 
-    // Strategy 4: Use the first door as the main door.
+    // Strategy 5: Use the first door as the main door.
     discovered.mainDoorLocationId = mainDoor?.unique_id ?? doors[0]?.unique_id;
   }
 
   // Find the side door, where one is in scope.
   if(sideDoorEligible) {
 
-    // Strategy 1: Check extensions for the oper2 port setting.
-    const sideDoorFromExt = device.extensions?.find(ext => (ext.extension_name === "port_setting") && (ext.target_name === "oper2"))?.target_value;
+    // Strategy 1: Use the door the side door's own port binding names.
+    if(sideBinding) {
 
-    if(sideDoorFromExt) {
-
-      discovered.sideDoorLocationId = sideDoorFromExt;
+      discovered.sideDoorLocationId = sideBinding.doorId;
     } else {
 
       // Strategy 2: Look for a door named like "side", "portillon", "pedestrian".

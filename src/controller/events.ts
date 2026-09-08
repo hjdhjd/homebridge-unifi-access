@@ -15,6 +15,11 @@ import { mqttTopics } from "../mqtt.ts";
  */
 export const ACCESS_DEVICE_UPDATE_EVENT = "access.data.device.update";
 
+/* The controller's remote-unlock event name. It is stated here, once, because the hub's event handler branches on it and a UA Gate registers for it by name, and a
+ * retyped literal at either site would silently sever the path between them.
+ */
+export const ACCESS_REMOTE_UNLOCK_EVENT = "access.data.device.remote_unlock";
+
 /* The prefix every webhook delivery is emitted under.
  *
  * The two channels share names: `access.door.unlock` is a delivery this plugin consumes and a frame the notification socket also sends, and the two carry entirely

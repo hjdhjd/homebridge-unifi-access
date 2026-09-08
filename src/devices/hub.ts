@@ -3,6 +3,7 @@
  * hub.ts: Unified hub and reader device class for UniFi Access.
  */
 import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState, terminalInput } from "unifi-access";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT } from "../controller/events.ts";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
@@ -14,7 +15,6 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validService } from "homebridge-plugin-utils";
-import { ACCESS_DEVICE_UPDATE_EVENT } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
@@ -136,8 +136,6 @@ export class AccessHub extends AccessDevice {
   private readonly doorbellGuardFilter: readonly string[];
   private doorbellRingRequestId: string | null;
   private lockDelayInterval: number | undefined;
-  private mainDoorLocationId: string | undefined;
-  private sideDoorLocationId: string | undefined;
   // The tamper reading we last projected, or undefined until the record has told us anything. Holding it is what lets a genuine change be told from a first sighting.
   private tamperVerdict: boolean | undefined;
   /* Whether an access method refresh is still out. It bounds the refresh to one in flight per device and is read nowhere else: the seed gets its launch-exactly-once
@@ -153,6 +151,11 @@ export class AccessHub extends AccessDevice {
   // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
   // rows we have already folded be told from one carrying news.
   #foldedConfigValues: Map<AccessMethodKey, boolean> | undefined;
+  /* The doors a UA Gate drives, as discovery last resolved them - the one value every reader of a gate's identities takes. Discovery alone writes it and every
+   * reader reaches it through #drivenDoors, and it is held as the enumeration itself rather than as the two identities behind it so the door-state delivery every
+   * hub on the controller receives reads it without building one.
+   */
+  #gateDoors: readonly DrivenDoor[];
 
   // Create an instance.
   constructor(controller: AccessController, projection: AccessDeviceProjection, accessory: AccessAccessory, admission: AccessStateDevice & { mac: string },
@@ -168,8 +171,6 @@ export class AccessHub extends AccessDevice {
     this._hkSideDoorLockState = this.hubSideDoorLockState;
     this.doorbellGuardFilter = this.getFeatureValueList("Hub.Doorbell.DoorGuards");
     this.lockDelayInterval = this.getFeatureNumber("Hub.LockDelayInterval") ?? undefined;
-    this.mainDoorLocationId = undefined;
-    this.sideDoorLocationId = undefined;
     this.doorbellRingRequestId = null;
     this.tamperVerdict = undefined;
     // Nothing has been heard about this device's access methods yet, which configureDevice() settles below from whichever rail can answer for it, and no refresh has
@@ -180,6 +181,7 @@ export class AccessHub extends AccessDevice {
     this.#doorStateApplying = false;
     this.#doorTransition = { phase: "idle" };
     this.#foldedConfigValues = undefined;
+    this.#gateDoors = [];
 
     // If we attempt to set the delay interval to something invalid, then assume we are using the default unlock behavior.
     if((this.lockDelayInterval !== undefined) && (this.lockDelayInterval < 0)) {
@@ -240,27 +242,87 @@ export class AccessHub extends AccessDevice {
     return state === this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
   }
 
-  // Discover main and side door location IDs for UA Gate hubs. This allows us to receive remote_unlock events for each door. The heuristic itself is the policy
-  // module's shared statement; this method binds it to the live topology snapshot, gates the side arm on the user's side-door preference, and seeds the door
-  // states behind the result.
-  private discoverDoorIds(): void {
+  /* The doors a UA Gate drives, resolved from the record's published port bindings and the live topology through the policy module's shared statement, with the
+   * side arm gated on the user's side-door preference. It answers the doors whose identity this resolution moved, so the caller can seed exactly those, and a
+   * topology the client has not learned yet leaves the last resolution standing rather than withdrawing every door behind it.
+   *
+   * A role whose occupant changed - a door moved into it, or the role withdrawn outright - takes the relock window opened for the door that left with it. A window
+   * of ours belongs to the door it was opened for, and one left standing would relock whichever door now holds the role, or services standing at their last
+   * reading. The registry's clear does nothing to an unarmed key, so the construction pass retires nothing.
+   *
+   * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction is silent: its previous enumeration is the empty seed,
+   * so every door it resolves counts as moved, and an adoption is not a transition anyone observed.
+   *
+   * @param options - The pass this discovery is running as.
+   *
+   * @returns The doors whose identity this discovery moved.
+   */
+  private discoverDoorIds({ initialized }: SensorPass): readonly DrivenDoor[] {
 
     const doors: AccessStateDoor[] = [...this.controller.client.state.snapshot().doors.values()];
 
     if(doors.length === 0) {
 
-      this.log.warn("No doors found in Access API. Door event handling may not work correctly.");
+      if(!initialized) {
 
-      return;
+        this.log.warn("No doors found in Access API. Door event handling may not work correctly.");
+      }
+
+      return [];
     }
 
     const discovered = discoverDoorLocations({ device: this.uda, doors: doors, sideDoorEligible: this.hints.hasSideDoor });
+    const previous = this.#gateDoors;
+    const next: DrivenDoor[] = [];
 
-    this.mainDoorLocationId = discovered.mainDoorLocationId;
-    this.sideDoorLocationId = discovered.sideDoorLocationId;
+    if(discovered.mainDoorLocationId) {
 
-    // Initialize door states from what the controller has already told us about each door.
-    this.initializeDoorStates();
+      next.push({ isSideDoor: false, locationId: discovered.mainDoorLocationId });
+    }
+
+    if(discovered.sideDoorLocationId) {
+
+      next.push({ isSideDoor: true, locationId: discovered.sideDoorLocationId });
+    }
+
+    this.#gateDoors = next;
+
+    const moved: DrivenDoor[] = [];
+
+    for(const isSideDoor of [ false, true ]) {
+
+      const departing = previous.find(door => door.isSideDoor === isSideDoor);
+      const arriving = next.find(door => door.isSideDoor === isSideDoor);
+
+      if(departing?.locationId === arriving?.locationId) {
+
+        continue;
+      }
+
+      this.timers.clear(this.#relockTimerKey(isSideDoor));
+
+      const role = isSideDoor ? "side door" : "main door";
+
+      if(!arriving) {
+
+        if(initialized) {
+
+          this.log.warn("The gate's " + role + " binding was withdrawn, so its services stand at their last reading.");
+        }
+
+        continue;
+      }
+
+      moved.push(arriving);
+
+      if(initialized) {
+
+        // A published binding can name a door ahead of the topology, so a door the snapshot carries nothing for is announced by the identity it was named under.
+        this.log.info("The gate's " + role + " is now " + (doors.find(door => door.unique_id === arriving.locationId)?.name ?? arriving.locationId) + ".");
+      }
+    }
+
+    return moved;
   }
 
   /* Seed our door states from the client's door state map, which every connect mode populates. The door topology records carry no status of their own - position and
@@ -272,32 +334,33 @@ export class AccessHub extends AccessDevice {
    * locks go through their setters, whose early return on an agreeing reading makes the two sources agreeing cost nothing; the side door's position has no accessor pair,
    * so it takes the file's own idiom for that field - the assignment followed by an explicit push. Adoption stays silent throughout, with no MQTT tail and no log
    * line, because a reading we are seeing for the first time is not a transition anyone observed.
+   *
+   * It seeds exactly the doors it is handed, which is every door a gate drives at construction and the one a rebind moved afterwards.
+   *
+   * @param doors - The doors to seed.
    */
-  private initializeDoorStates(): void {
+  private initializeDoorStates(doors: readonly DrivenDoor[]): void {
 
-    // Find and initialize main door state.
-    if(this.mainDoorLocationId) {
+    for(const door of doors) {
 
-      const mainDoor = this.#doorEntry(this.mainDoorLocationId);
+      const entry = this.#doorEntry(door.locationId);
 
-      this.hkDpsState = this.toDpsState(mainDoor?.dps ?? "close");
-      this.hkLockState = this.toLockState(mainDoor?.lock ?? "lock");
+      if(door.isSideDoor) {
 
-      // Update the door service.
-      if(this.doorServiceType === "GarageDoorOpener") {
+        this._hkSideDoorDpsState = this.toDpsState(entry?.dps ?? "close");
+        this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, this._hkSideDoorDpsState);
+        this.hkSideDoorLockState = this.toLockState(entry?.lock ?? "lock");
+      } else {
 
-        this.updateDoorServiceState(false);
+        this.hkDpsState = this.toDpsState(entry?.dps ?? "close");
+        this.hkLockState = this.toLockState(entry?.lock ?? "lock");
+
+        // Update the door service.
+        if(this.doorServiceType === "GarageDoorOpener") {
+
+          this.updateDoorServiceState(false);
+        }
       }
-    }
-
-    // Find and initialize side door state.
-    if(this.sideDoorLocationId) {
-
-      const sideDoor = this.#doorEntry(this.sideDoorLocationId);
-
-      this._hkSideDoorDpsState = this.toDpsState(sideDoor?.dps ?? "close");
-      this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, this._hkSideDoorDpsState);
-      this.hkSideDoorLockState = this.toLockState(sideDoor?.lock ?? "lock");
     }
   }
 
@@ -398,22 +461,16 @@ export class AccessHub extends AccessDevice {
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
 
-    // For UA Gate hubs, we discover door IDs and subscribe to their events. This is needed because remote_unlock events use the door's location_id as the
-    // event_object_id, not the hub's device_id.
+    /* A UA Gate subscribes to remote unlocks by event name, because the controller delivers them under the door's identity rather than the hub's, and ownership is
+     * settled at delivery from the doors discovery resolved - so a door rebound mid-run needs no second registration. The seed runs after every service exists, for
+     * the reason the seed's own comment gives.
+     */
     if(this.uda.device_type === "UGT") {
 
-      this.discoverDoorIds();
+      const rebound = this.discoverDoorIds({ initialized: false });
 
-      // Subscribe to events for both doors.
-      if(this.mainDoorLocationId) {
-
-        this.registerListener(this.mainDoorLocationId, handler);
-      }
-
-      if(this.sideDoorLocationId) {
-
-        this.registerListener(this.sideDoorLocationId, handler);
-      }
+      this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, handler);
+      this.initializeDoorStates(rebound);
     }
 
     return true;
@@ -1169,7 +1226,7 @@ export class AccessHub extends AccessDevice {
 
           try {
 
-            await this.hubProjection.stop({ doorId: this.mainDoorLocationId });
+            await this.hubProjection.stop({ doorId: this.#gateDoor(false) });
           } catch(error) {
 
             this.log.debug("Unable to halt the gate: %s.", formatErrorMessage(error));
@@ -1591,33 +1648,26 @@ export class AccessHub extends AccessDevice {
   /* Every door this hub drives, each under the identity the client's door-state map keys its reading by. This is the one statement of which doors a hub is
    * answerable for: the door-state refresh, the ownership check, and the construction seed all take their doors from here.
    *
-   * A UA Gate answers from the two doors it discovered for itself, because the library derives no per-door facts for hardware whose doors it cannot tell apart.
-   * A side door is enumerated wherever discovery resolved one, and discovery consults the user's side-door preference once, at construction, so no reader here
-   * asks it again. Every other hub answers from the library's own published door resolution. A hub inside its removal grace enumerates nothing at all rather
-   * than throwing, which is what the guarded identity read above makes true and which matters because every hub on a controller sees every delivery.
+   * A UA Gate answers with the doors discovery last resolved for it, because the library derives no per-door facts for hardware whose doors it cannot tell apart.
+   * Every other hub answers from the library's own published door resolution. A hub inside its removal grace enumerates nothing at all rather than throwing, which
+   * is what the guarded identity read above makes true and which matters because every hub on a controller sees every delivery.
    */
   get #drivenDoors(): readonly DrivenDoor[] {
 
     if(this.uda.device_type === "UGT") {
 
-      const doors: DrivenDoor[] = [];
-
-      if(this.mainDoorLocationId) {
-
-        doors.push({ isSideDoor: false, locationId: this.mainDoorLocationId });
-      }
-
-      if(this.sideDoorLocationId) {
-
-        doors.push({ isSideDoor: true, locationId: this.sideDoorLocationId });
-      }
-
-      return doors;
+      return this.#gateDoors;
     }
 
     const doorId = this.#doorId;
 
     return doorId ? [{ isSideDoor: false, locationId: doorId }] : [];
+  }
+
+  // How a path that addresses one of a gate's doors by the role it holds reaches the same enumeration the door-state delivery reads.
+  #gateDoor(isSideDoor: boolean): string | undefined {
+
+    return this.#drivenDoors.find(door => door.isSideDoor === isSideDoor)?.locationId;
   }
 
   /* Which of this hub's doors a location identifies, or null when it identifies none of them.
@@ -1900,7 +1950,7 @@ export class AccessHub extends AccessDevice {
       return null;
     }
 
-    const doorId = options.isSideDoor ? this.sideDoorLocationId : this.mainDoorLocationId;
+    const doorId = this.#gateDoor(options.isSideDoor);
 
     if(!doorId) {
 
@@ -2840,7 +2890,7 @@ export class AccessHub extends AccessDevice {
 
     switch(packet.event) {
 
-      case "access.data.device.remote_unlock":
+      case ACCESS_REMOTE_UNLOCK_EVENT:
 
         this.handleRemoteUnlock(packet);
 

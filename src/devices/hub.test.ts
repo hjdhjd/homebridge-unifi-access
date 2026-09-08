@@ -9,7 +9,7 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
 import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
@@ -2024,14 +2024,14 @@ test("a remote unlock opens the same window a command of ours does, on either of
 
   const gate = makeGate();
 
-  // The controller's own report of an unlock, delivered on the door's location identity rather than the hub's, which is how a gate's two doors are told apart.
-  gate.emit(MAIN_DOOR, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+  // The controller's own report of an unlock, reaching the gate under the event name, with the door it names being what the gate tells its two doors apart by.
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
 
   assert.deepEqual(lockPayloads(gate), ["false"]);
   assert.equal(lineCount(gate, "Gate unlocked."), 1);
 
   // A second unlock while the window stands announces again and replaces the pending relock rather than stacking a second one beside it.
-  gate.emit(MAIN_DOOR, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
 
   assert.deepEqual(lockPayloads(gate), [ "false", "false" ]);
   assert.equal(lineCount(gate, "Gate unlocked."), 2);
@@ -2042,7 +2042,7 @@ test("a remote unlock opens the same window a command of ours does, on either of
   assert.equal(lineCount(gate, "Gate locked."), 1, "the replaced timer left exactly one relock to fire");
 
   // The side door runs the whole window on its own topic and under its own name, ending on the relock nobody cancelled.
-  gate.emit(SIDE_DOOR, { event: "access.data.device.remote_unlock", event_object_id: SIDE_DOOR });
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: SIDE_DOOR });
 
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
@@ -2051,6 +2051,18 @@ test("a remote unlock opens the same window a command of ours does, on either of
 
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true" ]);
   assert.equal(lineCount(gate, "Side door locked."), 1);
+});
+
+test("a gate ignores a remote unlock naming a door it does not drive", () => {
+
+  const gate = makeGate();
+
+  // Every remote unlock on the controller reaches every gate under the one event name, so what a gate applies is settled by the door the packet names.
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: "another-door" });
+
+  assert.deepEqual(lockPayloads(gate), [], "a door this gate does not drive moves its main lock nowhere");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [], "and its side door lock nowhere");
+  assert.deepEqual(gate.lines, [], "and nothing is announced for it");
 });
 
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {
@@ -2216,7 +2228,7 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
    */
   const first = makeHub();
 
-  first.emit(HUB_ID, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+  first.emit(HUB_ID, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
   deliverDoorState(first, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
   assert.deepEqual(lockPayloads(first), ["false"]);
@@ -2227,7 +2239,7 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
   const second = makeHub();
 
   deliverDoorState(second, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
-  second.emit(HUB_ID, { event: "access.data.device.remote_unlock", event_object_id: MAIN_DOOR });
+  second.emit(HUB_ID, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
 
   assert.deepEqual(lockPayloads(second), ["false"]);
   assert.equal(lineCount(second, "Door unlocked."), 1);
