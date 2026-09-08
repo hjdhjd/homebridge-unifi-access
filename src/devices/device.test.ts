@@ -5,9 +5,9 @@
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { FeatureOptions, mqttTopic } from "homebridge-plugin-utils";
-import { deviceModel, deviceSerial } from "../policy.ts";
+import { deviceSerial, serialForm } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
-import { hubRecord, makePlatformDouble } from "../testing.helpers.ts";
+import { hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -114,6 +114,10 @@ interface Harness {
  * That is what lets the debug arms drive a device's own gate end to end - the composition, the scope resolution, and the channel the line lands on - rather than
  * asserting against a stub that decided the answer for them.
  *
+ * The controller is the shared double, told only what this suite varies: the health holder its client reads live, the registration recorders, the identity, the
+ * platform above, and the loop capture. Its device name and its own name are separate members there, so a rendered prefix an arm reads shows for itself that no
+ * controller half reached it.
+ *
  * @param script - The records the projection yields, in order.
  * @param init   - The device record construction seeds this device from, and the feature-option entries the engine resolves against.
  */
@@ -146,7 +150,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     peek: (): AccessStateDevice | undefined => script[peekIndex++]
   };
 
-  const controller = {
+  const controller = makeControllerDouble({
 
     /* The client the availability composition reads its controller-wide half through. The nesting is the composition's own read path, so a double flattened to a
      * sibling member here would leave the client undefined and throw on every tick of the loop below.
@@ -167,11 +171,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
       off: (event: string): void => { removals.push(event); },
       on: (event: string): void => { registrations.push(event); }
     },
-    // The composition a device's log prefix reads, answering the device-only form the controller's own composes. The controller's name is a separate member here, so
-    // an arm can read a rendered prefix and see for itself that no controller half reached it.
-    getDeviceName: (): string => "Test Hub [UA Hub]",
-    id: CONTROLLER_ID,
-    name: "Test Controller",
+    id: serialForm(CONTROLLER_ID),
     platform: makePlatformDouble({
 
       api: { hap: { Characteristic: SentinelCharacteristic, Service: SentinelService } },
@@ -180,12 +180,10 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
       log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
         warn: (message: string): void => { warnings.push(message); } }
     }),
-    resolveDeviceModel: (device: AccessStateDevice): string => deviceModel(device),
-    signal: new AbortController().signal,
     spawnLoop: (_title: string, body: () => Promise<void>): void => { loop = body; }
-  };
+  });
 
-  return { clock, construction, controller: controller as unknown as AccessController, emissions, featureOptions: engine, health, infoLines,
+  return { clock, construction, controller, emissions, featureOptions: engine, health, infoLines,
     loop: (): Promise<void> => loop(), projection: projection as unknown as AccessDeviceProjection, registrations, removals, statusWrites, warnings };
 }
 

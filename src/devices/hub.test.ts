@@ -19,10 +19,9 @@ import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-ut
 import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { accessMethods, officialDeviceModel } from "../policy.ts";
-import { configRows, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
+import { configRows, hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
-import type { AccessController } from "../controller/controller.ts";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
 import assert from "node:assert/strict";
@@ -378,11 +377,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     }
   };
 
-  const controller = {
+  const controller = makeControllerDouble({
 
     client: { connection, doorStates, official,
       state: { snapshot: (): unknown => ({ devices: new Map((options.devices ?? []).map(device => [ device.unique_id, device ])), doors }) }, transport },
-    config: { address: "1.2.3.4" },
     events: {
 
       off: (event: string, handler: (payload: unknown) => void): void => {
@@ -408,25 +406,16 @@ function makeHub(options: HubOptions = {}): HubHarness {
         handlers.set(event, registered);
       }
     },
-    getDeviceName: (): string => "Test Hub [UA Hub]",
-    id: undefined,
-    log: { debug: (): void => undefined, error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
     mqtt,
     mqttPublish: (topic: string, payload: string, init?: MqttPublishInit): void => {
 
       publishes.push({ init, payload, topic });
       mqtt.publishGuarded(topic, payload, init);
     },
-    name: "Test Controller",
-    ownershipKey: "1.2.3.4",
-    platform,
-    resolveDeviceModel: (): string => "UA Hub",
-    signal: new AbortController().signal,
-    spawnLoop: (): void => undefined,
-    uda: null
-  };
+    platform
+  });
 
-  const hub = new AccessHub(controller as unknown as AccessController, projection as unknown as AccessDeviceProjection, makeAccessory(services), record,
+  const hub = new AccessHub(controller, projection as unknown as AccessDeviceProjection, makeAccessory(services), record,
     options.hubless ? undefined : hubProjection as unknown as AccessHubProjection);
 
   // Construction narrates itself, and every arm but the ones about adoption reads from a clean slate rather than from what adoption said.

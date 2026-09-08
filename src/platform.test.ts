@@ -11,6 +11,7 @@ import type { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
 import { format } from "node:util";
+import { makeControllerDouble } from "./testing.helpers.ts";
 import { serialForm } from "./policy.ts";
 import { settle } from "homebridge-plugin-utils/testing";
 
@@ -237,7 +238,7 @@ test("a skipped controller entry fences the reclaim off", async () => {
   const platform = harness.make({ controllers: [ { address: "1.2.3.4", tokens: { access: "token" } }, { address: "5.6.7.8" } ],
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
-  const reporting = { reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" } });
 
   // The accessory the mechanism arm below removes under an open fence, so what this arm asserts about is the fence rather than an unremovable fixture.
   platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
@@ -261,8 +262,8 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   const platform = direct.make({ controllers: [ { address: "1.2.3.4", tokens: { access: "token" } }, { address: "5.6.7.8", tokens: { access: "token" } } ],
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
-  const reporting = { reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
-  const silent = { reclaimKeys: { currentKey: "5.6.7.8", priorKey: undefined } } as unknown as AccessController;
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" } });
+  const silent = makeControllerDouble({ config: { address: "5.6.7.8" } });
 
   platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
@@ -282,9 +283,9 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   const wiredPlatform = wired.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }],
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
-  const failing = { log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
-    login: async (): Promise<never> => { throw new Error("Connection refused."); },
-    reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
+    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
+    login: async (): Promise<never> => { throw new Error("Connection refused."); } });
 
   wiredPlatform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
@@ -307,8 +308,7 @@ test("a stranded accessory is reclaimed once every configured controller has rep
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
   const claims = { serials: new Set([serialForm("aa:bb:cc:dd:ee:01")]), uuids: new Set<string>() };
-  const reporting = { reclaimClaims: (): MembershipClaims => claims,
-    reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" }, reclaimClaims: (): MembershipClaims => claims });
 
   platform.configureAccessory(cachedAccessory("uuid-kept-key", "Kept By Key", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:07" }));
   platform.configureAccessory(cachedAccessory("uuid-kept-claim", "Kept By Claim", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }));
@@ -335,8 +335,8 @@ test("a stranded reclaim honors the global removal delay and re-checks before fi
    * already holds...an implementation that captured the claims once when it armed the timer fails here rather than passing by aliasing.
    */
   const projected: string[] = [];
-  const reporting = { reclaimClaims: (): MembershipClaims => ({ serials: new Set(projected.map(serialForm)), uuids: new Set<string>() }),
-    reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" },
+    reclaimClaims: (): MembershipClaims => ({ serials: new Set(projected.map(serialForm)), uuids: new Set<string>() }) });
 
   platform.configureAccessory(cachedAccessory("uuid-returning", "Returning", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:01" }));
   platform.configureAccessory(cachedAccessory("uuid-gone", "Gone", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
@@ -386,8 +386,7 @@ test("a shutdown that lands before the fence closes removes nothing", async () =
   const pending = new Promise<AccessLoginOutcome>(resolve => { releaseLogin = (): void => resolve("reporting"); });
 
   // A controller whose login is still outstanding is what leaves the pass waiting, which is the window this arm is about.
-  const waiting = { login: async (): Promise<AccessLoginOutcome> => pending,
-    reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const waiting = makeControllerDouble({ config: { address: "1.2.3.4" }, login: async (): Promise<AccessLoginOutcome> => pending });
 
   platform.configureAccessory(cachedAccessory("uuid-stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
@@ -413,14 +412,13 @@ test("a disabled controller contributes its keys and is never asked for claims",
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
   const claims = { serials: new Set([serialForm("aa:bb:cc:dd:ee:01")]), uuids: new Set<string>() };
-  const reporting = { reclaimClaims: (): MembershipClaims => claims,
-    reclaimKeys: { currentKey: "1.2.3.4", priorKey: undefined } } as unknown as AccessController;
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" }, reclaimClaims: (): MembershipClaims => claims });
 
   /* A disabled controller's claims would come from a client it has already disposed, so nothing may ask it what it projects. A double that throws is what turns a
    * mis-called read into a failure here rather than a stale answer nobody notices.
    */
-  const disabled = { reclaimClaims: (): MembershipClaims => { throw new Error("A disabled controller must never be asked what it projects."); },
-    reclaimKeys: { currentKey: "5.6.7.8", priorKey: undefined } } as unknown as AccessController;
+  const disabled = makeControllerDouble({ config: { address: "5.6.7.8" },
+    reclaimClaims: (): MembershipClaims => { throw new Error("A disabled controller must never be asked what it projects."); } });
 
   /* This asserts the decision's letter at this layer rather than a production scenario: by the time the pass runs, a controller the user disabled has already taken
    * every accessory its keys would spare out of HomeKit, so the first fixture is constructible only with a double.

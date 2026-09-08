@@ -8,8 +8,10 @@
  */
 /* eslint-disable camelcase */
 import type { AccessBootstrapConfig, AccessDoorConfig } from "unifi-access";
-import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
+import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, readerRecord } from "./testing.helpers.ts";
+import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
+import { serialForm } from "./policy.ts";
 import test from "node:test";
 
 // The doors a topology document carries, reached the way the library's own door-state derivation reaches them: through the building's single floor.
@@ -131,4 +133,56 @@ test("every call builds its own document and record, so no two callers share nes
    */
   assert.notEqual(records[0]?.capabilities, records[1]?.capabilities, "two records must not share one capabilities array");
   assert.notEqual(topologies[0]?.device_groups, topologies[1]?.device_groups, "and two documents must not share one device group");
+});
+
+test("makeControllerDouble with no options answers the members the plugin reads from a token-only controller", async () => {
+
+  const controller = makeControllerDouble();
+
+  /* A controller reached with an API token alone never learns a serial, so its identity stays undefined and every member derived from an identity falls back to the
+   * configured address. Reading the derived members rather than the address alone is what proves the factory derives them the way the controller does.
+   */
+  assert.equal(controller.id, undefined, "the default double stands in for the controller that never learned its own serial");
+  assert.equal(controller.mqttIdentity, "1.2.3.4", "so its topics are published under the configured address");
+  assert.equal(controller.ownershipKey, "1.2.3.4", "and the key it stamps its accessories with is that same address");
+  assert.deepEqual(controller.reclaimKeys, { currentKey: "1.2.3.4", priorKey: undefined }, "with no prior key, because it has answered by no other one");
+  assert.equal(controller.reclaimClaims(), undefined, "a controller with no live client claims nothing");
+  assert.equal(await controller.login(), "reporting", "and it logs in as one that serves its membership");
+  assert.equal(controller.name, "Test Controller", "the name every suite's log prefix is composed from");
+  assert.equal(controller.mqtt, null, "and there is no broker until an arm hands one over");
+
+  /* The device name is the same string whatever record it is handed, which is the point of the default: an Enterprise port resolves to another model entirely
+   * through the real derivation, and every arm reading a log prefix expects this one string for the record its device was stood up on.
+   */
+  assert.equal(controller.getDeviceName(hubRecord({ device_type: "UAH-Ent" })), "Test Hub [UA Hub]", "the device name ignores the record and answers the fixed one");
+});
+
+test("an identity and an address given to makeControllerDouble reach the members derived from them", () => {
+
+  const controller = makeControllerDouble({ config: { address: "5.6.7.8" }, id: serialForm("aa:bb:cc:dd:ee:ff") });
+
+  // An address no default carries and an identity beside it, so a factory ignoring either option could not coincide with both readings.
+  assert.equal(controller.mqttIdentity, "AABBCCDDEEFF", "an identity takes the MQTT identity over the address, as the real controller resolves it");
+  assert.equal(controller.ownershipKey, "5.6.7.8", "while the ownership key is the configured address whatever the identity says");
+  assert.equal(controller.reclaimKeys.currentKey, "5.6.7.8", "and the key it answers by now is that address rather than the default one");
+
+  /* The feature test reads the platform double's own engine rather than an answer the factory decided, so one option reads both ways: the catalog default against a
+   * bare platform, and the enabled answer against a platform seeded with the entry that enables it.
+   */
+  assert.equal(controller.hasFeature("Device.SyncName"), false, "a controller over a bare platform answers the catalog default");
+  assert.equal(makeControllerDouble({ platform: makePlatformDouble({ entries: ["Enable.Device.SyncName"] }) }).hasFeature("Device.SyncName"), true,
+    "and one over a seeded platform answers what that engine resolves");
+});
+
+test("a publish through makeControllerDouble reaches the broker it was given and nothing when it has none", () => {
+
+  const mqtt = new TestMqttClient();
+  const controller = makeControllerDouble({ mqtt });
+
+  controller.mqttPublish("t", "p");
+
+  assert.deepEqual(mqtt.published, [{ payload: "p", topic: "t" }], "the publish chokepoint hands the broker exactly what it was called with");
+
+  // A double standing up without a broker publishes into nothing rather than throwing, which is what lets every arm that never mentions MQTT build one bare.
+  makeControllerDouble().mqttPublish("t", "p");
 });

@@ -8,32 +8,32 @@ import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessController } from "./controller.ts";
 import assert from "node:assert/strict";
+import { makeControllerDouble } from "../testing.helpers.ts";
+import { serialForm } from "../policy.ts";
 import test from "node:test";
 
-// What the controller looks like from the bridge's side: a rail to subscribe to, a telemetry gate, an identity, a logger, and the publish chokepoint.
-interface ControllerDouble {
+// The controller's own MAC in the normalized form an identity carries, which is the identity every telemetry topic here opens with.
+const CONTROLLER_SERIAL = "AABBCCDDEEFF";
 
-  controller: AccessController;
-  publishes: { payload: string; topic: string }[];
-}
-
-function makeController(options: { identity?: string; telemetry: boolean }): ControllerDouble {
+/* What the bridge is stood up over: the shared controller double told the two facts this suite varies - whether telemetry is on, and whether the controller ever
+ * learned a hardware identity - beside the recorder standing in for the publish chokepoint. The rail the bridge subscribes to answers a disposable, because the
+ * subscription is what the bridge holds for its own lifetime.
+ */
+function makeController(options: { telemetry: boolean; tokenOnly?: boolean }): { controller: AccessController; publishes: { payload: string; topic: string }[] } {
 
   const publishes: { payload: string; topic: string }[] = [];
 
-  const controller = {
+  return {
 
-    client: { on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }) },
-    hasFeature: (): boolean => options.telemetry,
-    log: { debug: (): void => undefined, error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined },
-    mqttIdentity: options.identity ?? "AABBCCDDEEFF",
-    mqttPublish: (topic: string, payload: string): void => {
+    controller: makeControllerDouble({
 
-      publishes.push({ payload, topic });
-    }
+      client: { on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }) },
+      hasFeature: (): boolean => options.telemetry,
+      id: options.tokenOnly ? undefined : serialForm(CONTROLLER_SERIAL),
+      mqttPublish: (topic: string, payload: string): void => void publishes.push({ payload, topic })
+    }),
+    publishes
   };
-
-  return { controller: controller as unknown as AccessController, publishes };
 }
 
 // A wire frame carrying the metadata the newer device-update dialect addresses its device with.
@@ -112,7 +112,7 @@ test("telemetry mirrors every frame exactly once, the excluded one included", ()
 test("telemetry for a controller with no hardware identity publishes under its configured address", () => {
 
   // A controller reached with an API token alone never reads the document its MAC address comes from, so its configured address is the identity its telemetry carries.
-  const { controller, publishes } = makeController({ identity: "1.2.3.4", telemetry: true });
+  const { controller, publishes } = makeController({ telemetry: true, tokenOnly: true });
   const events = new AccessEvents(controller);
 
   events.handleRawPacket(packet("access.remote_view"));
