@@ -567,8 +567,8 @@ export class AccessController {
     }
   }
 
-  /* Remove every webhook registration this controller holds at its own path. Three callers share this one statement: the option being off, the controller being
-   * turned off in HomeKit, and teardown.
+  /* Remove every webhook registration this controller holds at its own path. Every caller that needs this - the option being off, the controller being turned off
+   * in HomeKit, and teardown - shares this one statement.
    *
    * A failure here is logged at debug and nothing more. A token without webhook permissions cannot even list the endpoints, and a feature the user turned off - or
    * a controller they turned off - must never cost them an error line about it.
@@ -875,7 +875,7 @@ export class AccessController {
   /* Reclaim cached accessories current membership cannot account for. Homebridge restores previously-registered accessories at startup, so a device unpaired
    * while we were down comes back as an accessory with nothing behind it, and so does an accessory created under an earlier form of a device's identity.
    * Anything belonging to this controller that we have not configured and that current membership cannot account for is reclaimed here, and the two cases part on
-   * the identity the accessory records. One that records none was created under an earlier form, or had its record wiped by an older version running in between:
+   * the identity the accessory records. One that records none was created under an earlier form, or has had its record cleared since:
    * nothing will ever mint an accessory that records no identity again, so it can never be adopted whether or not its device is present, and it goes at once
    * rather than through a delay that exists for a device that might come back. One that records the identity it was created under is a departure - its device may
    * return and be adopted under that same identity - and takes the same removal delay a membership departure honors.

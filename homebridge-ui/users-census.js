@@ -12,9 +12,10 @@
 // The page the official users listing answers by, large enough that a typical site's census arrives in one round trip.
 export const USERS_PAGE_SIZE = 100;
 
-/* The official users census, every page the endpoint answers in one list, for labeling the door guard picker. The first page says how many there are, and the
- * rest are read together rather than one after another. A failure answers the empty list rather than the probe's failure: the census only labels a picker, so a
- * token without the users permission still lists every device, and the guards those devices list carry their identifiers as labels.
+/* The official users census, every page the endpoint answers in one list, for labeling the door guard picker. The first page says how many there are - falling
+ * back to a single page when it reports no usable page size, so a zero or missing value never divides into the total - and the rest are read together rather
+ * than one after another. A failure answers the empty list rather than the probe's failure: the census only labels a picker, so a token without the users
+ * permission still lists every device, and the guards those devices list carry their identifiers as labels.
  */
 export const officialUsers = async (official) => {
 

@@ -9,14 +9,14 @@ import { EventEmitter } from "node:events";
 import { mqttTopic } from "homebridge-plugin-utils";
 import { mqttTopics } from "../mqtt.ts";
 
-/* The controller's device-update event name. It is stated here, once, because three consumers depend on it agreeing exactly: the raw-rail bridge excludes it, the
+/* The controller's device-update event name. It is stated here, once, because every consumer must agree on it exactly: the raw-rail bridge excludes it, the
  * per-device observe loop emits it, and the hub's event handler branches on it. A retyped literal at any one of those sites would silently sever the path, so they
  * all read the same constant instead.
  */
 export const ACCESS_DEVICE_UPDATE_EVENT = "access.data.device.update";
 
-/* The controller's remote-unlock event name. It is stated here, once, because the hub's event handler branches on it and a UA Gate registers for it by name, and a
- * retyped literal at either site would silently sever the path between them.
+/* The controller's remote-unlock event name. It is stated here, once, because every hub registers for it by name and its event handler branches on it, and a retyped
+ * literal at either site would silently sever the path between them.
  */
 export const ACCESS_REMOTE_UNLOCK_EVENT = "access.data.device.remote_unlock";
 

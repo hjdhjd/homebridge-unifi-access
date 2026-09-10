@@ -43,7 +43,7 @@ const DISPATCH_SETTLE_TURNS = 2;
 
 /* The Enterprise topology the arms below read: a plain hub, a building-hosted Enterprise hub whose single port extension is what the expansion synthesizes a
  * device from, and a managed record carrying a device type this plugin cannot project. One fixture serves them because each arm is about a different consumer of
- * the same three records.
+ * the records this fixture returns.
  */
 // The plain hub of that topology, named on its own because the adoption arm stands one device up and nothing else, and both callers must read one record rather than
 // two that happen to agree.
@@ -141,7 +141,10 @@ function deviceHandle(record: Record<string, unknown>): unknown {
     config: record,
     doorId: "",
     doorState: undefined,
-    observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ },
+    observe: async function *(): AsyncGenerator {
+
+      // Nothing observes in these arms.
+    },
     peek: (): undefined => undefined
   };
 }
@@ -158,7 +161,10 @@ function clientDouble(options: { connection?: unknown; controllerInfo: Record<st
 
     accessPoint: (): undefined => undefined,
     // A connection that reads healthy and yields nothing unless an arm supplies one it drives, which is what keeps every other arm's observer inert.
-    connection: options.connection ?? { isHealthy: true, observe: async function *(): AsyncGenerator { /* nothing transitions in these arms */ } },
+    connection: options.connection ?? { isHealthy: true, observe: async function *(): AsyncGenerator {
+
+      // Nothing transitions in these arms.
+    } },
     controllerInfo: options.controllerInfo,
     controllerName: "Test Controller",
     device: (): undefined => undefined,
@@ -287,7 +293,7 @@ function connectionDouble(): { connection: unknown; drive: (from: string, to: st
   };
 }
 
-/* A configured device as the connection observer sees it: the two calls its walks make, recorded in the order they arrive, and the log a fault is reported through. A
+/* A configured device as the connection observer sees it: the calls its walks make, recorded in the order they arrive, and the log a fault is reported through. A
  * device an arm names as faulting throws from both, which is what lets each walk's isolation be read separately rather than as one combined verdict.
  */
 function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; device: AccessDevice; errors: string[] } {
@@ -973,8 +979,8 @@ test("the first start after an identity change retires every accessory created u
   /* The cache a mixed install restores. Created by an earlier version, recording no identity: the plain hub's accessory under this controller's key, a twin of it
    * stamped by the controller this one replaced under a UUID no seed produces, an Enterprise port's, one naming a managed record this plugin cannot project, and
    * one whose hardware has left. Created by this version, recording its identity: the port's current accessory, which shares the earlier one's MAC address, and
-   * one whose hardware has left. And two strangers: one naming nothing here, and one naming that same unprojectable record, which no claim of this controller's
-   * may reach. The sweep must part them three ways - retired at once, delayed as a departure, and left
+   * one whose hardware has left. And strangers: one naming nothing here, and one naming that same unprojectable record, which no claim of this controller's
+   * may reach. The sweep must part them by disposition - retired at once, delayed as a departure, or left
    * alone - reading the identity record rather than whether the hardware happens to be present.
    */
   const staleOurs = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
@@ -991,7 +997,7 @@ test("the first start after an identity change retires every accessory created u
 
   await harness.controller.login();
 
-  /* The seed adds the plain hub under its identity and adopts the port's current accessory, and the sweep that follows it retires the five accessories that record
+  /* The seed adds the plain hub under its identity and adopts the port's current accessory, and the sweep that follows it retires the accessories that record
    * no identity at once, saying why. The seed and the sweep run inside login() itself, so nothing here waits on a timer.
    */
   const reason = "It carries no record of the device identity this version keys accessories by.";
@@ -1265,8 +1271,9 @@ test("the plugin's shutdown reaches a controller through the one signal every co
   // The plugin's lifetime ends. The controller registered nothing on the Homebridge API of its own, so this is the only thing that can reach it.
   harness.shutdown.abort();
 
-  /* Three effects follow from that one abort: this controller's own terminal signal fires, the phase moved to its terminal state - which the public error-logging
-   * projection is what reports - and the client was disposed. A wiring that aborted the signal without transitioning or disconnecting satisfies only the first.
+  /* Every one of these effects follows from that one abort: this controller's own terminal signal fires, the phase moved to its terminal state - which the public
+   * error-logging projection is what reports - and the client was disposed. A wiring that aborted the signal without transitioning or disconnecting satisfies
+   * only the first.
    */
   assert.equal(harness.controller.signal.aborted, true);
   assert.equal(harness.controller.logApiErrors, false);

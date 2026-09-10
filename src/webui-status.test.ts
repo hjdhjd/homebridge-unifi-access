@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { settle } from "homebridge-plugin-utils/testing";
 import test from "node:test";
 
-// The two hubs' colon-bearing MAC spellings and the decorated serials the registry keys them by.
+// The hubs' colon-bearing MAC spellings and the decorated serials the registry keys them by.
 const MAC_ONE = "aa:bb:cc:dd:ee:01";
 const MAC_TWO = "aa:bb:cc:dd:ee:02";
 const SERIAL_ONE = "AABBCCDDEE01";
@@ -32,7 +32,7 @@ const ADDRESS = "192.0.2.10";
 const CONTROLLER_UPTIME = 11023200;
 
 // How many macrotask boundaries an arm crosses before reading a dispatched frame: the observe loops register and drain on the microtask and immediate queues, so
-// two immediates cover a dispatch chain.
+// this constant holds as many immediates as the dispatch chain needs to settle.
 const DISPATCH_SETTLE_TURNS = 2;
 
 // A managed, online hub whose position wiring reads live and closed and whose lock reads locked - the capture corpus's plain UA Hub shape, so the topology seed
@@ -325,7 +325,8 @@ test("the row policy refuses a rex-configured Ultra's door row and serves a dps-
   });
 
   // The entry deliberately CARRIES dps evidence in both arms, so a uniform evidence read - one that ignores the input multiplex - would answer the rex arm live
-  // and go red here rather than diverging silently.
+  // and go red here rather than diverging silently. The fixture reaches AccessDoorStateEntry through a single "as never" rather than the file's "unknown as X"
+  // idiom...never is assignable to every type, so the one cast is enough, with nothing further to name.
   const entry = { dps: "open", location_id: "door1" } as never;
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [ultra("rex")], id: "door1" }]) });
@@ -761,7 +762,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   const frames: StatusEvent[] = [];
   const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
 
-  // All three serials are registered, so every view below reaches the resolution layer rather than stopping at the registry's not-found gate.
+  // Every serial used below is registered, so each view reaches the resolution layer rather than stopping at the registry's not-found gate.
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO + "-PORT1", SERIAL_TWO ]));
 
   await feed.view(SERIAL_TWO + "-PORT1");

@@ -75,7 +75,7 @@ export interface AccessConfigInterpreter {
   withControllerRemoved(config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }): AccessConfigPatch;
 }
 
-/** The keys a controllers[] item converges to - every controller property except the two that migrate into feature options. */
+/** The keys a controllers[] item converges to - every controller property except the ones that migrate into feature options. */
 export declare const CONTROLLER_KEYS: readonly [ "address", "name", "password", "tokens", "username", "verifyTls" ];
 
 /** Read the UI server's kind-tagged device probe into the verdict every consumer branches on. */

@@ -49,7 +49,7 @@ export interface AccessControllerTokens {
   access?: string;
 }
 
-/* The device models a feature option or category can be scoped to, plus the two sentinels that scope to something other than a model: "all" for any device type, and
+/* The device models a feature option or category can be scoped to, plus the sentinels that scope to something other than a model: "all" for any device type, and
  * "controller" for the controller itself.
  *
  * The union is closed because the model vocabulary is this plugin's own rather than the controller's - the webUI compares these keys against a device's

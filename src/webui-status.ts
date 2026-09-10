@@ -328,10 +328,11 @@ function uptimeRowValue(uptime: Nullable<number>): string {
  * rows say it is enabled. The rows are read through the same shared translation the hub's own fold reads them through, in the same configs vocabulary, so the row
  * and the switches answer from one interpretation rather than two that can drift.
  *
- * Two absences are deliberately different. A method whose capability the hardware does not carry is not listed at all - the device does not offer it, so there is
- * nothing to report. A method the hardware does carry whose configuration row does not resolve is omitted too, under the degrade-by-absence rule: a census that
- * listed the device's configuration and never mentioned the method has said nothing about it, and an unchecked box would be a reading the controller never made.
- * A reader whose rows resolve nothing therefore composes an empty list, which the panel renders as the placeholder dash.
+ * A method can be absent from the list for more than one reason, and each is handled differently. A method whose capability the hardware does not carry is not listed
+ * at all - the device does not offer it, so there is nothing to report. A method the hardware does carry whose configuration row does not resolve is omitted too,
+ * under the degrade-by-absence rule: a census that listed the device's configuration and never mentioned the method has said nothing about it, and an unchecked box
+ * would be a reading the controller never made. A reader whose rows resolve nothing therefore composes an empty list, which the panel renders as the placeholder
+ * dash.
  *
  * The row states the DEVICE's truth like every other row here, so no feature option gates it: a user who turned a method's HomeKit switch off still sees what the
  * hardware itself reports.
@@ -803,8 +804,10 @@ export class AccessStatusFeed {
         { encrypted: false, kind: "availability", online: false, serialNumber: serial, session });
     };
 
-    // Every snapshot push is immediately followed by the availability truth frame, so a device that is already offline at selection reads offline at once instead
-    // of resting on a Connected label until something changes.
+    // The initial snapshot is immediately followed by the availability truth frame, so a device that is already offline at selection reads offline at once
+    // instead of resting on a Connected label until something changes. Connection recovery repeats the same pairing further below, since state may have moved
+    // while the connection was down; the row-set-changed branch coming up next pushes the snapshot alone, because a recomputed row set carries no information
+    // about whether liveness itself moved.
     pushSnapshot();
     pushAvailability(lastOnline);
 

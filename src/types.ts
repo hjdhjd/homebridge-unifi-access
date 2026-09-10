@@ -22,8 +22,9 @@ export interface AccessAccessoryContext {
 export type AccessAccessory = PlatformAccessory<AccessAccessoryContext>;
 
 // A typed view of this plugin's slice of the homebridge PlatformConfig. PlatformConfig carries an index signature for arbitrary user configuration, so declaring the keys
-// we actually read lets the platform constructor reach them as typed properties rather than index-signature accesses, while still satisfying the DynamicPlatformPlugin
-// contract because every key we add is optional.
+// we actually read lets the platform constructor reach them as typed properties rather than index-signature accesses. Both added members stay optional because a
+// user's persisted config.json may genuinely lack "controllers" or "options" when unconfigured, and a required member here would misrepresent what the runtime
+// object can actually contain.
 export interface AccessPlatformConfig extends PlatformConfig {
 
   controllers?: AccessControllerOptions[];

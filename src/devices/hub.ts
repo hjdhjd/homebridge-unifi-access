@@ -22,7 +22,9 @@ import { AccessDevice } from "./device.ts";
 import { AccessReservedNames } from "../types.ts";
 import { mqttTopics } from "../mqtt.ts";
 
-// Device types that use the /configs API endpoint instead of /settings for access method changes.
+// Device types that use the /configs API endpoint instead of /settings for access method changes. The UVC G6 Entry carries a camera under its firmware, so
+// the Access app's own surface for its access methods is the camera configuration endpoint (the is_camera flag the request below carries) rather than the
+// settings endpoint every non-camera reader or hub exposes. A future device sharing that camera-derived firmware belongs in this list for the same reason.
 const configsApiDeviceTypes = ["UVC G6 Entry"];
 
 /* The access method state a reader's switches read, one model per device serving both client identities. The values map is keyed by the catalog's configs
@@ -116,6 +118,9 @@ interface GateDoorTarget extends DoorCommandTarget { doorId: string }
 interface DrivenDoor { isSideDoor: boolean; locationId: string }
 
 // Constants for timing.
+// How long a UA Gate's unlock window stays open before the auto-relock settles the lock back to secured. The controller reports no relock event of its own for
+// a UA Gate the way it does for other hub types, so this borrows the gate's own default travel duration as the closest available estimate of when the gate
+// has swung shut again.
 const AUTO_LOCK_DELAY_MS = 5000;
 // How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the controller
 // sees the correction as a fresh value rather than as a race against the write it just made.
@@ -404,7 +409,7 @@ export class AccessHub extends AccessDevice {
     this.initializeDoorStates(rebound);
   }
 
-  // Initialize and configure the light accessory for HomeKit.
+  // Initialize and configure the hub or reader accessory for HomeKit.
   private configureDevice(): void {
 
     this._hkLockState = this.hubLockState;
@@ -640,12 +645,13 @@ export class AccessHub extends AccessDevice {
   /* Fold the record's own configuration rows into the model, replacing it wholesale rather than merging it: a row the record has dropped must leave no entry
    * standing, exactly as the live row read this replaces would have answered off for it.
    *
-   * The memo is what makes two writers of one model safe. A delivery whose rows translate to what the last applied fold already produced carries no access method
-   * news, so it changes nothing, and the fresher knowledge the packet and write folds have put in the model survives it. The comparison is by value rather than by
-   * array identity because the record's configs array offers no identity worth trusting: the periodic bootstrap refresh mints a fresh array on every tick an
-   * unrelated field moved, and a websocket delta replaces it atomically whenever a terminal input row changes, since the access method rows share the one flat
-   * array with them. What the memo holds is a copy rather than the model's own map, because the packet and write folds write into that map...a memo pointing at it
-   * would absorb their writes and then read the next stale restatement as news, reverting the very value the memo exists to protect.
+   * The memo is what makes the record's fold and the write/event fold safe together. A delivery whose rows translate to what the last applied fold already
+   * produced carries no access method news, so it changes nothing, and the fresher knowledge the packet and write folds have put in the model survives it. The
+   * comparison is by value rather than by array identity because the record's configs array offers no identity worth trusting: the periodic bootstrap refresh
+   * mints a fresh array on every tick an unrelated field moved, and a websocket delta replaces it atomically whenever a terminal input row changes, since the
+   * access method rows share the one flat array with them. What the memo holds is a copy rather than the model's own map, because the packet and write folds
+   * write into that map...a memo pointing at it would absorb their writes and then read the next stale restatement as news, reverting the very value the memo
+   * exists to protect.
    */
   #foldConfigRows(): void {
 
@@ -853,8 +859,8 @@ export class AccessHub extends AccessDevice {
   /* Whether this device is a reader whose access methods only the official settings read can answer for: seeded, and carrying no configuration rows of its own. The
    * one named statement of the refresh's subject, read at the dispatch gate above and re-read where the fetch lands.
    *
-   * The reader term mirrors the seed dispatch's own guard, which is what makes this predicate say exactly what its name says rather than leaning on an argument about
-   * how two surfaces happen to line up.
+   * The reader term mirrors the seed dispatch's own guard, which is what makes this predicate say exactly what its name says rather than leaning on an argument
+   * about how the configuration-rows surface and the official-settings surface happen to line up.
    */
   get #rowlessSeededReader(): boolean {
 
@@ -1057,8 +1063,8 @@ export class AccessHub extends AccessDevice {
       this.#dressSensor(service, reading);
     }
 
-    /* The tamper status is written from the held verdict on exactly two occasions: this pass put the characteristic on the sensor, or the sensor is being dressed
-     * and the characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose characteristic stood
+    /* The tamper status is written from the held verdict whenever this pass put the characteristic on the sensor, or the sensor is being dressed and the
+     * characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose characteristic stood
      * already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
      */
     if((tamper === "attached") || (!initialized && (tamper === "kept"))) {
@@ -1527,7 +1533,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // Trigger the lock state.
+    // The trigger mirrors the side door's lock: on while anything but secured, off while secured.
     service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
 
     // The switch drives the side door lock through the side door lock command, and a refused command puts the switch back.
@@ -1888,9 +1894,9 @@ export class AccessHub extends AccessDevice {
 
   /* Settle a door on a reported lock state and announce the move, answering whether the door moved at all.
    *
-   * A reported state moves the door only when it differs from what the door already reads, which is what lets two rails report one event and have it announced
-   * once: whichever reaches here first settles the door and speaks, and the one behind it finds the door settled and stays silent. A report of a door locked
-   * retires that door's pending relock as well.
+   * A reported state moves the door only when it differs from what the door already reads, which is what lets the remote-unlock event and the door-state
+   * delivery report the same transition and have it announced once: whichever reaches here first settles the door and speaks, and the one behind it finds the
+   * door settled and stays silent. A report of a door locked retires that door's pending relock as well.
    *
    * @param isSideDoor - Whether the side door of a UA Gate is the door being settled.
    * @param lockState - The lock state the door has been reported in.
@@ -2262,7 +2268,8 @@ export class AccessHub extends AccessDevice {
     return this.#dispatchDoorCommand(target, hub => (decision.kind === "unlock") ? this.#dispatchUnlock(hub) : hub.setLockRule(decision.rule));
   }
 
-  // Wrapper for door lock command.
+  // A name-symmetric counterpart to hubSideDoorLockCommand, so configureLockService's ternary and this file's other call sites can select the main door's
+  // lock command by name rather than by an inline side-door check.
   private async hubLockCommand(isLocking: boolean): Promise<boolean> {
 
     return this.hubDoorLockCommand(isLocking);

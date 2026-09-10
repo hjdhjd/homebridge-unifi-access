@@ -106,7 +106,7 @@ export interface AccessUnlockAttribution {
 }
 
 /**
- * Whether a lifecycle phase change is legal. Two changes are refused: a same-phase change, and any change out of `shuttingDown`. That phase is one-way because
+ * Whether a lifecycle phase change is legal. A change is refused when it moves to the same phase, or moves out of `shuttingDown`. That phase is one-way because
  * entering it aborts the terminal shutdown signal and tears the whole observe tree down, so a late-resolving connect or any other deferred wake that tries to move
  * the phase onward is rejected here rather than at each call site. Entering `shuttingDown` from any other phase stays legal.
  *
@@ -156,8 +156,8 @@ export function createConnectRetryPolicy(limit = ACCESS_CONTROLLER_AUTH_FAILURE_
  * Compose a connect identity from the configured credentials and token, or explain why the configuration describes none. Credentials reach the Access application's
  * own endpoints and are what the device topology comes from; a token reaches the published API; supplying both gives a client everything.
  *
- * The platform's configuration gate and the controller's own constructor gate both consume this one function, so what counts as a valid identity is stated exactly
- * once rather than in two places that can drift.
+ * Every configuration gate - the platform's, the controller's own constructor, and the webUI's connect attempt - consumes this one function, so what counts as a
+ * valid identity is stated exactly once rather than separately by each caller that needs to know.
  *
  * @param options - The configured password, tokens, and username, each optional.
  *
@@ -499,8 +499,8 @@ export function recordByMac(mac: string, records: Iterable<AccessStateDevice>): 
 /* What current membership can claim in one pass: the accessory UUIDs it accounts for, and the hardware identities it projects - the decorated serial of each MAC
  * address, port-less, carrying the brand so a raw spelling can never enter the set.
  *
- * Two decisions read it, which is why it is stated here rather than at either of them: a controller's own ownership predicate, asking what its membership accounts
- * for, and the stranded predicate, asking the same question of every configured controller's membership at once.
+ * It is stated here rather than at either of its readers: a controller's own ownership predicate, asking what its membership accounts for, and the stranded
+ * predicate, asking the same question of every configured controller's membership at once.
  */
 export interface MembershipClaims {
 
@@ -509,8 +509,8 @@ export interface MembershipClaims {
 }
 
 /* The keys one controller answers by: the key it stamps its accessories with now, and the key it answered by before it learned its MAC address, which exists only
- * once a controller document has been read. The pair is stated once because the two decisions that consume it - one controller's ownership verdict, and the
- * stranded predicate over every configured controller - must read the same two keys or they can disagree about whose an accessory is.
+ * once a controller document has been read. The pair is stated once because its consumers - one controller's ownership verdict, and the stranded predicate over
+ * every configured controller - must read the same keys or they can disagree about whose an accessory is.
  */
 export interface ControllerOwnershipKeys {
 
@@ -680,7 +680,6 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
   const sideBinding = bindings.find(binding => binding.name === SIDE_DOOR_PORT);
   const mainBinding = bindings.find(binding => binding !== sideBinding);
 
-  // Get the primary door ID from the device record, which may be undefined.
   const primaryDoorId = device.door?.unique_id;
 
   // Strategy 1: Use the door the record's own port binding names as the main door.
@@ -851,13 +850,17 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
  * that model - the record's configuration rows, the official settings read, and the v2 access method events all feed it in this vocabulary. The `officialKeys` column is
  * the official update map's vocabulary, primary key first, and the switch writes go out under it. The `choice` column is the spelling a user's selection stores, and with
  * `name` it is what the settings page offers. Mobile's one switch spans the Bluetooth family, and writing a key a hardware class does not offer is a documented
- * no-effect, so naming the family carries that intent on every class; TouchPass is the one vocabulary rename between the two surfaces. The `satisfies` clause
- * compile-checks the column against the library's update map while `as const` keeps the literal inference the key union below is derived from.
+ * no-effect, so naming the family carries that intent on every class; TouchPass is the one vocabulary rename between the configs and official vocabularies. Mobile
+ * alone also carries a
+ * `configsApiKeys` column, because the configs endpoint some hardware classes write access-method changes through takes the Bluetooth family as three keys - `bt`,
+ * `bt_button`, and `bt_tap` - where the `key` column's `bt_button` alone serves every other write path; a device on that endpoint substitutes this column for
+ * `key`, and only mobile has one to substitute. The `satisfies` clause compile-checks the column against the library's update map while `as const` keeps the
+ * literal inference the key union below is derived from.
  *
- * The catalog lives in this leaf rather than beside the switches it drives because two consumers need one definition of it: the hub's access method switches, and
- * the webUI status feed's access methods row. The feed runs inside the Config UI X child process, where the HomeKit device graph cannot be loaded at all, so a
- * catalog that lived beside the switches would have to be restated for the feed - and two catalogs is exactly the divergence a device's switches and its status
- * row must never have between them.
+ * The catalog lives in this leaf rather than beside the switches it drives because every consumer of the access method vocabulary reads this one catalog rather
+ * than restating it: the hub's access method switches, and the webUI status feed's access methods row. The feed runs inside the Config UI X child process, where
+ * the HomeKit device graph cannot be loaded at all, so a catalog that lived beside the switches would have to be restated for the feed - and a restated catalog is
+ * exactly the divergence a device's switches and its status row must never have between them.
  */
 export const accessMethods = [
 
@@ -883,7 +886,7 @@ export type AccessMethodKey = typeof accessMethods[number]["key"];
 
 /**
  * Whether a device's capabilities carry a capability, stated in whichever form a catalog entry uses: a single flag, or a family where any member counts. The
- * hub's own capability reads, the status feed's row, and the settings page's list all answer through it, so what a device offers is never decided three ways.
+ * hub's own capability reads, the status feed's row, and the settings page's list all answer through it, so what a device offers is never decided more than once.
  *
  * @param device     - The device record.
  * @param capability - The capability flag or family.

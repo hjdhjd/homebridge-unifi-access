@@ -9,7 +9,7 @@
  * of what a controller is, what counts as an identity it can connect with, and what the UI server's probe answered. Keeping that knowledge in one place means a
  * config-shape change is a single edit, and it keeps every hook in ui.mjs a declarative one-liner over these helpers.
  *
- * Two settings substrates meet here. A feature option is where a setting lives, and a pair of per-controller configuration properties are a second home the plugin
+ * Two settings substrates meet here. A feature option is where a setting lives, and a set of per-controller configuration properties are a second home the plugin
  * honors so that a configuration nobody has opened the webUI on keeps working. Reconciling the two is the migration's whole job: it moves each property's value into
  * the option that supersedes it and rebuilds the item without it. The module takes no imports at all - the engine class, the served catalog index, and the entry
  * enumerator are handed in - so the whole of it is exercisable under node against the real engine and the real catalog, with no network and no DOM.
@@ -348,8 +348,8 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
      * answers `configuredOptions` as its own complete snapshot: two writers would each produce a whole array and the shallow-merge commit would keep only the last
      * of them, silently discarding everything the other one composed.
      *
-     * Two substrates decline the whole pass. A `controllers` or an `options` field that is present but is not an array is one we cannot parse, and we do not guess
-     * at it. Absent is not the same thing and is entirely valid.
+     * Any top-level array field the migration reads declines the whole pass when it is present but not an array: a `controllers` or an `options` field in that
+     * shape is one we cannot parse, and we do not guess at it. Absent is not the same thing and is entirely valid.
      *
      * @param config       - The platform configuration entry.
      * @param macByAddress - The MAC address resolved for each controller address that answered a probe this pass.

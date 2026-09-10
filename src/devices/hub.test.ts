@@ -1,9 +1,10 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * hub.test.ts: Tests for the hub's door commands, its garage door opener, and the webhook delivery handlers and door-ownership predicate they share.
+ * hub.test.ts: Tests for every behavior AccessHub owns, exercised over a hub stood up for real - genuine HAP service and characteristic classes - rather than
+ * through isolated method calls.
  *
- * The hub is stood up for real, over genuine HAP service and characteristic classes, because what these arms are about is a hub deciding whether a delivery names
- * one of its own doors - and that decision reads the same live projection and the same discovered door identities the running accessory does.
+ * The hub is stood up this way because what these arms are about is a hub reading and reacting to the same live state the running accessory does - the client's
+ * projection, its discovered door and reader identities, and the record's own configuration - rather than to values asserted about it from outside.
  *
  * Deliveries are driven through the handler the hub itself registered rather than by calling its methods directly, so the registration and the handler are proved
  * to agree on the event vocabulary rather than assumed to.
@@ -185,6 +186,7 @@ interface HubOptions {
   defer?: string;
   // The device roster the client's snapshot carries, keyed by unique_id, which is what the doorbell reader lookup searches.
   devices?: AccessStateDevice[];
+  // A function value simulates the library's door handle throwing during the removal window, mirroring the #doorId getter's own guard.
   doorId?: string | (() => never);
   doorState?: AccessDoorStateEntry;
   /* The client's door state map, keyed by location id, which is the map every hub reads the doors it drives from. An arm names it to put the controller's
@@ -312,7 +314,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters))
   } });
 
-  const projection = { config: record, observe: async function *(): AsyncGenerator { /* nothing observes in these arms */ }, peek: (): undefined => undefined };
+  const projection = { config: record, observe: async function *(): AsyncGenerator {
+
+    // Nothing observes in these arms.
+  }, peek: (): undefined => undefined };
 
   const platform = makePlatformDouble({
 
@@ -802,7 +807,7 @@ test("construction records the accessory's context: the controller key, the devi
 
   const harness = makeHub();
 
-  // The three keys a startup sweep and an orphan's naming read back, and nothing else - the wipe that precedes the writes is what keeps a polluted context from
+  // The keys a startup sweep and an orphan's naming read back, and nothing else - the wipe that precedes the writes is what keeps a polluted context from
   // carrying a stale key past construction. The identity recorded is the device's own, read off the hub rather than restated.
   assert.deepEqual(harness.hub.accessory.context, { controller: "1.2.3.4", id: HUB_SERIAL, mac: HUB_MAC });
   assert.equal(harness.hub.accessory.context.id, harness.hub.id);
@@ -1015,8 +1020,9 @@ test("a reader whose record carries no configuration rows takes its switches fro
 
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
-  /* TouchPass is the one method the two surfaces spell differently: the settings answer names it touch_pass while the model keys it apple_pass. A switch reading off
-   * here is what a translation reaching for the wrong vocabulary looks like, and it would leave the method permanently off on every token-only controller.
+  /* TouchPass is the one method the settings answer and the model spell differently: the settings answer names it touch_pass while the model keys it apple_pass.
+   * A switch reading off here is what a translation reaching for the wrong vocabulary looks like, and it would leave the method permanently off on every
+   * token-only controller.
    */
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS), true, "TouchPass is read through its official spelling");
 
@@ -3092,7 +3098,7 @@ test("a selection creates exactly the selected switches, at the device's own sco
   const record = testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code", "qr_code" ],
     configs: [ { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }, { device_id: HUB_ID, key: "nfc", tag: "open_door_mode", value: "no" } ] });
 
-  // The global selection names two methods; the device's own names one, spelled in lower case, and it is the device's that counts.
+  // The global selection names more methods than the device's own, spelled in lower case, and it is the device's that counts.
   const scoped = makeHub({ options: [ "Enable.AccessMethod.Switches=PIN,QR", "Enable.AccessMethod.Switches." + HUB_SERIAL + "=nfc" ], record });
 
   assert.ok(hasSwitch(scoped, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "the device's own selection is materialized");
@@ -3206,7 +3212,7 @@ function familyRecord(deviceType: string): AccessStateDevice & { mac: string } {
 
     default:
 
-      // The UA Hub, whose three fixed pairs and the three rows beside them are the vocabulary every other family here is read against.
+      // The UA Hub, whose fixed wiring pairs and the rows beside them are the vocabulary every other family here is read against.
       return testHub({ configs: [ ...wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_rel-pos": "on", "wiring_state_ren-neg": "on",
         "wiring_state_ren-pos": "on", "wiring_state_rex-neg": "on", "wiring_state_rex-pos": "on" }),
       ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ], device_type: deviceType });
@@ -3435,8 +3441,8 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
 
 test("a UA Hub reads each terminal input from its own row, so no input can answer with another's reading", () => {
 
-  /* Every other arm drives a UA Hub's three rows to one value together, which cannot tell the rows apart: a table naming the wrong row for an input would answer
-   * identically. Here each restate moves exactly one row, so each sensor is read against the two that did not move.
+  /* Every other arm drives a UA Hub's rows to one value together, which cannot tell the rows apart: a table naming the wrong row for an input would answer
+   * identically. Here each restate moves exactly one row, so each sensor is read against the rows that did not move.
    */
   const harness = makeHub({ record: wiredHub("off") });
   const readings = (): unknown[] => TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype).getCharacteristic(Characteristic.ContactSensorState).value);

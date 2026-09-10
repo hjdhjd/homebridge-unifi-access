@@ -28,7 +28,7 @@ export const ACCESS_DEVICE_UNLOCK_INTERVAL = 0;
 // without saying how long their own door takes, so it is a plausible middle for a residential door rather than a measurement of any particular one.
 export const ACCESS_GARAGE_TRANSITION_DURATION = 15;
 
-// Default MQTT topic to use when publishing events. This is in the form of: unifi/access/MAC/event
+// Default MQTT topic root for published events. A published topic is this root, the device identity, and one of the tails the MQTT catalog declares.
 export const ACCESS_MQTT_TOPIC = "unifi/access";
 
 // Who the controller's activity history names as the actor behind an unlock this plugin sent. An unlock naming no actor is recorded against whatever account the

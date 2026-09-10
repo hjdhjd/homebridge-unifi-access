@@ -74,10 +74,12 @@
      connection-error view hosts for a controller it cannot reach.
 
      Everything a mounted card is addressed by is a data attribute rather than an id, because a clone cannot carry ids that are unique on their own: fields carry
-     data-field, controls carry data-action, the verdict line carries data-role, and each label names the field it belongs to with data-label-for so the factory
-     can mint a matching id pair per instance and keep the label's association intact. The heading and helper text are the first-run wording, which the other
-     placements override when they mount. Every control the template offers is present in every clone and the factory reveals only the ones its placement asked
-     for, so a placement declares what it offers rather than assembling markup of its own.
+     data-field, controls carry data-action, the verdict line carries data-role, and each label names the field it belongs to with data-label-for so the factory can
+     mint a matching id pair per instance and keep the label's association intact. The reveal toggles carry a further attribute pair beyond that scheme: data-reveal
+     names the field the press toggles, and data-reveal-subject supplies the plain word - password or API token - the button's accessible label is rebuilt from on
+     every press. The heading and helper text are the first-run wording, which the other placements override when they mount. Every control the template offers is
+     present in every clone and the factory reveals only the ones its placement asked for, so a placement declares what it offers rather than assembling markup of
+     its own.
 
      The two ways in sit side by side deliberately. A local user's credentials reach the Access application's own endpoints, which is where the door and device
      topology lives; an API token reaches the published API. Either one on its own is a connection the plugin accepts, and the card leaves both open rather than
@@ -149,10 +151,15 @@
     <p class="small text-muted mb-0 mt-3">To optimize performance and responsiveness, make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.</p>
   </div>
 </div>
+<!-- menuHome and menuFeatureOptions are ids the shared webUI framework wires by a literal getElementById lookup, so neither may be renamed to match its visible text
+     below - Support and Settings are this plugin's own label choice over the framework's own Home and Features defaults for the same ids. -->
 <div id="menuWrapper" class="btn-group w-100 mb-0" role="group" aria-label="UI Menu" style="display: none;">
   <button type="button" class="btn btn-primary" id="menuFeatureOptions">Settings</button>
   <button type="button" class="btn btn-primary mr-0" id="menuHome">Support</button>
 </div>
+<!-- Beyond the shared webUI framework's own skeleton for this id, which renders no tabindex, this container is made a tab stop on purpose: tabindex="0" puts the
+     settings page root itself in keyboard tab order and reachable by assistive-technology navigation, entirely through the attribute itself rather than any script
+     moving focus there. -->
 <div id="pageFeatureOptions" class="mt-2" style="display: none;" tabindex="0">
   <div id="headerInfo" class="alert alert-info bg-transparent py-2 px-3 mb-2"></div>
   <div class="feature-main-content">

@@ -52,7 +52,7 @@ function applyTopology(store: ReturnType<typeof createStateStore>, devices: Reco
 }
 
 /* The plain UA Hub of the capture corpus, carrying the unprefixed wiring and input key forms, with its door position wiring flipped on. The captured record reads
- * all three of those keys off; a hub whose sensor is actually wired is the situation the reported defect was about, so the fixture supplies one.
+ * all three of those keys off; a hub whose sensor is actually wired is a real configuration this plugin must classify correctly, so the fixture supplies one.
  */
 function plainHubRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
@@ -472,8 +472,8 @@ test("lockCommandRule maps every configured interval onto the verb that expresse
   // Zero is an unlock the user wants no end to.
   assert.deepEqual(lockCommandRule({ delayInterval: 0, isLocking: false }), { kind: "rule", rule: { type: "keep_unlock" } });
 
-  /* A positive interval holds the door for exactly that many minutes. This is the arm the whole fix rests on: a mapping that answered keep_unlock regardless of the
-   * interval would satisfy every other arm above and fail only here, so the assertion has to distinguish the custom rule from the endless one by its value.
+  /* A positive interval holds the door for exactly that many minutes. This is the one assertion that distinguishes the custom rule from the endless one by value:
+   * a mapping that answered keep_unlock regardless of the interval would satisfy every other arm above and only fail here.
    */
   assert.deepEqual(lockCommandRule({ delayInterval: 1, isLocking: false }), { kind: "rule", rule: { interval: 1, type: "custom" } });
   assert.deepEqual(lockCommandRule({ delayInterval: 15, isLocking: false }), { kind: "rule", rule: { interval: 15, type: "custom" } });

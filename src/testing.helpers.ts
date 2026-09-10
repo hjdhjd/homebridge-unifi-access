@@ -297,8 +297,9 @@ export interface ControllerDoubleOptions {
  * one the real controller derives it from - the identity and the configured address answer the MQTT identity and the ownership key, and the ownership key answers
  * the reclaim keys. An arm's override always wins, so an arm names the one fact its question is about and inherits the rest.
  *
- * The three deep members are widened once each, and the surface once at the return: the client, the event rail, and the broker are classes carrying private state
- * nothing structural satisfies, and so is the controller itself. Those four casts live here and at no site that stands a controller up.
+ * Each double-typed dependency is widened once here, and the surface once at the return: the client, the event rail, and the broker are classes carrying
+ * private state nothing structural satisfies, and so is the controller itself. Every cast this factory needs lives here and at no site that stands a
+ * controller up.
  *
  * @param options - What the arm varies; see {@link ControllerDoubleOptions}.
  *

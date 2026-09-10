@@ -45,6 +45,9 @@ export default hbPluginUtils({
   // The webUI library directory holds a build-time copy of the homebridge-plugin-utils webUI framework rather than anything authored here, so linting it would report
   // findings against code this repository does not own. The ignore stops being needed once that framework is consumed as a versioned bundle rather than a flat copy.
   ignores: ["homebridge-ui/public/lib/**"],
+  // The js preset applies the plain-JavaScript rule set (no type-aware checks) to every file here that is not compiled TypeScript. The ui preset layers
+  // browser globals - window, document, fetch, the Homebridge configuration API - on top of that for the files that run inside the Config UI X browser
+  // page rather than under Node, which is why access-config.mjs and ui.mjs carry both.
   js: [ "homebridge-ui/public/access-config.mjs", "homebridge-ui/public/ui.mjs", "homebridge-ui/server.js", "homebridge-ui/users-census.js",
     "eslint.config.mjs" ],
   ts: ["src/**/*.ts"],

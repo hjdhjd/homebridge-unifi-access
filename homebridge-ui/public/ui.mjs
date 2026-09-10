@@ -20,14 +20,15 @@ import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 const CATALOG_DEADLINE = 5;
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
- * then fetches the controller's information and topology documents, so a genuinely worst-case first connection runs past it. Five admits the healthy case. A
- * controller slower than that reads as unreachable for this pass, keeps its per-controller settings, and is probed again at the next open, which is exactly the
+ * then fetches the controller's information and topology documents, so a genuinely worst-case first connection runs past it. PROBE_DEADLINE admits the healthy
+ * case. A controller slower than that reads as unreachable for this pass, keeps its per-controller settings, and is probed again at the next open, which is exactly the
  * posture an offline controller already gets.
  */
 const PROBE_DEADLINE = 5;
 
-/* The bound in seconds on the whole load-time wiring below. The page's own boot monitor fires its slow-boot notice and hides the spinner at ten seconds, so eight
- * settles the envelope provably inside it and a wiring step that hangs against an unresponsive host can never be what makes the settings panel look broken.
+/* The bound in seconds on the whole load-time wiring below. The page's own boot monitor fires its slow-boot notice and hides the spinner at ten seconds, so
+ * WIRING_DEADLINE settles the envelope provably inside it and a wiring step that hangs against an unresponsive host can never be what makes the settings panel
+ * look broken.
  *
  * The per-probe bounds above are what keep the realistic worst case inside this outer guard; this one exists for what they cannot cover, a catalog fetch or a session
  * open that goes pathological. An outer expiry writes nothing at all and the whole pass retries at the next open. A configuration that has already converged never
@@ -1190,7 +1191,7 @@ const featureOptionsParams = {
     // reader is already on.
     controllerFailureGuidance: "You can correct this controller's connection details below, or retry.",
     // The delay before the connection-error view re-enables its retry button, overriding the library's five-second default. A UniFi Access controller can take well
-    // over five seconds to authenticate and answer with its topology, so twenty seconds keeps an impatient user from hammering retry while the first connection
+    // over five seconds to authenticate and answer with its topology, so this longer delay keeps an impatient user from hammering retry while the first connection
     // attempt is still in flight.
     controllerRetryEnableDelayMs: 20000,
     isController: isController,

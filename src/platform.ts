@@ -100,7 +100,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     // Debugging - most people shouldn't enable this.
     this.debug("Debug logging on. Expect a lot of data.");
 
-    // Loop through each configured NVR and instantiate it.
+    // Loop through each configured controller and instantiate it.
     for(const controllerConfig of this.config.controllers) {
 
       // We need an address, or there's nothing to do.
