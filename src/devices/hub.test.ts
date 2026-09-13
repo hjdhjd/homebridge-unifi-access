@@ -15,8 +15,8 @@ import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts
 import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, uuid } from "@homebridge/hap-nodejs";
-import { FeatureOptions, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
+import { Characteristic, HapStatusError, Service, uuid } from "@homebridge/hap-nodejs";
+import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { accessMethods, officialDeviceModel } from "../policy.ts";
@@ -321,7 +321,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const platform = makePlatformDouble({
 
-    api: { hap: { Characteristic, Service, uuid } },
+    api: { hap: { Characteristic, HapStatusError, Service, uuid } },
     /* The clock every timer this hub arms is registered on, stated here rather than left to the double's own default, because a hub reading a clock no arm holds is
      * a hub whose relocks and travels an advance would never reach.
      */
@@ -659,8 +659,10 @@ function hasContactSensor(harness: HubHarness, subtype: string): boolean {
   return harness.services.some(service => (service.UUID === Service.ContactSensor.UUID) && (service.subtype === subtype));
 }
 
-/* What an access method switch answers when HomeKit asks it, taken from the registered handler rather than from the characteristic's own cached value. The push path
- * writes that cached value whatever the model holds, so reading it would let a fold that never ran pass as one that did.
+/* What an access method switch answers when HomeKit asks it, read through the same get path HomeKit uses. The read proves the value HomeKit would see and never
+ * that a handler is registered: HAP consults a handler only where one stands and answers from the characteristic's stored value otherwise, and the push path
+ * writes that stored value on every pass, so an undressed switch answers exactly what a dressed one would. A registered handler is proven by a write through
+ * handleSetRequest() asserted against the official update the harness records, which only a write registration can carry.
  *
  * @param harness - The hub to read.
  * @param subtype - The access method switch to ask.
@@ -1246,7 +1248,7 @@ test("a v2 access method event retries a settings read that failed, and only whi
   assert.equal(harness.fetches.length, 2, "and an event arriving while that read is in flight asks for nothing more");
 });
 
-test("a dressed sensor answers availability from the live composition rather than from what was last pushed to it", async () => {
+test("a dressed sensor's availability read consults the live composition, answering under a healthy controller and refusing once the connection moves", async () => {
 
   const harness = makeGate();
   const sensor = contactSensor(harness, AccessReservedNames.CONTACT_DPS);
@@ -1257,13 +1259,92 @@ test("a dressed sensor answers availability from the live composition rather tha
 
   const writes = recordWrites(sensor);
 
-  /* Nothing pushes from here: no observer walk and no record delivery runs in this arm. An answer that follows the flip can therefore only have come from the handler
-   * consulting the composition, which is exactly what a dress that wrote the characteristic and registered nothing would fail.
+  /* Nothing pushes from here: no observer walk and no record delivery runs in this arm. A refusal that follows the flip can therefore only have come from the
+   * handler consulting the composition, which is exactly what a dress that wrote the characteristic and registered nothing would fail by answering the cached value.
    */
   harness.health.isHealthy = false;
 
-  assert.equal(await availability.handleGetRequest(), false, "and a read taken after the connection moved answers where the device stands now");
+  await assert.rejects(availability.handleGetRequest(), (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+    "a read taken after the connection moved is refused with the status HomeKit renders as Not Responding");
   assert.deepEqual(writes, [], "with no push behind it at all");
+});
+
+test("every reader a hub wires answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
+  "whichever service carries it", async (t) => {
+
+  /* Every reader this hub wires registers through the prototype's own onGet, so the registrations the spy records are the census of readers with nothing listed by
+   * hand, and a reader wired past the rule is caught here without anyone naming it.
+   */
+  const registered: Mock<Characteristic["onGet"]> = t.mock.method(Characteristic.prototype, "onGet");
+
+  // The registrations one construction added, taken as the slice between the census before it and the census after it.
+  const wiredBy = (build: () => HubHarness): { harness: HubHarness; slice: typeof registered.mock.calls } => {
+
+    const from = registered.mock.calls.length;
+    const harness = build();
+
+    return { harness, slice: registered.mock.calls.slice(from) };
+  };
+
+  /* What one hub's own registrations prove, walked three times: each reader answers the value its characteristic holds while the device can be reached, each
+   * refuses once it cannot - at the handler itself and through HAP's read path in front of it - and a recovery clears the refusal with nothing rewired.
+   */
+  const proves = async (harness: HubHarness, slice: typeof registered.mock.calls): Promise<void> => {
+
+    const [first] = slice;
+
+    assert.ok(first, "the hub wired at least one reader");
+
+    /* Each characteristic's stored value is taken before any request goes out, because a reader answering that store would make a value read afterwards agree
+     * with itself whatever the handler did.
+     */
+    const held = slice.map((call): { characteristic: Characteristic; value: unknown } => {
+
+      const characteristic = call.this as Characteristic;
+
+      return { characteristic, value: characteristic.value };
+    });
+
+    await Promise.all(held.map(async (reader): Promise<void> => {
+
+      assert.strictEqual(await reader.characteristic.handleGetRequest(), reader.value,
+        "a reader answers while the device can be reached, and answers the value the characteristic holds");
+    }));
+
+    harness.health.isHealthy = false;
+
+    await Promise.all(slice.map(async (call): Promise<void> => {
+
+      const characteristic = call.this as Characteristic;
+      const [handler] = call.arguments;
+
+      assert.throws(() => handler({}), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+        "the rule refuses with HAP's own status error");
+
+      await assert.rejects(characteristic.handleGetRequest(), (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+        "which HAP's read path renders as the status HomeKit shows as Not Responding");
+    }));
+
+    harness.health.isHealthy = true;
+
+    await assert.doesNotReject((first.this as Characteristic).handleGetRequest(),
+      "and the next read after recovery answers, with nothing rewired");
+  };
+
+  /* Four hubs, between them carrying every service a hub offers: a doorbell reader with both locks and a PIN switch, an opener over wired terminal inputs, a UA
+   * Gate driving two doors, and a UA Ultra whose sensors carry a tamper status.
+   */
+  const reader = wiredBy(() => makeReader({ options: [ "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger" ],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "door_bell", "pin_code" ],
+      configs: [ ...wiredRows("on"), { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" } ] }) }));
+  const opener = wiredBy(() => makeOpener({ record: wiredHub("on") }));
+  const gate = wiredBy(() => makeGate({ options: ["Enable.Hub.SideDoor.Lock.Trigger"] }));
+  const ultra = wiredBy(() => makeHub({ record: tamperUltra({ "tamper_event": "true" }) }));
+
+  await proves(reader.harness, reader.slice);
+  await proves(opener.harness, opener.slice);
+  await proves(gate.harness, gate.slice);
+  await proves(ultra.harness, ultra.slice);
 });
 
 test("a door command refuses locally whenever the composition reads unreachable, on either of its two terms", async () => {
@@ -3703,7 +3784,8 @@ test("a sensor of tamper-capable hardware carries the characteristic from creati
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic carries every change of the held verdict, an adoption included");
 });
 
-test("a sensor the accessory arrived carrying is dressed at adoption from what the hub holds, and answers availability live from then on", async () => {
+test("a sensor the accessory arrived carrying is dressed at adoption from what the hub holds, and refuses availability and its tamper status once the " +
+  "device cannot be reached", async () => {
 
   const restored = carried(Service.ContactSensor, AccessReservedNames.CONTACT_REX);
 
@@ -3726,11 +3808,16 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
     "nothing established renders normal, which a dressing that skipped the sensor it found would fail by leaving it raised");
   assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), true,
     "the handler is registered on a sensor the hub never created, which a creation-only dressing would fail by answering the cached false");
+  assert.strictEqual(await sensor.getCharacteristic(Characteristic.StatusTampered).handleGetRequest(), Characteristic.StatusTampered.NOT_TAMPERED,
+    "and its tamper status is answered by the handler registered on that same sensor");
 
   harness.health.isHealthy = false;
 
-  assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), false,
-    "and it answers where the device stands now rather than what was last written to it");
+  await assert.rejects(sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(),
+    (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+    "and a read once the connection moved is refused rather than answered from what was last written");
+  await assert.rejects(sensor.getCharacteristic(Characteristic.StatusTampered).handleGetRequest(),
+    (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE, "and so is its tamper status");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
 });
 

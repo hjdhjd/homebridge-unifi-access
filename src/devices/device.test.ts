@@ -4,7 +4,7 @@
  */
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
-import { FeatureOptions, mqttTopic } from "homebridge-plugin-utils";
+import { FeatureOptions, HAPStatus, mqttTopic } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
@@ -14,6 +14,7 @@ import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
 import type { DecoratedSerial } from "../policy.ts";
+import { HapStatusError } from "@homebridge/hap-nodejs";
 import { TestClock } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
@@ -30,6 +31,11 @@ const TIMER_DELAY_MS = 10;
  * paths it wrote itself.
  */
 class TestDevice extends AccessDevice {
+
+  public answer(read: () => boolean): () => boolean {
+
+    return this.answering(read);
+  }
 
   public configure(): boolean {
 
@@ -174,7 +180,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     id: serialForm(CONTROLLER_ID),
     platform: makePlatformDouble({
 
-      api: { hap: { Characteristic: SentinelCharacteristic, Service: SentinelService } },
+      api: { hap: { Characteristic: SentinelCharacteristic, HapStatusError, Service: SentinelService } },
       clock,
       featureOptions: engine,
       log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
@@ -352,6 +358,33 @@ test("availability composes controller health with the device's own online state
 
   assert.equal(reachable.isReachable, true, "the same record behind a healthy controller reads reachable");
   assert.deepEqual(healthy.statusWrites, [{ characteristic: "StatusActive", value: true }]);
+});
+
+test("a reader wrapped in the device's rule answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
+  "consulting the composition on every read", () => {
+
+  /* The rule is driven through the device the base really bound rather than through a wrapper the arm built, which is what makes the bind site itself the thing
+   * under test. Each term of the composition is moved on its own, because a reader that consulted only one of them would pass on the other's strength.
+   */
+  const harness = makeHarness([record()]);
+  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const read = device.answer(() => true);
+
+  assert.equal(read(), true, "a reader answers under a healthy controller and an online record");
+
+  harness.health.isHealthy = false;
+
+  assert.throws(() => read(), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+    "the controller term refuses with HAP's own status error carrying the communication-failure status");
+
+  harness.health.isHealthy = true;
+
+  assert.equal(read(), true, "and the next read after recovery answers, because the rule consults the composition on every read rather than capturing it once");
+
+  device.uda = { ...device.uda, is_online: false };
+
+  assert.throws(() => read(), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+    "the device's own record gates it from there");
 });
 
 test("a reachability refresh writes every service carrying availability and only those, reading the composition afresh each time", () => {

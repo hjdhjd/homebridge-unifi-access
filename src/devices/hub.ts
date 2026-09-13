@@ -542,8 +542,8 @@ export class AccessHub extends AccessDevice {
        */
       if(!initialized) {
 
-        // Retrieve the state when requested.
-        service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.#accessMethodEnabled(accessMethod.key));
+        // Retrieve the state when requested, through the device's Not Responding rule like every reader.
+        service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.#accessMethodEnabled(accessMethod.key)));
 
         // Set the state when requested. Writes route official-first with a read-back for certainty; reads answer from the access method state model, which the
         // record's configuration rows, the official settings read, and the v2 access method events each feed.
@@ -1063,27 +1063,33 @@ export class AccessHub extends AccessDevice {
       this.#dressSensor(service, reading);
     }
 
-    /* The tamper status is written from the held verdict whenever this pass put the characteristic on the sensor, or the sensor is being dressed and the
-     * characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose characteristic stood
-     * already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
+    /* The tamper status is written, and its reader registered, from the held verdict whenever this pass put the characteristic on the sensor, or the sensor is
+     * being dressed and the characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose
+     * characteristic stood already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
      */
     if((tamper === "attached") || (!initialized && (tamper === "kept"))) {
 
       service.updateCharacteristic(this.hap.Characteristic.StatusTampered, this.#tamperRendering(this.tamperVerdict));
+      service.getCharacteristic(this.hap.Characteristic.StatusTampered).onGet(this.answering(() => this.#tamperRendering(this.tamperVerdict)));
     }
   }
 
   /* Dress a sensor the first time this hub holds it: its reading and its availability. HomeKit carries an optional characteristic only once something has written
    * it, so the availability write is what puts that characteristic on the sensor at all, which is what lets the availability sweep reach every sensor without the
-   * hub keeping a roster. The availability handler answers every later read from the live composition, so HomeKit sees where the device stands even when nothing
-   * has pushed since the composition last moved. The tamper status is written by the acquire above, where the presence reconcile left the characteristic standing,
+   * hub keeping a roster. The availability handler answers every later read from the live composition through the device's Not Responding rule, so a read while
+   * the device can be reached shows where it stands even when nothing has pushed since the composition last moved, and a read while it cannot is refused rather
+   * than answered from the last push. The reading's handler answers the stored reading through that same rule, so a sensor that cannot be reached refuses its
+   * reading rather than showing the last one. The tamper status is written by the acquire above, where the presence reconcile left the characteristic standing,
    * which is what lets the tamper sweep reach every sensor for the same reason.
    */
   #dressSensor(service: Service, reading: CharacteristicValue): void {
 
+    const contact = service.getCharacteristic(this.hap.Characteristic.ContactSensorState);
+
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, reading);
+    contact.onGet(this.answering(() => contact.value ?? reading));
     service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
-    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(() => this.isReachable);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(this.answering(() => this.isReachable));
   }
 
   /* How a tamper verdict renders in HomeKit - the one statement of it, read by the acquire's own write and by the projection's sweep. Nothing established renders
@@ -1225,8 +1231,8 @@ export class AccessHub extends AccessDevice {
     const lockCommand = isSideDoor ? async (lock: boolean): Promise<boolean> => this.hubSideDoorLockCommand(lock) :
       async (lock: boolean): Promise<boolean> => this.hubLockCommand(lock);
 
-    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(lockStateGetter);
-    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onGet(lockStateGetter);
+    service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(this.answering(lockStateGetter));
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onGet(this.answering(lockStateGetter));
 
     service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
@@ -1269,9 +1275,16 @@ export class AccessHub extends AccessDevice {
       return (travelling.phase === "idle") ? this.#doorStateFromEvidence().current : this.#renderedTransition(travelling);
     };
 
-    service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(getDoorState);
+    service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(this.answering(getDoorState));
 
-    service.getCharacteristic(this.hap.Characteristic.TargetDoorState).onSet(async (value: CharacteristicValue) => {
+    /* The target HomeKit is shown is the one it last asked for or the one the evidence last confirmed, both of them written to the characteristic, so the reader
+     * answers that store...and a store with nothing written to it yet answers the evidence.
+     */
+    const target = service.getCharacteristic(this.hap.Characteristic.TargetDoorState);
+
+    target.onGet(this.answering(() => target.value ?? this.#doorStateFromEvidence().target));
+
+    target.onSet(async (value: CharacteristicValue) => {
 
       const isUaGate = this.uda.device_type === "UGT";
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
@@ -1338,7 +1351,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // ObstructionDetected is required - we always report no obstruction.
-    service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(() => false);
+    service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(this.answering(() => false));
   }
 
   // Configure a switch to manually trigger a doorbell ring event for HomeKit. A repeat pass finds the switch dressed and leaves it, which is what keeps a pending
@@ -1365,7 +1378,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The switch mirrors ring truth: on while the doorbell is ringing, off while it is quiet.
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.doorbellRingRequestId !== null);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.doorbellRingRequestId !== null));
 
     // The manual direction: with an official path the switch rings and cancels the doorbell, and without one it only reflects ring events. Whatever the outcome,
     // every write schedules exactly one wake that re-reads ring truth at fire time and settles the switch back onto the mirror...the controller's own ring and
@@ -1461,7 +1474,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The trigger mirrors the lock: on while anything but secured, off while secured.
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED));
 
     // The switch drives the lock through the hub lock command, and a refused command puts the switch back.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
@@ -1534,7 +1547,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The trigger mirrors the side door's lock: on while anything but secured, off while secured.
-    service.getCharacteristic(this.hap.Characteristic.On).onGet(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED);
+    service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED));
 
     // The switch drives the side door lock through the side door lock command, and a refused command puts the switch back.
     service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {

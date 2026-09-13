@@ -6,7 +6,8 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, composeSignals, debugGatedLog, mqttTopic, prefixedLog, sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
+import { TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog, sanitizeName, setAccessoryName,
+  updateServices } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -118,6 +119,13 @@ export abstract class AccessBase {
 export abstract class AccessDevice extends AccessBase {
 
   public accessory!: AccessAccessory;
+  /* This device's Not Responding rule, bound once at construction from the availability composition below and read afresh on every wrapped read, so a device that
+   * cannot be reached refuses on the very next read and one that comes back answers on it. Every readable characteristic a subclass wires goes through it, which
+   * leaves exactly one place that decides whether this device can answer at all, while the availability push and the gate the door commands open with read that
+   * same composition, so what HomeKit is shown, what it is refused, and what a command refuses on agree by construction. The error class comes from the runtime
+   * HAP namespace the plugin holds, because the library carries no HAP dependency of its own.
+   */
+  protected readonly answering: ReturnType<typeof notResponding>;
   public hints: AccessHints;
   // Every handler this device registered, by the event name it answers to. One map and one cleanup loop serve both the socket's packets and the webhook rail's
   // deliveries, because what teardown owes each of them is identical.
@@ -169,6 +177,8 @@ export abstract class AccessDevice extends AccessBase {
     super(controller);
 
     this.#deviceController = new AbortController();
+    // The predicate closes over this device rather than capturing a value, so every wrapped read consults the composition as it stands at that moment.
+    this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.isReachable });
     // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
     // states each one the user's settings actually decide.
     this.hints = { hasSideDoor: false, hasSideDoorDps: false, logDoorbell: false, logDps: false, logLock: false, logRel: false, logRen: false,
@@ -408,9 +418,10 @@ export abstract class AccessDevice extends AccessBase {
    * own online flags at whatever they last said, so the device-scope read below cannot be trusted on its own while the controller is unreachable. The device's own
    * state gates it from there.
    *
-   * This is the plugin's single availability composition. Every StatusActive carrier reads it and so does the gate the door commands open with, so what HomeKit is
-   * shown and what an operation refuses on answer one question. The library deliberately ships no composition of its own, because last-known device state is all it
-   * can honestly own...composing per-operation reachability is the consumer's business, and this is where the consumer does it.
+   * This is the plugin's single availability composition. Every StatusActive carrier reads it, every readable characteristic answers by it through the rule bound
+   * above, and so does the gate the door commands open with, so what HomeKit is shown, what it is refused, and what an operation refuses on answer one question.
+   * The library deliberately ships no composition of its own, because last-known device state is all it can honestly own...composing per-operation reachability is
+   * the consumer's business, and this is where the consumer does it.
    */
   public get isReachable(): boolean {
 
