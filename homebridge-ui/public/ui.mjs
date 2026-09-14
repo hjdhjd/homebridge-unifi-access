@@ -5,19 +5,12 @@
 "use strict";
 
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries } from "homebridge-plugin-utils/featureOptions.js";
-import { classifyProbeResponse, controllers, controllersAwaitingMigration, hasValidIdentity, makeAccessConfig, primaryController, withControllerSaved,
-  withPrimaryIdentity } from "./access-config.mjs";
+import { classifyProbeResponse, controllers, controllersAwaitingMigration, deviceListResult, hasValidIdentity, makeAccessConfig, primaryController,
+  staleSelectionVerdict, withControllerSaved, withPrimaryIdentity } from "./access-config.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
-
-/* The bound in seconds on the option-catalog fetch below. The bound exists so a bridge call that never settles rejects rather than wedging the cached promise for the
- * life of the session. The trade it carries: a fetch that is legitimately slow but would eventually have settled costs a retry cycle rather than resolving, which is
- * cheap beside the permanent wedge the bound prevents, because the cache clears on rejection and a later read refetches fresh. It is deliberately its own constant
- * rather than the wiring bound below, so the inner fetch and the envelope around it cannot expire together.
- */
-const CATALOG_DEADLINE = 5;
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
  * then fetches the controller's information and topology documents, so a genuinely worst-case first connection runs past it. PROBE_DEADLINE admits the healthy
@@ -49,41 +42,16 @@ const TOKEN_ONLY_NOTICE = "These devices are listed through this controller's AP
 // devices its kept probe answer listed; the shared push event and view route belong to homebridge-plugin-utils and arrive through the imported panel component.
 const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 
-/* The option catalog, fetched once per session from the plugin's own UI server (a local request to /getOptions, never a cloud call). The framework fetches the same
- * endpoint for its own catalog on every show cycle; the two reads are independent by design, since the framework exposes no handle to its copy. The cached promise is
- * cleared on failure so a later read retries rather than holding a transient fault for the session, and the bound above is what makes a call that never answers into
- * a failure the clear can act on.
- *
- * What is cached is the framework's own catalog INDEX rather than the raw response. The index carries the served categories and options verbatim alongside the
- * derived lookups the entry enumerator needs, so one value serves the engine the migration builds and the grammar its settings sweep reads.
- */
-let catalogPromise = null;
+// The configuration interpreters that need the served catalog, built over the framework's own page-lifetime read of it. Every caller reaches them through here
+// rather than holding an instance, so a removal that happens long after the load-time wiring builds against the same catalog the boot read: the accessor memoizes
+// one fetch for the page, bounds it, validates its shape once, and clears its memo on rejection so a later read retries rather than holding a transient fault for
+// the session. The index is rebuilt per call because it is a pure walk over a fixed catalog and its readers are the load-time wiring and a removal, each rare.
+const accessConfig = async () => {
 
-const getCatalog = () => {
+  const { categories, options } = await ui.featureOptions.catalog();
 
-  catalogPromise ??= withDeadline({ promise: homebridge.request("/getOptions"), seconds: CATALOG_DEADLINE }).then((response) => {
-
-    // A response without the catalog shape the server publishes is a failure, not a default. Shaping it into an empty catalog would let the migration read every
-    // option as unconfigured and compose entries against a catalog that never described them, so a malformed response throws and the wiring declines instead.
-    if(!Array.isArray(response?.categories) || !response.categories.length || !response?.options || (typeof response.options !== "object")) {
-
-      throw new Error("Received a malformed response from the plugin option catalog.");
-    }
-
-    return buildCatalogIndex(response.categories, response.options);
-  }).catch((error) => {
-
-    catalogPromise = null;
-
-    throw error;
-  });
-
-  return catalogPromise;
+  return makeAccessConfig({ FeatureOptions, catalog: buildCatalogIndex(categories, options), enumerateConfiguredEntries });
 };
-
-// The configuration interpreters that need the served catalog, built against the catalog this session already fetched. Every caller reaches them through here rather
-// than holding an instance, so a removal that happens long after the load-time wiring still builds against the same cached catalog.
-const accessConfig = async () => makeAccessConfig({ FeatureOptions, catalog: await getCatalog(), enumerateConfiguredEntries });
 
 /* Execute our first run screen until the primary controller carries both of the things the plugin needs of it. The two are asked separately because the plugin's own
  * configuration gate asks them separately: an address is where to connect, and an identity is how, and a configuration missing either is one the platform skips.
@@ -189,12 +157,13 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
       return null;
     }
 
-    // Couldn't reach the Access controller. The two guidance sentences frame the failure and the controller-sourced detail arrives on the probe's own verdict,
-    // rendered as text so it is never interpreted as markup.
+    // Couldn't reach the Access controller. The verdict names which failure this was in its own headline, and the second line is its own guidance where it has one
+    // and the card's own sentence where it does not; the controller-sourced detail arrives on the verdict too, rendered as text so it is never interpreted as
+    // markup.
     if(probe.kind === "error") {
 
-      verdict.render({ detail: probe.message, lines: [ "Unable to connect to the UniFi Access controller.",
-        "Please check your controller address and sign-in details." ], tone: "text-danger" });
+      verdict.render({ detail: probe.message, lines: [ probe.headline,
+        probe.guidance ?? "Please check your controller address and sign-in details." ], tone: "text-danger" });
 
       return null;
     }
@@ -339,6 +308,19 @@ const sendStatusContext = async () => {
   }
 };
 
+// The sidebar's own order for the groups this page assigns: the hubs first, then the readers that hang off them.
+const HUB_GROUP = "Hubs";
+const READER_GROUP = "Readers";
+const SIDEBAR_GROUP_ORDER = [ HUB_GROUP, READER_GROUP ];
+
+// A group's place in the order above, with a group the order does not name ranking after every group it does.
+const sidebarGroupRank = (group) => {
+
+  const rank = SIDEBAR_GROUP_ORDER.indexOf(group);
+
+  return (rank === -1) ? SIDEBAR_GROUP_ORDER.length : rank;
+};
+
 /* Add the fields the webUI framework renders from, and mark the controller entry with the address the plugin reached it at. It touches the device records and
  * nothing on the page, which is what lets both writers into the map above run it: the device view's own fetch, and a save re-seeding from the answer its validation
  * just received. One helper is what keeps those two from processing the same list into two different shapes.
@@ -367,7 +349,7 @@ const processDeviceList = ({ address, devices }) => {
       device.sidebarGroup = "hidden";
     }
 
-    device.sidebarGroup ??= device.capabilities.includes("is_hub") ? "Hubs" : "Readers";
+    device.sidebarGroup ??= device.capabilities.includes("is_hub") ? HUB_GROUP : READER_GROUP;
 
     /* Stamp the configured address onto every record, which is what lets the docked editor find the configuration item a selection belongs to. The serialNumber the
      * framework correlates on is a hardware identity, and a configuration file records the address the plugin connects to and never a hardware identity, so the two
@@ -437,12 +419,6 @@ const getControllers = ({ config }) => {
   };
 };
 
-/* Map a probe answer onto the device list and connection outcome the framework's own hook contract carries. The verdict already separates the two: a success carries
- * its devices and an empty message, a failure carries no devices and the reason. Both successes therefore travel the same way, so a healthy token-only controller
- * populates the sidebar exactly as a credentialed one does and no failure surface is ever reached for it.
- */
-const asDeviceListResult = (answer) => ({ devices: answer.devices, error: answer.message });
-
 // Return the list of devices associated with a given Access controller, paired with the connection outcome. The framework injects the live platform config alongside
 // the selected controller, so we can recover the selected controller's identity (which the sidebar entries deliberately omit) without reaching for the config
 // ourselves. A connection failure travels back on the result rather than through a separate request.
@@ -456,13 +432,13 @@ const getDevices = async (selectedController, { config }) => {
     return { devices: [], error: "" };
   }
 
-  // Find the entry in our plugin configuration. A sidebar entry can outlive a Settings-tab edit that removed its controller, so a miss is a carried failure with an
-  // actionable message rather than a silent empty result that would render nothing the user can act on.
+  // Find the entry in our plugin configuration. A sidebar entry can outlive a Settings-tab edit that removed its controller, so a miss is a carried failure whose
+  // copy names what became of the entry and what to do about it, rather than a silent empty result that would render nothing the user can act on.
   const controller = controllers(config).find((c) => c.address === selectedController.serialNumber);
 
   if(!controller) {
 
-    return { devices: [], error: "The selected controller is no longer in the plugin configuration." };
+    return deviceListResult(staleSelectionVerdict());
   }
 
   const cached = devicesByAddress.get(controller.address);
@@ -473,7 +449,7 @@ const getDevices = async (selectedController, { config }) => {
 
     patchControllerLabel({ address: controller.address, devices: cached.devices });
 
-    return asDeviceListResult(cached);
+    return deviceListResult(cached);
   }
 
   // The generation this fetch belongs to, read before the call and checked against after it, so an answer that an invalidation has overtaken can complete without
@@ -498,7 +474,7 @@ const getDevices = async (selectedController, { config }) => {
     void sendStatusContext();
   }
 
-  return asDeviceListResult(answer);
+  return deviceListResult(answer);
 };
 
 // Only show feature options that are valid for the capabilities of this device. Every read of the metadata channel is guarded at each step: the channel itself and
@@ -782,7 +758,7 @@ const saveController = async ({ card, originalAddress }) => {
       return null;
     }
 
-    await homebridge.savePluginConfig();
+    await session.persist();
   } catch(err) {
 
     card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
@@ -846,7 +822,7 @@ const removeController = async ({ address, card, macs }) => {
       return;
     }
 
-    await homebridge.savePluginConfig();
+    await session.persist();
   } catch(err) {
 
     card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to remove this controller."], tone: "text-danger" });
@@ -1086,6 +1062,12 @@ const featureOptionsParams = {
   sidebar: {
 
     controllerLabel: "Access Controllers",
+
+    /* Where each group of the device list sits: the hubs first, then the readers that hang off them. The framework hands this comparator only the names that render
+     * as sections, so neither a controller's own group nor the reserved hidden group ever reaches it, and a group the order above does not name sorts after both of
+     * the named ones by locale.
+     */
+    groupOrder: (a, b) => (sidebarGroupRank(a) - sidebarGroupRank(b)) || a.localeCompare(b),
 
     /* The refresh action the framework docks on the controller-list heading. Reloading the world is one generation bump and one cleared map: the handler is
      * invalidation and nothing more, because the framework owns everything around it - the re-entry through its own show(), the boot affordance that clothes the
@@ -1432,7 +1414,7 @@ const wireAccessConfig = async () => {
     // rather than forced, which leaves the migration staged for the user's own save - the weaker outcome, and the honest one.
     if(!wiringSignal.aborted) {
 
-      await homebridge.savePluginConfig();
+      await session.persist();
     }
   }
 };

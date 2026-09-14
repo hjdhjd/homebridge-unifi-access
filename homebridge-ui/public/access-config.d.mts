@@ -46,14 +46,39 @@ export interface AccessIdentity {
 }
 
 /**
- * The UI server's device probe, read into the one verdict every consumer branches on. `kind` is the outcome, `devices` is the list either success answered with -
- * the topology's devices led by the controller itself, or the official API's adopted inventory - and `message` is the user-facing failure text, empty on a success.
+ * The UI server's device probe, read into the one verdict every consumer branches on. A success carries the list it answered with - the topology's devices led by
+ * the controller itself, or the official API's adopted inventory - and an empty message; a failure carries no devices, the user-facing reason, the headline the
+ * surfaces render it under, and a guidance line where the surfaces' own standing guidance would send the user after the wrong thing.
  */
-export interface AccessProbeVerdict {
+export interface AccessProbeFailure {
 
   devices: Record<string, unknown>[];
-  kind: "connected" | "error" | "token-only";
+  guidance?: string;
+  headline: string;
+  kind: "error";
   message: string;
+}
+
+export interface AccessProbeSuccess {
+
+  devices: Record<string, unknown>[];
+  kind: "connected" | "token-only";
+  message: string;
+}
+
+export type AccessProbeVerdict = AccessProbeFailure | AccessProbeSuccess;
+
+/**
+ * A device-list outcome as the framework's hook contract carries it: the devices, the failure text (empty on a success), and only the copy members the outcome
+ * carries - the notice for a reachable controller with nothing to list, or a failure's headline and guidance.
+ */
+export interface AccessDeviceListResult {
+
+  devices: Record<string, unknown>[];
+  emptyMessage?: string;
+  error: string;
+  guidance?: string;
+  headline?: string;
 }
 
 /**
@@ -75,8 +100,20 @@ export interface AccessConfigInterpreter {
   withControllerRemoved(config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }): AccessConfigPatch;
 }
 
+/** The headline a controller the plugin could not reach is rendered under. */
+export declare const CONNECTION_FAILURE_HEADLINE: string;
+
 /** The keys a controllers[] item converges to - every controller property except the ones that migrate into feature options. */
 export declare const CONTROLLER_KEYS: readonly [ "address", "name", "password", "tokens", "username", "verifyTls" ];
+
+/** What to do about a UI server answering in a shape it never writes. */
+export declare const SERVER_FAILURE_GUIDANCE: string;
+
+/** The headline a UI server answering in a shape it never writes is rendered under. */
+export declare const SERVER_FAILURE_HEADLINE: string;
+
+/** The notice for a controller reachable through its API token alone whose console lists nothing adopted. */
+export declare const TOKEN_ONLY_EMPTY_NOTICE: string;
 
 /** Read the UI server's kind-tagged device probe into the verdict every consumer branches on. */
 export declare const classifyProbeResponse: (response?: unknown) => AccessProbeVerdict;
@@ -86,6 +123,9 @@ export declare const controllers: (config?: AccessConfig) => AccessControllerCon
 
 /** The configured controllers still carrying a per-controller legacy property that a probe could resolve a MAC address for. */
 export declare const controllersAwaitingMigration: (config?: AccessConfig) => AccessIdentity[];
+
+/** Map a probe verdict onto the device list and connection outcome the framework's hook contract carries, with each outcome's own copy beside it. */
+export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDeviceListResult;
 
 /** Whether a controller item describes an identity the plugin can connect with, mirroring composeConnectIdentity's verdict exactly. */
 export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
@@ -99,11 +139,14 @@ export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
  *
  * @returns The migration and the controller removal.
  */
-export declare const makeAccessConfig: ({ FeatureOptions, catalog, enumerateConfiguredEntries }:
-  { FeatureOptions: typeof FeatureOptions; catalog: CatalogIndex; enumerateConfiguredEntries: typeof enumerateConfiguredEntries }) => AccessConfigInterpreter;
+export declare const makeAccessConfig: (injected: { FeatureOptions: typeof FeatureOptions; catalog: CatalogIndex;
+  enumerateConfiguredEntries: typeof enumerateConfiguredEntries }) => AccessConfigInterpreter;
 
 /** The primary controller entry (the first), or undefined on a fresh configuration. */
 export declare const primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;
+
+/** The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call. */
+export declare const staleSelectionVerdict: () => AccessProbeFailure;
 
 /**
  * The controllers patch that writes one controller's identity. An `originalAddress` naming a configured item rewrites that item while carrying every other key it

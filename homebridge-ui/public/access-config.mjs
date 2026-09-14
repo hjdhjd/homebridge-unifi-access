@@ -74,6 +74,31 @@ export const hasValidIdentity = (controller) => {
   return Boolean(token?.length);
 };
 
+// The headline for a controller the plugin could not reach, rendered on the connection card's result line and as the framework's error-view headline.
+export const CONNECTION_FAILURE_HEADLINE = "Unable to connect to the UniFi Access controller.";
+
+// The headline for a UI server answering in a shape it never writes, rendered on the card's result line and as the framework's error-view headline.
+export const SERVER_FAILURE_HEADLINE = "The plugin's UI server did not answer as expected.";
+
+// What to do about a UI server answering in a shape it never writes, rendered beneath the headline above on the card and in the error view.
+export const SERVER_FAILURE_GUIDANCE = "Reload this page. If it keeps happening, restart Homebridge and check its log for the reason.";
+
+// The headline for a sidebar entry whose controller left the configuration, rendered as the framework's error-view headline.
+const STALE_SELECTION_HEADLINE = "This controller is no longer in the plugin configuration.";
+
+// Why a sidebar entry cannot be listed, rendered as the error view's detail beneath the headline above.
+const STALE_SELECTION_MESSAGE = "Its entry left the configuration after the sidebar was built.";
+
+// What to do about a sidebar entry whose controller left the configuration, rendered as the error view's guidance.
+const STALE_SELECTION_GUIDANCE = "Refresh the controller list to take it off the sidebar.";
+
+/* The notice for a controller reachable through its API token alone whose console lists nothing adopted, rendered in the options pane in place of the option table.
+ * The Settings tab is what it names because that is the one surface able to take the credentials in this state: the page docks its connection editor only with a
+ * device in view, and this controller has none to dock it under.
+ */
+export const TOKEN_ONLY_EMPTY_NOTICE = "This controller answered through its API token alone, and the Access console lists no adopted devices for it. To bring " +
+  "its doors and devices into HomeKit, add a local user's username and password for this controller on the Settings tab.";
+
 /* Read the UI server's device probe, which is the ONE place the three-state response protocol is interpreted.
  *
  * The server answers a kind-tagged union rather than a device list the browser has to interpret, because the two successful outcomes differ in what a user can do
@@ -83,7 +108,9 @@ export const hasValidIdentity = (controller) => {
  *
  * The verdict carries the device list, the outcome tag, and the failure text together, so each consumer reads the one field it needs without re-deriving the
  * outcome: the connection editor treats anything but a failure as a valid login, while the device view hands the list and the text straight to the framework. A
- * response in a shape the server never writes reads as a failure, because guessing at it is how a malformed answer becomes a silently empty page.
+ * response in a shape the server never writes reads as a failure, because guessing at it is how a malformed answer becomes a silently empty page. A failure
+ * verdict also carries the headline its surfaces render it under, and a guidance line only where each surface's own standing guidance would send the user after the
+ * wrong thing.
  */
 export const classifyProbeResponse = (response) => {
 
@@ -94,16 +121,55 @@ export const classifyProbeResponse = (response) => {
     case "token-only":
 
       return Array.isArray(response.devices) ? { devices: response.devices, kind: response.kind, message: "" } :
-        { devices: [], kind: "error", message: "The plugin's UI server answered a connection without a device list." };
+        { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
+          message: "The plugin's UI server answered a connection without a device list." };
 
     case "error":
 
-      return { devices: [], kind: "error", message: (typeof response.message === "string") ? response.message : "" };
+      return { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error", message: (typeof response.message === "string") ? response.message : "" };
 
     default:
 
-      return { devices: [], kind: "error", message: "The plugin's UI server answered in an unrecognized shape." };
+      return { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
+        message: "The plugin's UI server answered in an unrecognized shape." };
   }
+};
+
+/* The verdict of a sidebar entry whose controller left the configuration after the sidebar was built. It is composed here beside the probe verdicts because it is
+ * one: every device-list outcome the page hands the framework goes through the one result composition below, so the copy for this failure lives with the copy for
+ * every other. Fresh per call, so no two results share a device array.
+ */
+export const staleSelectionVerdict = () => ({ devices: [], guidance: STALE_SELECTION_GUIDANCE, headline: STALE_SELECTION_HEADLINE, kind: "error",
+  message: STALE_SELECTION_MESSAGE });
+
+/* Map a probe verdict onto the device list and connection outcome the framework's own hook contract carries, with each outcome's own copy beside it. A success
+ * carries its devices and an empty message, a failure carries no devices, its reason, its headline, and its guidance where it has one, and the one success with
+ * nothing to list - a token-only controller whose console has no adopted devices - carries the notice that declares it, which the framework renders in place of an
+ * option table whose entries no runtime read could resolve. Only the members an outcome carries are written, because an absent member is how the contract says the
+ * framework's own wording applies.
+ */
+export const deviceListResult = (verdict) => {
+
+  const result = { devices: verdict.devices, error: verdict.message };
+
+  if(verdict.kind === "error") {
+
+    result.headline = verdict.headline;
+
+    if(verdict.guidance !== undefined) {
+
+      result.guidance = verdict.guidance;
+    }
+
+    return result;
+  }
+
+  if((verdict.kind === "token-only") && !verdict.devices.length) {
+
+    result.emptyMessage = TOKEN_ONLY_EMPTY_NOTICE;
+  }
+
+  return result;
 };
 
 /* Compose one controller item from a base item and the identity an editor is writing onto it. Every key the base holds carries through, which is what keeps a

@@ -11,7 +11,8 @@
  * migrated configuration runs on the same effective values the legacy one did.
  */
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
-import { CONTROLLER_KEYS, classifyProbeResponse, controllersAwaitingMigration, hasValidIdentity, makeAccessConfig, withControllerSaved, withPrimaryIdentity }
+import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, TOKEN_ONLY_EMPTY_NOTICE, classifyProbeResponse,
+  controllersAwaitingMigration, deviceListResult, hasValidIdentity, makeAccessConfig, staleSelectionVerdict, withControllerSaved, withPrimaryIdentity }
   from "../homebridge-ui/public/access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, mqttConnectionSettings } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
@@ -272,18 +273,69 @@ test("the probe verdict reads all three response kinds and refuses a shape the s
   const devices = [{ name: "Front Door" }];
 
   assert.deepEqual(classifyProbeResponse({ devices, kind: "connected" }), { devices, kind: "connected", message: "" },
-    "a credentialed connect answers its device list");
+    "a credentialed connect answers its device list, and carries no display copy, so every surface keeps the wording it wrote for a success");
   assert.deepEqual(classifyProbeResponse({ devices, kind: "token-only" }), { devices, kind: "token-only", message: "" },
     "a token-only connect answers the official inventory, so its devices reach the page exactly as a credentialed connect's do");
   assert.equal(classifyProbeResponse({ devices: [], kind: "token-only" }).kind, "token-only",
     "and a token-only controller with nothing adopted is still a success rather than a failure");
-  assert.deepEqual(classifyProbeResponse({ kind: "error", message: "Invalid credentials." }), { devices: [], kind: "error", message: "Invalid credentials." },
-    "a failure carries the controller's own reason back with it");
+
+  const reported = classifyProbeResponse({ kind: "error", message: "Invalid credentials." });
+
+  assert.equal(reported.kind, "error", "a controller that refused the sign-in is a failure");
+  assert.deepEqual(reported, { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error", message: "Invalid credentials." },
+    "a failure carries the controller's own reason under the headline that names which failure this was, and no guidance, so each surface keeps its standing line");
 
   for(const malformed of [ undefined, {}, { kind: "connected" }, { kind: "token-only" }, { kind: "nonsense" }, "a string" ]) {
 
-    assert.equal(classifyProbeResponse(malformed).kind, "error", "a response in a shape the server never writes reads as a failure rather than an empty page");
+    const verdict = classifyProbeResponse(malformed);
+
+    assert.equal(verdict.kind, "error", "a response in a shape the server never writes reads as a failure rather than an empty page");
+    assert.equal(verdict.headline, SERVER_FAILURE_HEADLINE, "and it names the UI server rather than the controller, because the controller is not what failed");
+    assert.equal(verdict.guidance, SERVER_FAILURE_GUIDANCE, "and it says what to do about a server that answered in a shape it never writes");
   }
+});
+
+test("the device-list result carries each outcome's own copy and nothing else", () => {
+
+  const devices = [{ name: "Front Door" }];
+
+  assert.deepEqual(deviceListResult(classifyProbeResponse({ devices, kind: "connected" })), { devices, error: "" },
+    "a credentialed connect hands the framework its devices and no copy at all");
+  assert.deepEqual(deviceListResult(classifyProbeResponse({ devices, kind: "token-only" })), { devices, error: "" },
+    "a token-only controller with devices to list reads exactly as a credentialed one");
+
+  const nothingAdopted = deviceListResult(classifyProbeResponse({ devices: [], kind: "token-only" }));
+
+  assert.deepEqual(nothingAdopted, { devices: [], emptyMessage: TOKEN_ONLY_EMPTY_NOTICE, error: "" },
+    "a reachable controller whose console lists nothing declares that outcome with the notice the framework renders in place of the option table");
+  assert.deepEqual(Object.keys(nothingAdopted).sort(), [ "devices", "emptyMessage", "error" ], "and it carries no failure copy, because nothing failed");
+
+  const reported = classifyProbeResponse({ kind: "error", message: "Invalid credentials." });
+  const reportedResult = deviceListResult(reported);
+
+  assert.equal(reported.kind, "error", "the controller's own refusal is a failure verdict");
+  assert.deepEqual(Object.keys(reportedResult).sort(), [ "devices", "error", "headline" ],
+    "a connection failure carries its headline and no guidance, so the page's configured line is what the error view sends the user after");
+  assert.equal(reportedResult.error, reported.message, "the failure text is the controller's own reason");
+  assert.equal(reportedResult.headline, reported.headline, "and the headline is the one the verdict named");
+
+  const malformed = classifyProbeResponse({ kind: "nonsense" });
+  const malformedResult = deviceListResult(malformed);
+
+  assert.equal(malformed.kind, "error", "a shape the server never writes is a failure verdict");
+  assert.deepEqual(Object.keys(malformedResult).sort(), [ "devices", "error", "guidance", "headline" ],
+    "a UI server failure carries both of its own lines, because the configured guidance would send the user to a connection editor for something the connection " +
+    "did not cause");
+  assert.equal(malformedResult.guidance, malformed.guidance, "the guidance is the one the verdict named");
+  assert.equal(malformedResult.headline, malformed.headline, "as is the headline");
+
+  const stale = deviceListResult(staleSelectionVerdict());
+
+  assert.deepEqual(Object.keys(stale).sort(), [ "devices", "error", "guidance", "headline" ],
+    "a sidebar entry whose controller left the configuration carries all three lines of its own copy");
+  assert.ok(stale.error.length, "including the reason, which is what the error view renders beneath the headline");
+  assert.notEqual(staleSelectionVerdict().devices, staleSelectionVerdict().devices,
+    "and every call composes a fresh verdict, so no two results share a device array a consumer could mutate");
 });
 
 test("a credential edit carries every other key the item holds", () => {
