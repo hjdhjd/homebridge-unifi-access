@@ -10,11 +10,11 @@
  * spelling of it. The closing round trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a
  * migrated configuration runs on the same effective values the legacy one did.
  */
+import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, mqttConnectionSettings,
+  normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse, deviceListResult,
   hasValidIdentity, makeAccessConfig, staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
-import { FeatureOptions, buildCatalogIndex, enumerateScopeEntries, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId }
-  from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -57,9 +57,10 @@ const ADDRESS_TOPIC = "unifi/gate";
 // The catalog index the webUI hands the interpreters, built from the real served catalog exactly as the browser builds it.
 const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 
-// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index, the framework's own scope enumerator,
-// and its scope-identifier repair.
-const accessConfig = makeAccessConfig({ FeatureOptions, catalog, enumerateScopeEntries, scopeSafeId });
+// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index and the builder that makes one, the
+// framework's own two entry enumerators, its list formatter, and its scope-identifier repair.
+const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
+  scopeSafeId });
 
 // The interpreters the suite reads off that holder, named here once so every arm below reads them as plain functions.
 const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
@@ -450,6 +451,96 @@ test("a save that carries no token writes no tokens member at all, in every shap
   }
 });
 
+// The members each list carries, in the order a composed list reads, and the domain every assertion below resolves a composed list against.
+const SENSOR_MEMBERS = [ "DPS", "REL", "REN", "REX", "SideDoorDPS" ];
+const EVENT_MEMBERS = [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ];
+
+/* What a list resolves to at a scope, read through the served engine exactly as the plugin's own device read takes it: the same domain, and the same
+ * default-when-unset reading, so what these assertions prove is what a hub would carry.
+ *
+ * @param options - The configured entries the patch produced.
+ * @param option  - The list to resolve.
+ * @param id      - The device or controller scope to resolve at, or undefined for the global reading.
+ *
+ * @returns The members the list selects there.
+ */
+function selects(options: string[] | undefined, option: string, id?: string): readonly string[] {
+
+  return engineWith(options).valueList({ defaultWhenUnset: true, device: id, domain: (option === "Hub.Sensors") ? SENSOR_MEMBERS : EVENT_MEMBERS, option });
+}
+
+test("a globally disabled sensor composes the list of everything else, and the retired entry leaves", () => {
+
+  const patch = migrated({ options: ["Disable.Hub.DPS"] });
+
+  assert.deepEqual(patch.options, ["Enable.Hub.Sensors=REL,REN,REX,SideDoorDPS"],
+    "one member's switch turned off composes the family's list carrying every other member");
+  assert.deepEqual(selects(patch.options, "Hub.Sensors"), [ "REL", "REN", "REX", "SideDoorDPS" ], "and the composed list resolves to exactly those members");
+  assert.deepEqual(selects(patch.options, "Log.Events"), EVENT_MEMBERS, "while the family nothing was configured for composes nothing and still reads whole");
+});
+
+test("a scoped logging category turned off composes that scope's list alone", () => {
+
+  const patch = migrated({ options: ["Disable.Log.Lock." + CONTROLLER_MAC] });
+
+  assert.deepEqual(selects(patch.options, "Log.Events", CONTROLLER_MAC), [ "Doorbell", "DPS", "REL", "REN", "REX" ],
+    "the scope the entry named composes a list less the category it turned off");
+  assert.deepEqual(selects(patch.options, "Log.Events"), EVENT_MEMBERS, "and the global reading is untouched, because nothing was configured there");
+  assert.deepEqual(selects(patch.options, "Log.Events", OTHER_MAC), EVENT_MEMBERS, "as is every other scope's");
+});
+
+test("a member re-enabled at one scope over a global disable keeps that scope every member", () => {
+
+  const patch = migrated({ options: [ "Disable.Hub.DPS", "Enable.Hub.DPS." + DEVICE_MAC ] });
+
+  assert.ok(patch.options?.includes("Enable.Hub.Sensors." + DEVICE_MAC.toLowerCase() + "=" + ALL_CHOICES),
+    "a scope whose composition is every member stores the all-members form the catalog registers, rather than restating the whole list");
+  assert.deepEqual(selects(patch.options, "Hub.Sensors", DEVICE_MAC), SENSOR_MEMBERS, "so the device keeps the sensor the global entry took away");
+  assert.deepEqual(selects(patch.options, "Hub.Sensors"), [ "REL", "REN", "REX", "SideDoorDPS" ], "while every other hub reads the global composition");
+});
+
+test("a retired entry is read and dropped in any spelling the grammar accepts", () => {
+
+  // The lower-cased dotted spelling is one a hand-authored 1.x file carries, and the drop reads through the framework's own enumerator rather than by matching
+  // text, so it is caught by the same reading that composed from it.
+  const patch = migrated({ options: [("Disable.Hub.REX." + CONTROLLER_MAC).toLowerCase()] });
+
+  assert.deepEqual(selects(patch.options, "Hub.Sensors", CONTROLLER_MAC), [ "DPS", "REL", "REN", "SideDoorDPS" ], "the entry is read at the scope it names");
+
+  for(const entry of patch.options ?? []) {
+
+    assert.ok(!entry.toLowerCase().includes("hub.rex"), "and no retired entry survives the pass: " + entry);
+  }
+});
+
+test("a configuration carrying no retired entry composes nothing at all", () => {
+
+  assert.equal(accessConfig.migrate({ options: ["Enable.Hub.Sensors=REL,REN"] }, UNRESOLVED), null,
+    "a configuration already carrying its lists has nothing left to find, so a later open stages no patch");
+  assert.equal(accessConfig.migrate({ options: [] }, UNRESOLVED), null, "and neither does one carrying no entries at all");
+});
+
+test("a scope restating what it would inherit composes no entry of its own", () => {
+
+  const patch = migrated({ options: [ "Disable.Hub.DPS", "Disable.Hub.DPS." + DEVICE_MAC ] });
+
+  assert.deepEqual(patch.options, ["Enable.Hub.Sensors=REL,REN,REX,SideDoorDPS"],
+    "the scoped entry composes the same members the global one does, so emitting a scoped list would churn the file for nothing");
+  assert.deepEqual(selects(patch.options, "Hub.Sensors", DEVICE_MAC), [ "REL", "REN", "REX", "SideDoorDPS" ], "and the device still reads what it read before");
+});
+
+test("the side door's sensor and the doorbell category compose onto their own families", () => {
+
+  const sensors = migrated({ options: ["Disable.Hub.SideDoor.DPS"] });
+
+  assert.deepEqual(selects(sensors.options, "Hub.Sensors"), [ "DPS", "REL", "REN", "REX" ],
+    "a name whose own prefix is another catalog option is still read as the option it is");
+
+  const events = migrated({ options: ["Disable.Log.Doorbell"] });
+
+  assert.deepEqual(selects(events.options, "Log.Events"), [ "DPS", "Lock", "REL", "REN", "REX" ], "and the doorbell category composes onto the logging list");
+});
+
 test("an address change edits that item rather than adding a second one beside it, and an add appends", () => {
 
   const moved = withControllerSaved({ controllers: [{ ...CREDENTIALS }] },
@@ -518,7 +609,7 @@ test("the first-run save composes a complete identity as one patch and composes 
 test("removal drops the item its address names, and an empty MAC set leaves the configured options untouched", () => {
 
   const other = { address: "10.0.0.2", tokens: TOKENS };
-  const patch = accessConfig.withControllerRemoved({ controllers: [ { ...CREDENTIALS }, other ], options: ["Enable.Log.Lock." + CONTROLLER_MAC] },
+  const patch = accessConfig.withControllerRemoved({ controllers: [ { ...CREDENTIALS }, other ], options: ["Enable.Hub.Doorbell." + CONTROLLER_MAC] },
     { address: ADDRESS });
 
   assert.deepEqual(patch.controllers, [other], "the item the address names is gone and every other item stands");
@@ -532,13 +623,13 @@ test("the sweep strips every spelling the framework's own enumerator resolves to
    * the bare enable and the bare disable, the canonical entry whose value sits behind the payload delimiter, and the legacy dot spelling the parser still accepts
    * from configurations hand-authored before that delimiter existed.
    */
-  const bareDisable = "Disable.Log.Lock." + DEVICE_MAC;
-  const bareEnable = "Enable.Log.Lock." + CONTROLLER_MAC;
+  const bareDisable = "Disable.Hub.Doorbell." + DEVICE_MAC;
+  const bareEnable = "Enable.Hub.Doorbell." + CONTROLLER_MAC;
   const legacyPayload = "Enable.Mqtt.Topic." + CONTROLLER_MAC + "." + LEGACY_TOPIC;
   const lowerCased = "enable.mqtt.url." + CONTROLLER_MAC.toLowerCase() + "=" + LEGACY_BROKER;
 
-  assert.equal(engineWith([bareEnable]).test("Log.Lock", undefined, CONTROLLER_MAC), true, "the bare enable addresses the controller's own scope");
-  assert.equal(engineWith([bareDisable]).test("Log.Lock", DEVICE_MAC, CONTROLLER_MAC), false, "the bare disable addresses the device's own scope");
+  assert.equal(engineWith([bareEnable]).test("Hub.Doorbell", undefined, CONTROLLER_MAC), true, "the bare enable addresses the controller's own scope");
+  assert.equal(engineWith([bareDisable]).test("Hub.Doorbell", DEVICE_MAC, CONTROLLER_MAC), false, "the bare disable addresses the device's own scope");
   assert.equal(engineWith([lowerCased]).value("Mqtt.Url", undefined, CONTROLLER_MAC), LEGACY_BROKER, "an entry's casing says nothing about the scope it names");
   assert.equal(engineWith([legacyPayload]).value("Mqtt.Topic", undefined, CONTROLLER_MAC), LEGACY_TOPIC, "and the legacy dot spelling addresses it too");
 
@@ -556,9 +647,9 @@ test("an entry that does not address a swept scope survives the sweep", () => {
   // delimiter, is text the entry carries rather than a scope it addresses, and a sibling controller's own entries are none of this removal's business.
   const survivors = [
 
-    "Enable.Log.Lock",
-    "Enable.Log.Lock." + OTHER_MAC,
-    "Enable.Log.Lock." + CONTROLLER_MAC + "00",
+    "Enable.Hub.Doorbell",
+    "Enable.Hub.Doorbell." + OTHER_MAC,
+    "Enable.Hub.Doorbell." + CONTROLLER_MAC + "00",
     "Enable.Mqtt.Url=mqtt://" + CONTROLLER_MAC + ":1883",
     "Enable.Mqtt.Topic." + OTHER_MAC + "=access/" + DEVICE_MAC
   ];
@@ -577,7 +668,7 @@ test("a sweep leaves its survivors in the engine's canonical spelling, exactly a
    */
   const survivor = "Enable.Mqtt.Topic." + OTHER_MAC + "." + LEGACY_TOPIC;
   const canonical = normalizeConfiguredOptions(catalog, [survivor]);
-  const options = [ "Enable.Log.Lock." + CONTROLLER_MAC, survivor ];
+  const options = [ "Enable.Hub.Doorbell." + CONTROLLER_MAC, survivor ];
   const before = [...options];
   const patch = accessConfig.withControllerRemoved({ controllers: [{ ...CREDENTIALS }], options }, { address: ADDRESS, macs: [CONTROLLER_MAC] });
 

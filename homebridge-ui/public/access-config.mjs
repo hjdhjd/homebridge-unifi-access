@@ -37,6 +37,21 @@ const PER_CONTROLLER_SETTINGS = {
   mqttUrl: "Mqtt.Url"
 };
 
+/* The families whose per-member booleans one list stands for, each naming the members of the list against the boolean that was that member's own switch. A 1.x
+ * configuration addresses those booleans by name and the served catalog declares none of them, so this table is what lets the framework's own grammar read such an
+ * entry at all: each name is added back to a LEGACY catalog the composition reads through, and never to the catalog the page serves.
+ *
+ * The member keys are the list's own values, which is what a composed entry stores, and they are written in the order the list offers them rather than in key
+ * order, so a composed entry reads the way the settings page lists it.
+ */
+/* eslint-disable sort-keys */
+const RETIRED_FAMILIES = [
+
+  { members: { DPS: "Hub.DPS", REL: "Hub.REL", REN: "Hub.REN", REX: "Hub.REX", SideDoorDPS: "Hub.SideDoor.DPS" }, option: "Hub.Sensors" },
+  { members: { Doorbell: "Log.Doorbell", DPS: "Log.DPS", Lock: "Log.Lock", REL: "Log.REL", REN: "Log.REN", REX: "Log.REX" }, option: "Log.Events" }
+];
+/* eslint-enable sort-keys */
+
 // The plain string identity fields an editor writes onto a controller item. Each one deletes by omission when the user leaves it empty, which is what makes clearing
 // a field in the editor mean the same thing as never having filled it in. The tokens object and the TLS preference are written by arms of their own below, since
 // neither is a string this presence test could read.
@@ -262,21 +277,48 @@ export const withPrimaryIdentity = (config, identity) => {
 };
 
 /* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, and the predicate
- * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the scope enumerator, and the identifier repair is what
- * keeps this module import-free and exercisable under node against the real engine and the real catalog, rather than against a stand-in that could drift from either.
+ * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the catalog builder, the two enumerators, the list
+ * formatter, and the identifier repair is what keeps this module import-free and exercisable under node against the real engine and the real catalog, rather than
+ * against a stand-in that could drift from either.
  *
- * @param injected.FeatureOptions        - The feature-option engine class.
- * @param injected.catalog               - The catalog index built from the served categories and options, which carries both alongside its derived indices.
- * @param injected.enumerateScopeEntries - The framework's own enumerator over the configured entries reading at one scope identifier.
- * @param injected.scopeSafeId           - The framework's repair of an arbitrary string into a scope identifier.
+ * @param injected.FeatureOptions              - The feature-option engine class.
+ * @param injected.buildCatalogIndex           - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
+ * @param injected.catalog                     - The catalog index built from the served categories and options, which carries both alongside its derived indices.
+ * @param injected.enumerateConfiguredEntries  - The framework's own enumerator over the configured entries addressing one option.
+ * @param injected.enumerateScopeEntries       - The framework's own enumerator over the configured entries reading at one scope identifier.
+ * @param injected.formatValueList             - The framework's composition of a list option's stored form from its selected members.
+ * @param injected.scopeSafeId                 - The framework's repair of an arbitrary string into a scope identifier.
  *
  * @returns The interpreters: the migration, the awaiting-migration predicate, the controller save, and the controller removal.
  */
-export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateScopeEntries, scopeSafeId }) => {
+export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
+  scopeSafeId }) => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
   // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
   const engineFor = (config) => new FeatureOptions(catalog.categories, catalog.options, Array.isArray(config?.options) ? config.options : []);
+
+  /* The served catalog's options with every retired boolean added back to the category its name begins with, each as the default-on boolean it was. This is what the
+   * retired-family composition reads a 1.x entry through: the served catalog declares none of these names, so the framework's grammar would decline to parse such an
+   * entry at all, and a name-matching read of the raw array would be this module re-implementing the storage format.
+   */
+  const legacyOptions = () => {
+
+    const options = { ...catalog.options };
+
+    for(const family of RETIRED_FAMILIES) {
+
+      for(const retired of Object.values(family.members)) {
+
+        const separator = retired.indexOf(".");
+        const category = retired.slice(0, separator);
+
+        options[category] = [ ...(options[category] ?? []), { default: true, description: "", name: retired.slice(separator + 1) } ];
+      }
+    }
+
+    return options;
+  };
 
   /* The served catalog's own entry for an option name, or undefined when the catalog declares no such option. Every question the migration asks of the catalog
    * resolves through this one walk, so no two readings of it can disagree.
@@ -321,6 +363,97 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateScopeEntrie
     }
 
     return !defaultsOn(option) || (value !== registeredDefault(option));
+  };
+
+  /* Move a 1.x configuration's retired per-member booleans onto the lists that supersede them, writing each list through the served engine and dropping every raw
+   * entry the retired names claim. Answers whether anything moved.
+   *
+   * A retired boolean was one member's own switch and the list is the whole family's, so a scope's list has to be composed from what EVERY member of that family
+   * resolves to there rather than translated entry by entry. The composition reads through a legacy engine over the legacy catalog, which is the framework's own
+   * grammar applied to names the served catalog does not declare, so a lower-cased spelling, a legacy dotted form, and a bare enable are each read exactly as the
+   * 1.x runtime read them.
+   *
+   * A scope emits only where its composition differs from what it would inherit - the global scope against every member, a named scope against the global
+   * composition - which is what keeps a configuration that has already been through this from composing anything at the next open, and keeps a 1.x file that merely
+   * restates the defaults from gaining entries it never had.
+   *
+   * A device-scoped composition inherits from the GLOBAL scope and never from its controller's, because the configuration carries no topology: which controller a
+   * device belongs to is unknowable without probing every one of them, and making every page open do that to serve a one-time move is a trade nobody would take.
+   * The reading errs only for a family carrying entries at all three scopes at once, where the controller-scoped one is passed over.
+   *
+   * @param engine            - The served engine every composed list is written through, and whose entries the retired names are dropped from.
+   * @param configuredOptions - The raw configured-options array as the user wrote it, which is what the composition reads.
+   *
+   * @returns True when a list was composed or a retired entry dropped.
+   */
+  const composeRetiredFamilies = (engine, configuredOptions) => {
+
+    // One options record serves both, so the index the entries are read through and the engine they are resolved against describe the same catalog by construction.
+    const options = legacyOptions();
+    const legacyCatalog = buildCatalogIndex(catalog.categories, options);
+    const legacyEngine = new FeatureOptions(catalog.categories, options, configuredOptions);
+
+    // Whether a raw entry addresses any retired name, asked through the legacy enumerator over that entry alone rather than by matching text, so every spelling the
+    // grammar accepts is caught by the same reading that composed from it.
+    const retired = (rawEntry) => RETIRED_FAMILIES.some((family) => Object.values(family.members).some((option) => {
+
+      for(const _entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions: [rawEntry], option })) {
+
+        return true;
+      }
+
+      return false;
+    }));
+
+    let composed = false;
+
+    for(const family of RETIRED_FAMILIES) {
+
+      const members = Object.keys(family.members);
+      const selectionAt = (scope) => members.filter((member) => legacyEngine.test(family.members[member], scope || undefined));
+
+      // The global scope is always composed, because a retired entry there is what every named scope's composition is measured against.
+      const scopes = new Set([""]);
+
+      for(const option of Object.values(family.members)) {
+
+        for(const entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions, option })) {
+
+          scopes.add(entry.id.toLowerCase());
+        }
+      }
+
+      const globalSelection = selectionAt("");
+
+      for(const scope of scopes) {
+
+        const selection = scope.length ? selectionAt(scope) : globalSelection;
+        const inherited = scope.length ? globalSelection : members;
+
+        if((selection.length === inherited.length) && selection.every((member, index) => member === inherited[index])) {
+
+          continue;
+        }
+
+        /* Every member selected stores the all-members form the catalog registers as this option's default, read off the entry rather than spelled here so the one
+         * place that form is written stays the catalog. Anything narrower stores the members themselves.
+         */
+        const value = (selection.length === members.length) ? registeredDefault(family.option) : formatValueList(selection);
+
+        engine.setOption({ enabled: true, id: scope || undefined, option: family.option, value });
+        composed = true;
+      }
+    }
+
+    const surviving = engine.configuredOptions.filter((rawEntry) => !retired(rawEntry));
+
+    if(surviving.length !== engine.configuredOptions.length) {
+
+      engine.configuredOptions = surviving;
+      composed = true;
+    }
+
+    return composed;
   };
 
   // Whether a rebuilt successor carries exactly what the item it replaces carried. This decides whether the controllers array joins the patch at all, and it is what
@@ -410,6 +543,10 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateScopeEntrie
      * land, so the property composes only where no entry speaks. The engine's own rule settles a collision the other way round - an option the user already keyed
      * by the MAC keeps its place and the address entry is forgotten - because the settings built against the identity in use are the ones they are looking at.
      *
+     * The retired families move first, because they need no MAC address and nothing else in the pass reads them. A retired boolean was one member's own switch and
+     * the list that supersedes it is the whole family's, so each scope's list is composed from what every member of that family resolves to there, and a scope
+     * emits a list only where that composition changes what it would otherwise inherit. A configuration already carrying its lists therefore finds nothing here.
+     *
      * @param config       - The platform configuration entry.
      * @param macByAddress - The MAC address resolved for each controller address that answered a probe this pass.
      *
@@ -427,7 +564,8 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateScopeEntrie
       const patch = {};
       const successors = [];
 
-      let composed = false;
+      // The composition reads the entries as the user wrote them, so it is handed the raw array rather than whatever the engine holds once this pass starts writing.
+      let composed = composeRetiredFamilies(engine, Array.isArray(config.options) ? config.options : []);
       let rewritten = false;
 
       for(const item of config.controllers ?? []) {

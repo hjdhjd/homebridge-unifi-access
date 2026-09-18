@@ -5,18 +5,18 @@
 import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState, terminalInput } from "unifi-access";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT } from "../controller/events.ts";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
-import type { AccessConsumedWebhookDelivery, AccessHints } from "./device.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
   AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts, OfficialApi } from "unifi-access";
-import type { AccessMethodKey, DoorServiceType } from "../policy.ts";
+import type { AccessMethodKey, DoorServiceType, HubSensorName, LogEventName } from "../policy.ts";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
-  doorbellTriggerAction, dpsSensorEligible, lockCommandRule, resolveDoorService, unlockAttribution } from "../policy.ts";
+  doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
 import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic,
   validService } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
+import type { AccessConsumedWebhookDelivery } from "./device.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
 import { AccessReservedNames } from "../types.ts";
@@ -54,19 +54,25 @@ interface AccessEventDeviceUpdateV2 {
  * option, and the topic of one input are spelled together. The label is carried in the title case a service name wants; the log lines derive the other casings they
  * need from it, so each input is spelled here exactly once.
  *
+ * The member is the name this input answers to in both of the hub's pick lists and the suffix its reserved subtype is composed from, typed against the policy
+ * module's own member names so a spelling that names no member is a compile error here rather than a sensor that silently never appears.
+ *
  * The door position sensor is deliberately not one of them. All three of the things that shape a terminal input differ for it - where its eligibility comes from,
  * where its state comes from, and how it reaches HomeKit - so it is configured and updated on its own rather than forced through a loop that would have to special
  * case it at every step.
  */
 const terminalInputs = [
 
-  { input: "Rel", label: "Remote Release", terminal: "rel", topic: mqttTopics.rel },
-  { input: "Ren", label: "Request to Enter Sensor", terminal: "ren", topic: mqttTopics.ren },
-  { input: "Rex", label: "Request to Exit Sensor", terminal: "rex", topic: mqttTopics.rex }
-] as const satisfies readonly { input: string; label: string; terminal: AccessTerminalInput; topic: MqttTopicEntry }[];
+  { label: "Remote Release", member: "REL", terminal: "rel", topic: mqttTopics.rel },
+  { label: "Request to Enter Sensor", member: "REN", terminal: "ren", topic: mqttTopics.ren },
+  { label: "Request to Exit Sensor", member: "REX", terminal: "rex", topic: mqttTopics.rex }
+] as const satisfies readonly { label: string; member: HubSensorName & LogEventName; terminal: AccessTerminalInput; topic: MqttTopicEntry }[];
 
-// The inputs themselves, derived from the table so the names are spelled in one place and every type keyed by them stays complete.
-type SensorInput = typeof terminalInputs[number]["input"];
+/* The whole sensor member table, as the domain every read of the selection is taken against. It is the WHOLE table and never a per-model narrowing: a retired
+ * per-sensor option answered true for a hub of any model, so reading against everything is what keeps an unconfigured hub of a model no table names carrying every
+ * sensor its wiring supports and leaves the capability evidence the one thing that decides. The narrowing to a model is the settings page's job alone.
+ */
+const HUB_SENSOR_DOMAIN = hubSensorChoices().map(choice => choice.value);
 
 // The HomeKit-facing name of the door position sensor. It sits beside the table above rather than in it, because everything else about it diverges.
 const DPS_LABEL = "Door Position Sensor";
@@ -91,10 +97,6 @@ function sentenceCase(label: string): string {
 
   return label.charAt(0) + label.slice(1).toLowerCase();
 }
-
-// The hint that says whether an input's readings are announced in the log, named from the same input list the table above states so a new input cannot be added
-// without a hint to go with it.
-type LogHintKey = Extract<keyof AccessHints, `log${SensorInput}`>;
 
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
  * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
@@ -213,22 +215,39 @@ export class AccessHub extends AccessDevice {
     this.configureDevice();
   }
 
-  // Configure device-specific settings for this device.
+  /* Configure device-specific settings for this device.
+   *
+   * This runs once, from the constructor, so what lands here is the settings a hub reads at adoption and keeps for the life of the accessory: the side door's own
+   * pair, and which event categories are announced in the log. The sensor selection is deliberately not among them - it is read at the gate instead, for the
+   * reason the helper below states.
+   */
   protected override configureHints(): boolean {
 
     // Configure our parent's hints.
     super.configureHints();
 
     this.hints.hasSideDoor = (this.uda.device_type === "UGT") && this.hasFeature("Hub.SideDoor");
-    this.hints.hasSideDoorDps = this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.DPS");
-    this.hints.logDoorbell = this.hasFeature("Log.Doorbell");
-    this.hints.logDps = this.hasFeature("Log.DPS");
-    this.hints.logLock = this.hasFeature("Log.Lock");
-    this.hints.logRel = this.hasFeature("Log.REL");
-    this.hints.logRen = this.hasFeature("Log.REN");
-    this.hints.logRex = this.hasFeature("Log.REX");
+    this.hints.hasSideDoorDps = this.hints.hasSideDoor && this.#selectedSensors().includes("SideDoorDPS");
+
+    /* The cast states what the engine already guarantees: a domain-narrowed read answers members of the domain it was handed and nothing else, and the domain
+     * here is the member table those names are derived from. Holding the selection as a set of the member type is what lets every logging site below name its
+     * category as a literal the compiler checks.
+     */
+    this.hints.logEvents = new Set(this.getFeatureValueList("Log.Events", logEventChoices().map(choice => choice.value)) as readonly LogEventName[]);
 
     return true;
+  }
+
+  /* The contact sensors the user has selected, read afresh on every call against the whole member table.
+   *
+   * This is never cached in a hint. The gates that consume it run on every configure pass - at adoption and again on every device update - which is what lets a
+   * sensor turned off in the settings retire on the next update with no restart, and a selection resolved once at construction would freeze that.
+   *
+   * @returns The selected member names, in the table's own order.
+   */
+  #selectedSensors(): readonly string[] {
+
+    return this.getFeatureValueList("Hub.Sensors", HUB_SENSOR_DOMAIN);
   }
 
   // The HomeKit service the door is presented through, resolved from the configured choice against this hub's hardware on every read.
@@ -1009,11 +1028,14 @@ export class AccessHub extends AccessDevice {
 
     this.configureDpsSensor({ initialized });
 
-    for(const { input, label, terminal } of terminalInputs) {
+    // The selection is resolved once for the whole pass and each input tests its own membership, rather than the option being resolved again for every input.
+    const selected = this.#selectedSensors();
+
+    for(const { label, member, terminal } of terminalInputs) {
 
       const facts = terminalInput(this.uda, terminal);
-      const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
-      const gate = capabilityGate({ capability: facts.wired === true, toggle: this.hasFeature("Hub." + input.toUpperCase()) });
+      const reservedId = AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames];
+      const gate = capabilityGate({ capability: facts.wired === true, toggle: selected.includes(member) });
 
       // Validate whether we should have this service enabled.
       if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
@@ -1118,7 +1140,7 @@ export class AccessHub extends AccessDevice {
      * Every other family answers from the evidence read.
      */
     const capability = (this.uda.device_type === "UGT") || this.dpsEvidence;
-    const gate = capabilityGate({ capability, toggle: this.hasFeature("Hub.DPS") });
+    const gate = capabilityGate({ capability, toggle: this.#selectedSensors().includes("DPS") });
 
     // Validate whether we should have this service enabled.
     if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
@@ -1899,7 +1921,7 @@ export class AccessHub extends AccessDevice {
 
     this.mqttPublish(topic, locked ? "true" : "false");
 
-    if(this.hints.logLock) {
+    if(this.hints.logEvents.has("Lock")) {
 
       this.log.info("%s %s.", doorName, locked ? "locked" : "unlocked");
     }
@@ -2673,7 +2695,7 @@ export class AccessHub extends AccessDevice {
           this.setContactSensorState(AccessReservedNames.CONTACT_DPS_SIDE, newDpsState);
           this.mqttPublish(mqttTopics.sidedoorDps, contactDetected ? "false" : "true");
 
-          if(this.hints.logDps) {
+          if(this.hints.logEvents.has("DPS")) {
 
             this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
           }
@@ -2682,7 +2704,7 @@ export class AccessHub extends AccessDevice {
           this.hkDpsState = newDpsState;
           this.mqttPublish(mqttTopics.dps, contactDetected ? "false" : "true");
 
-          if((this.doorServiceType === "GarageDoorOpener") || this.hints.logDps) {
+          if((this.doorServiceType === "GarageDoorOpener") || this.hints.logEvents.has("DPS")) {
 
             this.log.info("%s %s.", sentenceCase(DPS_LABEL), contactDetected ? "closed" : "open");
           }
@@ -2739,9 +2761,9 @@ export class AccessHub extends AccessDevice {
 
     // Process any terminal input update events if our state has changed. Keying off whether the sensor exists is what replaces a cached eligibility reading: an
     // input with no service contributes nothing, and one created mid-run is picked up on the very next update.
-    for(const { input, label, terminal, topic } of terminalInputs) {
+    for(const { label, member, terminal, topic } of terminalInputs) {
 
-      const reservedId = AccessReservedNames[("CONTACT_" + input.toUpperCase()) as keyof typeof AccessReservedNames];
+      const reservedId = AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames];
 
       if(!this.accessory.getServiceById(this.hap.Service.ContactSensor, reservedId)) {
 
@@ -2749,7 +2771,6 @@ export class AccessHub extends AccessDevice {
       }
 
       const facts = terminalInput(this.uda, terminal);
-      const logKey = ("log" + input) as LogHintKey;
       const reading = this.#contactReading(facts);
 
       if(reading === this.getContactSensorState(reservedId)) {
@@ -2765,7 +2786,7 @@ export class AccessHub extends AccessDevice {
 
         this.mqttPublish(topic, contactDetected ? "false" : "true");
 
-        if(this.hints[logKey]) {
+        if(this.hints.logEvents.has(member)) {
 
           this.log.info("%s %s.", sentenceCase(label), contactDetected ? "closed" : "open");
         }
@@ -2944,7 +2965,7 @@ export class AccessHub extends AccessDevice {
     // Publish to MQTT.
     this.mqttPublish(mqttTopics.doorbell, "true");
 
-    if(this.hints.logDoorbell) {
+    if(this.hints.logEvents.has("Doorbell")) {
 
       this.log.info("Doorbell ring detected.");
     }
@@ -2974,7 +2995,7 @@ export class AccessHub extends AccessDevice {
 
     // The sentence is composed rather than formatted in place, because the door's name is whatever an administrator called it and has no business being read as a
     // format string.
-    if(this.hints.logLock) {
+    if(this.hints.logEvents.has("Lock")) {
 
       this.log.info("%s", describeUnlock({ attribution, door: delivery.data.location.name }));
     }
@@ -2995,7 +3016,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    if(this.hints.logDoorbell) {
+    if(this.hints.logEvents.has("Doorbell")) {
 
       this.log.info("Doorbell call ended: %s", doorbellOutcome(delivery.data.object.reason_code));
     }
@@ -3024,7 +3045,7 @@ export class AccessHub extends AccessDevice {
     // Publish to MQTT.
     this.mqttPublish(mqttTopics.doorbell, "false");
 
-    if(this.hints.logDoorbell) {
+    if(this.hints.logEvents.has("Doorbell")) {
 
       this.log.info("Doorbell ring cancelled.");
     }

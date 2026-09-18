@@ -2,7 +2,8 @@
  *
  * access-config.d.mts: Type declarations for the pure Access platform-configuration interpreters.
  */
-import type { CatalogIndex, FeatureOptions, enumerateScopeEntries, scopeSafeId } from "homebridge-plugin-utils";
+import type { CatalogIndex, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
+  scopeSafeId } from "homebridge-plugin-utils";
 
 /**
  * One configured controller, as it actually arrives from the Homebridge UI. Every property is declared as an unknown-valued optional because that is the honest shape
@@ -127,18 +128,22 @@ export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDe
 export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
 
 /**
- * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's scope enumerator, and its
- * scope-identifier repair.
+ * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its two
+ * entry enumerators, its list formatter, and its scope-identifier repair.
  *
- * @param injected.FeatureOptions        - The feature-option engine class.
- * @param injected.catalog               - The catalog index, which carries the served categories and options alongside its derived indices.
- * @param injected.enumerateScopeEntries - The framework's own enumerator over the configured entries reading at one scope identifier.
- * @param injected.scopeSafeId           - The framework's repair of an arbitrary string into a scope identifier.
+ * @param injected.FeatureOptions             - The feature-option engine class.
+ * @param injected.buildCatalogIndex          - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
+ * @param injected.catalog                    - The catalog index, which carries the served categories and options alongside its derived indices.
+ * @param injected.enumerateConfiguredEntries - The framework's own enumerator over the configured entries addressing one option.
+ * @param injected.enumerateScopeEntries      - The framework's own enumerator over the configured entries reading at one scope identifier.
+ * @param injected.formatValueList            - The framework's composition of a list option's stored form from its selected members.
+ * @param injected.scopeSafeId                - The framework's repair of an arbitrary string into a scope identifier.
  *
  * @returns The migration, the awaiting-migration predicate, the controller save, and the controller removal.
  */
-export declare const makeAccessConfig: (injected: { FeatureOptions: typeof FeatureOptions; catalog: CatalogIndex;
-  enumerateScopeEntries: typeof enumerateScopeEntries; scopeSafeId: typeof scopeSafeId }) => AccessConfigInterpreter;
+export declare const makeAccessConfig: (injected: { FeatureOptions: typeof FeatureOptions; buildCatalogIndex: typeof buildCatalogIndex; catalog: CatalogIndex;
+  enumerateConfiguredEntries: typeof enumerateConfiguredEntries; enumerateScopeEntries: typeof enumerateScopeEntries;
+  formatValueList: typeof formatValueList; scopeSafeId: typeof scopeSafeId }) => AccessConfigInterpreter;
 
 /** The primary controller entry (the first), or undefined on a fresh configuration. */
 export declare const primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;

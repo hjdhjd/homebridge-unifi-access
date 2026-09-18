@@ -5,6 +5,7 @@
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
+import type { DecoratedSerial, LogEventName } from "../policy.ts";
 import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog, sanitizeName, setAccessoryName,
   updateServices } from "homebridge-plugin-utils";
@@ -15,7 +16,6 @@ import type { AccessController } from "../controller/controller.ts";
 import type { AccessListener } from "../controller/events.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
-import type { DecoratedSerial } from "../policy.ts";
 
 /* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
  * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
@@ -34,12 +34,7 @@ export interface AccessHints {
 
   hasSideDoor: boolean;
   hasSideDoorDps: boolean;
-  logDoorbell: boolean;
-  logDps: boolean;
-  logLock: boolean;
-  logRel: boolean;
-  logRen: boolean;
-  logRex: boolean;
+  logEvents: ReadonlySet<LogEventName>;
   syncName: boolean;
 }
 
@@ -181,8 +176,7 @@ export abstract class AccessDevice extends AccessBase {
     this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.isReachable });
     // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
     // states each one the user's settings actually decide.
-    this.hints = { hasSideDoor: false, hasSideDoorDps: false, logDoorbell: false, logDps: false, logLock: false, logRel: false, logRen: false,
-      logRex: false, syncName: false };
+    this.hints = { hasSideDoor: false, hasSideDoorDps: false, logEvents: new Set(), syncName: false };
     this.hubProjection = hubProjection;
     this.id = deviceSerial(admission);
     this.listeners = new Map();
@@ -395,11 +389,16 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }
 
-  // Utility function to return the values a list-valued configuration parameter selects on a device, read through the shared engine's own list grammar. A domain
-  // narrows the read to what this device offers and answers in the domain's own spelling; without one the stored entries answer as the user named them.
+  /* Utility function to return the values a list-valued configuration parameter selects on a device, read through the shared engine's own list grammar. A domain
+   * narrows the read to what this device offers and answers in the domain's own spelling; without one the stored entries answer as the user named them.
+   *
+   * An option enabled at an explicit scope with nothing stored reads as its registered default rather than as the empty list. That is what a hand-written
+   * `Enable.Hub.Sensors.<device>` means - the user turned the list on for that hub and named nothing - and reading it as an empty selection would silently
+   * withhold every member. A selection the user emptied on purpose is a different reading and still answers empty.
+   */
   public getFeatureValueList(option: string, domain?: readonly string[]): readonly string[] {
 
-    return this.platform.featureOptions.valueList({ controller: this.controller.id, device: this.id, domain, option });
+    return this.platform.featureOptions.valueList({ controller: this.controller.id, defaultWhenUnset: true, device: this.id, domain, option });
   }
 
   // Utility for checking whether a feature option is enabled on a device.

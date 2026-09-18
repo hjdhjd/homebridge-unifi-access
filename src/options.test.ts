@@ -6,12 +6,12 @@
  * option without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
  * because it is a closed union the compiler already holds the map to.
  */
-import { accessMethodChoices, doorServiceChoices } from "./policy.ts";
+import { ALL_CHOICES, buildCatalogIndex } from "homebridge-plugin-utils";
+import { accessMethodChoices, doorServiceChoices, hubSensorChoices, hubSensorModels, logEventChoices } from "./policy.ts";
 import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessFeatureOption } from "./options.ts";
 import assert from "node:assert/strict";
-import { buildCatalogIndex } from "homebridge-plugin-utils";
 import test from "node:test";
 
 // The catalog entry a category and option name address, asserted to exist so each check below reads an entry rather than a nullable one.
@@ -73,34 +73,17 @@ test("the doorbell family is gated on the doorbell capability", () => {
 
     assert.deepEqual(entryFor("Hub", name).meta, { hasCapability: ["door_bell"] }, "Hub." + name + " declares the doorbell capability and nothing else");
   }
-
-  assert.deepEqual(entryFor("Log", "Doorbell").meta, { hasCapability: ["door_bell"] }, "the logging option for the same events is gated identically");
-});
-
-test("the terminal input sensors carry the model sets their hardware supports", () => {
-
-  for(const category of [ "Hub", "Log" ]) {
-
-    assert.deepEqual(entryFor(category, "DPS").meta, { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ] },
-      category + ".DPS covers every hub that drives a door position sensor");
-    assert.deepEqual(entryFor(category, "REL").meta, { modelKey: ["UA Hub"] }, category + ".REL is a UA Hub input alone");
-    assert.deepEqual(entryFor(category, "REN").meta, { modelKey: ["UA Hub"] }, category + ".REN is a UA Hub input alone");
-    assert.deepEqual(entryFor(category, "REX").meta, { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ] },
-      category + ".REX covers the hubs that drive a request to exit input, and never the gate");
-  }
 });
 
 test("the side door group is scoped to the gate that has one", () => {
 
-  for(const name of [ "SideDoor", "SideDoor.DPS", "SideDoor.Lock.Trigger" ]) {
+  for(const name of [ "SideDoor", "SideDoor.Lock.Trigger" ]) {
 
     assert.deepEqual(entryFor("Hub", name).meta, { modelKey: ["UA Gate"] }, "Hub." + name + " belongs to the UA Gate alone");
   }
 
-  for(const name of [ "SideDoor.DPS", "SideDoor.Lock.Trigger" ]) {
-
-    assert.equal(entryFor("Hub", name).group, "SideDoor", "Hub." + name + " hangs off the side door lock, so it hides when that lock is turned off");
-  }
+  assert.equal(entryFor("Hub", "SideDoor.Lock.Trigger").group, "SideDoor",
+    "Hub.SideDoor.Lock.Trigger hangs off the side door lock, so it hides when that lock is turned off");
 });
 
 test("a capability-gated option renders its own prose suffix", () => {
@@ -223,11 +206,51 @@ test("the access methods are one selection over a page-registered source, none s
   assert.deepEqual(switches.meta?.choiceDomain, accessMethodChoices());
 });
 
+test("the hub's sensors and its logging categories are each one all-members selection over a page-registered source", () => {
+
+  const sensors = entryFor("Hub", "Sensors");
+
+  assert.equal(sensors.choices, "hubSensors");
+  assert.equal(sensors.multiple, true);
+  assert.equal(sensors.default, true);
+  assert.equal(sensors.defaultValue, ALL_CHOICES, "an unconfigured hub selects every sensor, which is what keeps a 1.x hub carrying the ones it always had");
+  assert.deepEqual(sensors.meta?.choiceDomain, hubSensorChoices(), "the domain offered where no hub is in view is the whole member table");
+
+  /* The row's page visibility follows the table rather than a hand-spelled union, and the union the table answers is the scope this option is published under, so
+   * both readings are held: a member added to the table brings its model with it, and the published scope is asserted as the literal a reader sees.
+   */
+  assert.deepEqual(sensors.meta?.modelKey, hubSensorModels());
+  assert.deepEqual(sensors.meta?.modelKey, [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ]);
+
+  const events = entryFor("Log", "Events");
+
+  assert.equal(events.choices, "logEvents");
+  assert.equal(events.multiple, true);
+  assert.equal(events.default, true);
+  assert.equal(events.defaultValue, ALL_CHOICES, "and every category is logged until a user narrows the list");
+  assert.deepEqual(events.meta?.choiceDomain, logEventChoices());
+  assert.deepEqual(events.meta?.hasCapability, ["is_hub"], "the categories are a hub's own events, so the row is offered on hubs alone");
+});
+
+test("no per-sensor or per-category boolean survives in the catalog", () => {
+
+  // Each name a 1.x configuration addressed a single sensor or a single logged category by. The lists supersede all of them, and the settings migration is what
+  // carries a user's choices across, so a name still declared here would be a second home for a setting that has one.
+  const retired = { Hub: [ "DPS", "REL", "REN", "REX", "SideDoor.DPS" ], Log: [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ] };
+
+  for(const [ category, names ] of Object.entries(retired)) {
+
+    for(const name of names) {
+
+      assert.equal((featureOptions[category] ?? []).find(option => option.name === name), undefined, category + "." + name + " is not a catalog entry");
+    }
+  }
+});
+
 test("an option scoped to several models or several flags names every one in its suffix, and repeated prose is named once", () => {
 
-  assert.equal(describeOptionScope(entryFor("Hub", "DPS")),
+  assert.equal(describeOptionScope(entryFor("Hub", "Sensors")),
     " <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, UniFi Access Hub Door Mini, and UniFi Access Gate.*", "every model the option is scoped to is named");
-  assert.equal(describeOptionScope(entryFor("Log", "REX")), " <BR>*Supported on UniFi Access Ultra, UniFi Access Hub, and UniFi Access Hub Door Mini.*");
 
   // Two capability flags that share one description are named once, and a capability list outranks a model list beside it.
   const probe: AccessFeatureOption = { default: true, description: "", meta: { hasCapability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], modelKey: ["UA Hub"] },

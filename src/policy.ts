@@ -19,10 +19,10 @@ import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCES
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
+import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
 import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
 import { sameEntries, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
-import type { AccessControllerTokens } from "./options.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
@@ -944,6 +944,120 @@ export function accessMethodChoices(device?: AccessStateDevice): FeatureOptionCh
 
   return accessMethods.filter(method => (device === undefined) || deviceHasCapability(device, method.capability))
     .map(method => ({ label: method.name, value: method.choice }));
+}
+
+/* What a choice function is handed to narrow its list: the two members of a device record that decide whether a member is offered. The narrowest shape both of the
+ * settings page's device surfaces can supply is what is asked for, because only one of them carries a display model of its own - the official listing computes
+ * one from the hardware type before it decorates its row.
+ */
+type ChoiceDevice = Pick<AccessStateDevice, "capabilities" | "display_model">;
+
+/* The contact sensors a hub offers, each with the hub models that drive it. One selection stands for the family, so this table is what the settings page narrows
+ * to the hub in view, what the catalog publishes as its whole domain, and what the hub itself reads its selection against.
+ *
+ * The values are capitalized short names, exactly as the access-method choices are, because a value is what a user types into config.json. The side door's sensor
+ * is spelled as one bare word for that reason: every other value is one, and the reading - the side door's own position sensor - survives the compression.
+ */
+const hubSensors = [
+
+  { label: "Door position sensor", models: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ], value: "DPS" },
+  { label: "Remote release", models: ["UA Hub"], value: "REL" },
+  { label: "Request to enter", models: ["UA Hub"], value: "REN" },
+  { label: "Request to exit", models: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ], value: "REX" },
+  { label: "Side door position sensor", models: ["UA Gate"], value: "SideDoorDPS" }
+] as const satisfies readonly { label: string; models: readonly AccessModelKey[]; value: string }[];
+
+// The sensor member names as a type of their own, so a member spelled wrong or cased wrong where the hub tests its selection is a compile error rather than a
+// sensor that silently never appears.
+export type HubSensorName = typeof hubSensors[number]["value"];
+
+/**
+ * The models a sensor is driven by, read off the table above so the logging categories below name the hardware their own sensors name rather than restating a
+ * model list that could drift from it. The value column is unique, so exactly one row matches and its models are the whole answer.
+ *
+ * @param member - The sensor member to read.
+ *
+ * @returns The models that drive it.
+ */
+function sensorModels(member: HubSensorName): readonly AccessModelKey[] {
+
+  return hubSensors.flatMap(sensor => (sensor.value === member) ? sensor.models : []);
+}
+
+/* The event categories a hub logs, each narrowed by the hardware that produces the events. The terminal-input categories take their models from the sensor of the
+ * same name, and the two that describe something no model list distinguishes - a doorbell call and a lock transition - are gated on the capability instead.
+ */
+const logEvents = [
+
+  { capability: "door_bell", label: "Doorbell", value: "Doorbell" },
+  { label: "Door position sensor", models: sensorModels("DPS"), value: "DPS" },
+  { capability: "is_hub", label: "Lock", value: "Lock" },
+  { label: "Remote release", models: sensorModels("REL"), value: "REL" },
+  { label: "Request to enter", models: sensorModels("REN"), value: "REN" },
+  { label: "Request to exit", models: sensorModels("REX"), value: "REX" }
+] as const satisfies readonly { capability?: string; label: string; models?: readonly AccessModelKey[]; value: string }[];
+
+// The event member names as a type of their own, for the same reason the sensor names are one: every logging site names its category as a literal, checked here.
+export type LogEventName = typeof logEvents[number]["value"];
+
+/* Whether a member is offered for a device, on the settings page's own rule: a member gated on a capability is offered where the device reports it, and one gated
+ * on models where the device's display model is among them. With no device there is nothing to narrow against, which is the global and controller views' answer
+ * and the answer the hub's own reads take.
+ *
+ * @param device - The device to narrow against, or `undefined` for every member.
+ * @param member - The member's capability gate, its model gate, or neither.
+ *
+ * @returns True when the member belongs in the list.
+ */
+function memberOffered(device: ChoiceDevice | undefined, member: { capability?: string; models?: readonly AccessModelKey[] }): boolean {
+
+  if(device === undefined) {
+
+    return true;
+  }
+
+  if(member.capability !== undefined) {
+
+    return device.capabilities.includes(member.capability);
+  }
+
+  return member.models?.includes(device.display_model as AccessModelKey) === true;
+}
+
+/**
+ * The contact sensors a hub's list can be selected from, as the choices the settings page offers: every sensor the table knows, or only the ones this hub's model
+ * drives.
+ *
+ * @param device - The device whose model narrows the list, or `undefined` for the whole table.
+ *
+ * @returns The choices, in the table's order.
+ */
+export function hubSensorChoices(device?: ChoiceDevice): FeatureOptionChoice[] {
+
+  return hubSensors.filter(sensor => memberOffered(device, sensor)).map(sensor => ({ label: sensor.label, value: sensor.value }));
+}
+
+/**
+ * The event categories a hub's logging list can be selected from, on the same terms the sensor list is offered.
+ *
+ * @param device - The device whose model and capabilities narrow the list, or `undefined` for the whole table.
+ *
+ * @returns The choices, in the table's order.
+ */
+export function logEventChoices(device?: ChoiceDevice): FeatureOptionChoice[] {
+
+  return logEvents.filter(event => memberOffered(device, event)).map(event => ({ label: event.label, value: event.value }));
+}
+
+/**
+ * The hub models the sensor list is offered on: every model any member of the table names, in the order the table first names it. The catalog publishes this as
+ * the sensor option's model scope, so a member added to the table brings its hardware with it rather than leaving the whole row hidden for that model.
+ *
+ * @returns The models, deduplicated, in first-seen order.
+ */
+export function hubSensorModels(): AccessModelKey[] {
+
+  return [...new Set(hubSensors.flatMap(sensor => sensor.models))];
 }
 
 /**

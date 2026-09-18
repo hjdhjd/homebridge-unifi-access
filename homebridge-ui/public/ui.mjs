@@ -4,7 +4,8 @@
  */
 "use strict";
 
-import { FeatureOptions, buildCatalogIndex, enumerateScopeEntries, scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
+import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
+  scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
 import { classifyProbeResponse, controllers, deviceListResult, hasValidIdentity, makeAccessConfig, primaryController, staleSelectionVerdict,
   withPrimaryIdentity } from "./access-config.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
@@ -51,7 +52,8 @@ const accessConfig = async () => {
 
   const { categories, options } = await ui.featureOptions.catalog();
 
-  return makeAccessConfig({ FeatureOptions, catalog: buildCatalogIndex(categories, options), enumerateScopeEntries, scopeSafeId });
+  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), enumerateConfiguredEntries,
+    enumerateScopeEntries, formatValueList, scopeSafeId });
 };
 
 /* Execute our first run screen until the primary controller carries both of the things the plugin needs of it. The two are asked separately because the plugin's own
@@ -1246,15 +1248,20 @@ const featureOptionsParams = {
   ui: {
 
     /* The choice sources our catalog names, each answering the list its picker offers for the device in view. The lists are attached to the device records the server
-     * answers, because deriving them needs what only the server reaches - the topology's door guards and the official users census, and the access-method catalog - so a
-     * resolver here reads what its record carries and nothing more. Each runs on every projection recompute and must stay pure and cheap.
+     * answers, because deriving them needs what only the server reaches - the topology's door guards and the official users census, the access-method catalog, and the
+     * hub sensor and logging tables - so a resolver here reads what its record carries and nothing more. Each runs on every projection recompute and must stay pure
+     * and cheap.
      */
     choices: {
 
       // The methods the reader in view supports; at the global and controller views, where no device is in view, every method the catalog knows.
       accessMethods: ({ device, option }) => device?.accessMethods ?? option.meta?.choiceDomain ?? [],
       // The door guards the door in view lists. The option is offered at device scope alone, so a resolver with no device in view answers a list nothing renders.
-      doorGuards: ({ device }) => device?.doorGuards ?? []
+      doorGuards: ({ device }) => device?.doorGuards ?? [],
+      // The contact sensors the hub in view drives; with no device in view, every sensor the table knows.
+      hubSensors: ({ device, option }) => device?.hubSensors ?? option.meta?.choiceDomain ?? [],
+      // The event categories the hub in view produces, offered on the same terms its sensors are.
+      logEvents: ({ device, option }) => device?.logEvents ?? option.meta?.choiceDomain ?? []
     },
     // The copy the framework's boot affordance shows while a controller connection is in flight, in place of its generic default.
     connectingMessage: "Connecting to your UniFi Access controller...",

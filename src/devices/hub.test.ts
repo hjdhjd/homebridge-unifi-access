@@ -16,10 +16,10 @@ import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
 import { Characteristic, HapStatusError, Service, uuid } from "@homebridge/hap-nodejs";
+import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
-import type { MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
-import { accessMethods, officialDeviceModel } from "../policy.ts";
+import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
 import { configRows, hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -533,6 +533,20 @@ function makeTravellingOpener(options: HubOptions = {}): HubHarness {
 
 // Every access method selected, which is what a reader arm about the model rather than the selection stands up: its switches then follow its capabilities alone.
 const EVERY_ACCESS_METHOD = "Enable.AccessMethod.Switches=" + accessMethods.map(method => method.choice).join(",");
+
+/* Each list as an arm turning one member off writes it. A list entry replaces the whole selection, so taking one member out means naming every other one - which is
+ * what the settings page composes and what the migration composes for an upgrader.
+ *
+ * @param option  - The list to compose an entry for.
+ * @param choices - The members the list offers.
+ * @param dropped - The member being turned off.
+ *
+ * @returns The configured entry.
+ */
+function listLess(option: string, choices: FeatureOptionChoice[], dropped: string): string {
+
+  return "Enable." + option + "=" + choices.map(choice => choice.value).filter(value => value !== dropped).join(",");
+}
 
 // A reader with every access method selected for a switch, so what its record and the controller say about each method is what its switches show.
 function makeReader(options: HubOptions = {}): HubHarness {
@@ -2661,7 +2675,7 @@ test("a remote unlock is settled by the identity it names: the hub that performe
 
 test("the lock logging preference silences a door's lock lines and never its topic", async () => {
 
-  const hub = makeHub({ options: ["Disable.Log.Lock"] });
+  const hub = makeHub({ options: [listLess("Log.Events", logEventChoices(), "Lock")] });
 
   deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
   deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
@@ -2671,7 +2685,7 @@ test("the lock logging preference silences a door's lock lines and never its top
   assert.deepEqual(hub.lines.filter(line => line.endsWith(" locked.") || line.endsWith(" unlocked.")), []);
 
   // A gate's own window speaks through the same helper, so the preference silences the window exactly as it silences the rail.
-  const gate = makeGate({ options: ["Disable.Log.Lock"] });
+  const gate = makeGate({ options: [listLess("Log.Events", logEventChoices(), "Lock")] });
 
   await gate.mqttSet("lock", "false");
   await settle();
@@ -3445,6 +3459,98 @@ test("a hub withholds a terminal input's sensor where its wiring evidence is abs
   assert.ok(!hasContactSensor(ultra, AccessReservedNames.CONTACT_DPS), "and the exit-button duty is what withholds it");
 });
 
+// Every sensor a hub reporting all of its wiring can carry, which is what an arm about the selection rather than the evidence reads.
+const EVERY_SENSOR = [ ...TERMINAL_SUBTYPES, AccessReservedNames.CONTACT_DPS ];
+
+/* A UA Hub reporting every terminal input live with a door state delivered beneath it, which is what gives its position sensor evidence alongside the other three.
+ *
+ * @param options - Whatever the arm varies, the record included.
+ *
+ * @returns The harness, with its position evidence already established.
+ */
+function everySensorHub(options: HubOptions = {}): HubHarness {
+
+  const harness = makeHub({ record: wiredHub("on"), ...options });
+
+  deliverDoorState(harness, { dps: "close", location_id: MAIN_DOOR, lock: "locked" });
+
+  return harness;
+}
+
+test("an unconfigured hub selects every sensor and every logged category, whatever model the tables name it as", () => {
+
+  const harness = everySensorHub();
+
+  for(const subtype of EVERY_SENSOR) {
+
+    assert.ok(hasContactSensor(harness, subtype), "a hub nobody has configured carries " + subtype + ", exactly as it did when each sensor was its own option");
+  }
+
+  assert.deepEqual([...harness.hub.hints.logEvents], logEventChoices().map(choice => choice.value), "and announces every category the table carries");
+
+  /* The same for a hub whose display model no member of either table names. The narrowing to a model is the settings page's job alone - the hub reads its
+   * selection against the WHOLE table - so an Enterprise hub's port keeps everything its wiring supports rather than resolving to nothing at all.
+   */
+  const unnamed = everySensorHub({ record: testHub({ configs: wiredRows("on"), device_type: "UAH-Ent" }) });
+
+  assert.deepEqual(hubSensorChoices({ capabilities: ["is_hub"], display_model: officialDeviceModel("UAH-Ent") }), [],
+    "the settings page offers this model no member at all, which is the reading the hub must not take");
+
+  for(const subtype of EVERY_SENSOR) {
+
+    assert.ok(hasContactSensor(unnamed, subtype), "and the hub itself carries " + subtype + " all the same");
+  }
+
+  assert.deepEqual([...unnamed.hub.hints.logEvents], logEventChoices().map(choice => choice.value), "and logs every category too");
+});
+
+test("a narrowed sensor list is what decides each sensor, through the gates the wiring evidence runs", () => {
+
+  // The pair that tells the selection apart from the evidence: the same hardware, the same wiring, and one sensor the list names while another it does not.
+  const harness = everySensorHub({ options: ["Enable.Hub.Sensors=REL,REN"] });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "a member the list names is carried");
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REN), "as is every other member it names");
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REX), "while a member it leaves out is withheld");
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_DPS), "the position sensor included, which reads the same list through a gate of its own");
+});
+
+test("a hub enabled for the sensor list with nothing named keeps every sensor its wiring supports", () => {
+
+  /* A hand-written enable at a scope carries no selection at all. That means the list is on for this hub and nothing was named, which reads as the registered
+   * default - every member - and never as an empty selection that would silently withhold the lot.
+   */
+  const bare = everySensorHub({ options: ["Enable.Hub.Sensors." + HUB_SERIAL] });
+
+  for(const subtype of EVERY_SENSOR) {
+
+    assert.ok(hasContactSensor(bare, subtype), "a bare enable leaves " + subtype + " exactly where it was");
+  }
+
+  // The selection a user emptied on purpose is a different reading, and it still answers empty.
+  const emptied = everySensorHub({ options: ["Enable.Hub.Sensors="] });
+
+  for(const subtype of EVERY_SENSOR) {
+
+    assert.ok(!hasContactSensor(emptied, subtype), "while a list emptied on purpose withholds " + subtype);
+  }
+});
+
+test("the logging list is what decides which categories a hub announces", () => {
+
+  const silent = makeHub({ options: ["Disable.Log.Events"] });
+
+  assert.deepEqual([...silent.hub.hints.logEvents], [], "a hub told to log no category at all holds none");
+
+  const locksOnly = makeHub({ options: ["Enable.Log.Events=Lock"] });
+
+  assert.deepEqual([...locksOnly.hub.hints.logEvents], ["Lock"], "and a list naming one category holds exactly that one");
+
+  deliverDoorState(locksOnly, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.equal(lineCount(locksOnly, "Door unlocked."), 1, "which is the category that still speaks");
+});
+
 test("a hub keeps a terminal input's sensor through a silence about its wiring and retires it only when the user turns the option off", () => {
 
   const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
@@ -3458,15 +3564,15 @@ test("a hub keeps a terminal input's sensor through a silence about its wiring a
   assert.equal(lineCount(harness, "Disabling the remote release."), 0, "and the hub says nothing about a sensor it kept");
 
   // The user's own toggle is absolute, and the next update is what carries it into HomeKit.
-  harness.reconfigure(["Disable.Hub.REL"]);
+  harness.reconfigure([listLess("Hub.Sensors", hubSensorChoices(), "REL")]);
   restateRecord(harness, { configs: [] });
 
   assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the toggle turned off retires the sensor");
   assert.equal(lineCount(harness, "Disabling the remote release."), 1, "and the retirement is announced exactly once");
 
   // A hub adopted with the toggle already off never carries the sensor, whatever its wiring reports.
-  const disabled = makeHub({ options: ["Disable.Hub.REL"], record: testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on",
-    "input_state_ren": "on", "input_state_rex": "on" }) ] }) });
+  const disabled = makeHub({ options: [listLess("Hub.Sensors", hubSensorChoices(), "REL")],
+    record: testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ] }) });
 
   assert.ok(!hasContactSensor(disabled, AccessReservedNames.CONTACT_REL), "and a hub adopted with the toggle off never carries it");
   assert.ok(hasContactSensor(disabled, AccessReservedNames.CONTACT_REN), "while the inputs the user left alone are untouched by it");
@@ -3510,7 +3616,8 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
   assert.equal(lineCount(mini, "Request to exit sensor closed."), 1);
 
   // The log option is the user's own, and turning it off silences the sentence without withholding the reading from anything else.
-  const quiet = makeHub({ options: ["Disable.Log.REL"], record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
+  const quiet = makeHub({ options: [listLess("Log.Events", logEventChoices(), "REL")],
+    record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
 
   restateRecord(quiet, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
 
@@ -3610,26 +3717,26 @@ test("a UA Gate reads its side door position from the library's terminal read, a
 
 test("a hub's wiring table and the option catalog's model lists agree about which family drives which terminal input", () => {
 
-  const families = [ "UAH", "UA-Hub-Door-Mini", "UA-ULTRA", "UGT", "UAH-Ent" ];
+  const families = [ "UAH", "UA-Hub-Door-Mini", "UA-ULTRA", "UGT" ];
   const inputs = [ { name: "REL", subtype: AccessReservedNames.CONTACT_REL }, { name: "REN", subtype: AccessReservedNames.CONTACT_REN },
     { name: "REX", subtype: AccessReservedNames.CONTACT_REX } ];
 
-  /* The catalog and the wiring table state model support in different vocabularies - the catalog names display models and the wiring table names device types - so
-   * the plugin's own resolver is what puts them on one footing. Reading the catalog the option engine runs on is what makes this an agreement rather than a copy.
+  /* The sensor table and the wiring table state model support in different vocabularies - the sensor table names display models and the wiring table names device
+   * types - so the plugin's own resolver is what puts them on one footing. Reading the table the settings page narrows its list with is what makes this an
+   * agreement rather than a copy.
+   *
+   * The Enterprise hub is left out: its display model names no member of the sensor table, so the page offers it nothing and there is no statement to agree with.
+   * What it carries at runtime is the arm above, which reads the wiring evidence alone.
    */
   for(const deviceType of families) {
 
     const harness = makeHub({ record: familyRecord(deviceType) });
+    const offered = hubSensorChoices({ capabilities: ["is_hub"], display_model: officialDeviceModel(deviceType) }).map(choice => choice.value);
 
     for(const { name, subtype } of inputs) {
 
-      const entry = (featureOptions["Hub"] ?? []).find(option => option.name === name);
-
-      assert.ok(entry, "the catalog should declare Hub." + name);
-
-      const supported = (entry.meta?.modelKey ?? []).some(model => model === officialDeviceModel(deviceType));
-
-      assert.equal(hasContactSensor(harness, subtype), supported, "the " + name + " sensor on a " + deviceType + " follows the catalog's own model list");
+      assert.equal(hasContactSensor(harness, subtype), offered.includes(name), "the " + name + " sensor on a " + deviceType + " follows the sensor table's own " +
+        "model list");
     }
   }
 });
@@ -3945,7 +4052,7 @@ test("the side door position sensor announces its creation at adoption and its r
   assert.deepEqual(created.lines.filter(line => line.includes("The gate's")), [], "the construction pass says nothing about door identities");
 
   const retired = makeGate({ existing: [carried(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE)], keepAdoptionLines: true,
-    options: ["Disable.Hub.SideDoor.DPS"] });
+    options: [listLess("Hub.Sensors", hubSensorChoices(), "SideDoorDPS")] });
 
   assert.equal(lineCount(retired, "Disabling the side door position sensor."), 1, "a sensor the user turned off is said to be going once as it goes");
   assert.ok(!hasContactSensor(retired, AccessReservedNames.CONTACT_DPS_SIDE), "and the accessory does not carry it");

@@ -10,8 +10,8 @@
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel,
-  serialForm } from "../dist/policy.js";
+import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceSerial, doorGuardChoices, hubSensorChoices, logEventChoices, membershipRecords,
+  officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import { officialUsers } from "./users-census.js";
@@ -41,32 +41,45 @@ const byName = (a, b) => {
  * The payload arrives grouped by the door each device serves. That grouping is real information the library deliberately preserves, and it is not information this
  * page uses, so it is flattened here rather than upstream. The official record carries a hardware type and no display model at all, so the display model comes from
  * the plugin's own policy mapping - reached through the same dist import that carries the identity composition - and a type the mapping does not name answers itself.
- * The door guard picker's list and the access methods the reader supports are attached here too, from the users census alone, because this surface names no door's
- * guards.
+ * The door guard picker's list, the access methods the reader supports, and the two hub pick lists are attached here too, from the users census and the record's own
+ * hardware alone, because this surface names no door's guards.
  *
  * There is no address on this surface, so the rendered IP row is empty for these devices. That is the honest answer: the official API does not report one.
  */
-const officialDevices = (grouped, users) => grouped.flat().filter(device => device.is_managed).map(device => ({
+const officialDevices = (grouped, users) => grouped.flat().filter(device => device.is_managed).map(device => {
 
-  // The methods this reader supports, as the settings page offers them, from the one catalog the switches themselves read.
-  accessMethods: accessMethodChoices(device),
-  alias: device.alias,
-  // A record arriving without a capability list is stored carrying an empty one, which is the same accommodation the library's own reducer makes for the topology
-  // path. The browser reads this array to group the sidebar and to gate options, so an absent one would throw rather than degrade.
-  capabilities: [...(device.capabilities ?? [])],
+  /* A record arriving without a capability list is stored carrying an empty one, which is the same accommodation the library's own reducer makes for the topology
+   * path. The browser reads this array to group the sidebar and to gate options, so an absent one would throw rather than degrade.
+   *
+   * The display model and the capabilities are what narrow a hub's pick lists, and the row publishes both, so they are derived once here and read three times
+   * below rather than recomputed per list.
+   */
   /* eslint-disable-next-line camelcase */
-  connected_uah_id: device.connected_uah_id,
-  /* eslint-disable-next-line camelcase */
-  display_model: officialDeviceModel(device.type),
-  // The official listing carries no door guards, so the picker offers the whole census; a guard the ring names is always among them.
-  doorGuards: doorGuardChoices({ guardIds: undefined, users }),
-  /* eslint-disable-next-line camelcase */
-  is_online: device.is_online,
-  name: device.name,
-  serialNumber: serialForm(device.id),
-  /* eslint-disable-next-line camelcase */
-  unique_id: device.id
-})).sort(byName);
+  const hardware = { capabilities: [...(device.capabilities ?? [])], display_model: officialDeviceModel(device.type) };
+
+  return {
+
+    // The methods this reader supports, as the settings page offers them, from the one catalog the switches themselves read.
+    accessMethods: accessMethodChoices(device),
+    alias: device.alias,
+    capabilities: hardware.capabilities,
+    /* eslint-disable-next-line camelcase */
+    connected_uah_id: device.connected_uah_id,
+    /* eslint-disable-next-line camelcase */
+    display_model: hardware.display_model,
+    // The official listing carries no door guards, so the picker offers the whole census; a guard the ring names is always among them.
+    doorGuards: doorGuardChoices({ guardIds: undefined, users }),
+    // The sensors and the logging categories this hub's model carries, as the two lists offer them.
+    hubSensors: hubSensorChoices(hardware),
+    /* eslint-disable-next-line camelcase */
+    is_online: device.is_online,
+    logEvents: logEventChoices(hardware),
+    name: device.name,
+    serialNumber: serialForm(device.id),
+    /* eslint-disable-next-line camelcase */
+    unique_id: device.id
+  };
+}).sort(byName);
 
 class PluginUiServer extends HomebridgePluginUiServer {
 
@@ -248,13 +261,14 @@ class PluginUiServer extends HomebridgePluginUiServer {
           /* The devices this plugin projects into HomeKit, listed through the same statement the runtime's own membership comes from: an Enterprise hub's ports are
            * listed as the devices they become, and the building-hosted parent, which never becomes an accessory, is not. Each is decorated with the plugin's
            * device identity, computed by the function the runtime keys every read on, so what the webUI writes an option entry against is what the plugin reads
-           * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list and the access methods
-           * the reader supports, joined here from the door the device serves and the users census, because the browser can reach neither.
+           * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list, the access methods
+           * the reader supports, and the two hub pick lists, joined here from the door the device serves, the users census, and the record's own hardware, because
+           * the browser can reach none of them.
            */
           const doors = client.state.snapshot().doors;
           const devices = [...membershipRecords(client.state.snapshot())].sort(byName).map(device => ({ ...device,
             accessMethods: accessMethodChoices(device), doorGuards: doorGuardChoices({ guardIds: doors.get(device.location_id)?.door_guard, users }),
-            serialNumber: deviceSerial(device) }));
+            hubSensors: hubSensorChoices(device), logEvents: logEventChoices(device), serialNumber: deviceSerial(device) }));
 
           // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
           return { devices: [ controllerRecord, ...devices ], kind: "connected" };

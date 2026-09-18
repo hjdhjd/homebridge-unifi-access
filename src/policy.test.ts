@@ -13,9 +13,9 @@ import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, reader
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
-  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, isManagedRecord,
-  isSupportedAccessDevice, lockCommandRule, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords, reclaimFenceOpen,
-  recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
+  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, hubSensorChoices, hubSensorModels,
+  isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
+  reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -1402,4 +1402,46 @@ test("accessMethodChoices offers the whole catalog with no device and only what 
   assert.deepEqual(accessMethodChoices(device).map(choice => choice.value), [ "Mobile", "PIN" ]);
   assert.equal(deviceHasCapability(device, [ "mobile_unlock_ver2", "support_mobile_unlock" ]), true);
   assert.equal(deviceHasCapability(device, "qr_code"), false);
+});
+
+test("the hub sensor list offers every member with no device and only the ones a model drives with one", () => {
+
+  // The whole table, in its own order, valued by the spelling a selection stores and labeled by the sensor's own name.
+  assert.deepEqual(hubSensorChoices(), [
+
+    { label: "Door position sensor", value: "DPS" },
+    { label: "Remote release", value: "REL" },
+    { label: "Request to enter", value: "REN" },
+    { label: "Request to exit", value: "REX" },
+    { label: "Side door position sensor", value: "SideDoorDPS" }
+  ]);
+
+  const hardware = (model: string): { capabilities: string[]; display_model: string } => ({ capabilities: ["is_hub"], display_model: model });
+
+  // Each family is offered exactly the inputs it drives: the UA Hub every one but the gate's side door, the Ultra its position and exit inputs, the gate its two
+  // position sensors, and the Door Mini its position and exit inputs.
+  assert.deepEqual(hubSensorChoices(hardware("UA Hub")).map(choice => choice.value), [ "DPS", "REL", "REN", "REX" ]);
+  assert.deepEqual(hubSensorChoices(hardware("UA Ultra")).map(choice => choice.value), [ "DPS", "REX" ]);
+  assert.deepEqual(hubSensorChoices(hardware("UA Gate")).map(choice => choice.value), [ "DPS", "SideDoorDPS" ]);
+  assert.deepEqual(hubSensorChoices(hardware("UA Hub Door Mini")).map(choice => choice.value), [ "DPS", "REX" ]);
+
+  // A model no member names is offered nothing, which is exactly why the hub's own read never hands these functions a device: an Enterprise hub's port would
+  // otherwise resolve to no sensors at all.
+  assert.deepEqual(hubSensorChoices(hardware("UAH-Ent")), []);
+
+  // The models the option is scoped to are the union of what the table names, deduplicated in the order the table first names each one.
+  assert.deepEqual(hubSensorModels(), [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ]);
+});
+
+test("the logging list offers every category with no device and narrows on the model or the capability with one", () => {
+
+  assert.deepEqual(logEventChoices().map(choice => choice.value), [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ]);
+
+  // A doorbell-capable UA Hub gets every category. The lock category is gated on the hub capability rather than on a model, so it travels with the hardware role.
+  assert.deepEqual(logEventChoices({ capabilities: [ "is_hub", "door_bell" ], display_model: "UA Hub" }).map(choice => choice.value),
+    [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ]);
+
+  // A hub without a doorbell is offered no doorbell category, and the terminal-input categories follow the same models their sensors do.
+  assert.deepEqual(logEventChoices({ capabilities: ["is_hub"], display_model: "UA Gate" }).map(choice => choice.value), [ "DPS", "Lock" ]);
+  assert.deepEqual(logEventChoices({ capabilities: ["is_hub"], display_model: "UA Ultra" }).map(choice => choice.value), [ "DPS", "Lock", "REX" ]);
 });

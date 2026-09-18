@@ -4,9 +4,9 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, ACCESS_DEVICE_UNLOCK_INTERVAL, ACCESS_GARAGE_TRANSITION_DURATION, ACCESS_MQTT_TOPIC,
   ACCESS_WEBHOOK_PORT } from "./settings.ts";
+import { ALL_CHOICES, mqttFeatureOptions } from "homebridge-plugin-utils";
 import type { FeatureCategoryEntry, FeatureOptionChoice, FeatureOptionEntry } from "homebridge-plugin-utils";
-import { accessMethodChoices, doorServiceChoices } from "./policy.ts";
-import { mqttFeatureOptions } from "homebridge-plugin-utils";
+import { accessMethodChoices, doorServiceChoices, hubSensorChoices, hubSensorModels, logEventChoices } from "./policy.ts";
 
 // Plugin configuration options.
 export interface AccessOptions {
@@ -134,24 +134,15 @@ export const featureOptions: Record<string, AccessFeatureOption[]> = {
     { default: true, description: "Add a doorbell accessory to handle doorbell ring events in HomeKit.", meta: { hasCapability: ["door_bell"] }, name: "Doorbell" },
     { default: false, description: "Add a switch accessory for automation scenarios that reflects doorbell ring events, and rings or cancels the doorbell through the official Access API when an API token is configured.", meta: { hasCapability: ["door_bell"] }, name: "Doorbell.Trigger" },
     { choices: "doorGuards", default: true, defaultValue: "", description: "Restrict doorbell ring events to the selected door guards, the Access users assigned to answer this door's calls; rings for any other door guard are ignored. Guards are listed by name when the controller is configured with an API token and by identifier otherwise, and a controller reached by its token alone lists every user. Each ring's door guard IDs are logged when debug logging is enabled.", meta: { hasCapability: ["door_bell"] }, multiple: true, name: "Doorbell.DoorGuards", scopes: ["device"] },
-    { default: true, description: "Add a contact sensor accessory for the door position sensor.", meta: { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ] }, name: "DPS" },
-    { default: true, description: "Add a contact sensor accessory for the remote release.", meta: { modelKey: ["UA Hub"] }, name: "REL" },
-    { default: true, description: "Add a contact sensor accessory for the request to enter sensor.", meta: { modelKey: ["UA Hub"] }, name: "REN" },
-    { default: true, description: "Add a contact sensor accessory for the request to exit sensor.", meta: { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ] }, name: "REX" },
+    { choices: "hubSensors", default: true, defaultValue: ALL_CHOICES, description: "Add a contact sensor accessory for each selected sensor. The list offers the sensors this hub carries, and every one is selected by default.", meta: { choiceDomain: hubSensorChoices(), modelKey: hubSensorModels() }, multiple: true, name: "Sensors" },
     { default: true, description: "Add a lock accessory for the side door (pedestrian gate) on UniFi Access Gate Hub devices.", meta: { modelKey: ["UA Gate"] }, name: "SideDoor" },
-    { default: true, description: "Add a contact sensor accessory for the side door position sensor.", group: "SideDoor", meta: { modelKey: ["UA Gate"] }, name: "SideDoor.DPS" },
     { default: false, description: "Add a switch accessory to control the side door lock. This can be useful in automation scenarios where you want to work around HomeKit's security restrictions for controlling locks.", group: "SideDoor", meta: { modelKey: ["UA Gate"] }, name: "SideDoor.Lock.Trigger" }
   ],
 
   // Logging options.
   "Log": [
 
-    { default: true, description: "Log doorbell ring events in Homebridge.", meta: { hasCapability: ["door_bell"] }, name: "Doorbell" },
-    { default: true, description: "Log door position sensor events in Homebridge.", meta: { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ] }, name: "DPS" },
-    { default: true, description: "Log door remote release events in Homebridge.", meta: { modelKey: ["UA Hub"] }, name: "REL" },
-    { default: true, description: "Log door request to enter events in Homebridge.", meta: { modelKey: ["UA Hub"] }, name: "REN" },
-    { default: true, description: "Log door request to exit events in Homebridge.", meta: { modelKey: [ "UA Ultra", "UA Hub", "UA Hub Door Mini" ] }, name: "REX" },
-    { default: true, description: "Log lock events in Homebridge.", meta: { hasCapability: ["is_hub"] }, name: "Lock" }
+    { choices: "logEvents", default: true, defaultValue: ALL_CHOICES, description: "Log the selected event categories in Homebridge. Every category is selected by default.", meta: { choiceDomain: logEventChoices(), hasCapability: ["is_hub"] }, multiple: true, name: "Events" }
   ],
 
   /* MQTT options, carried from the shared generator so the broker and topic entries stay identical across every plugin that offers them.
