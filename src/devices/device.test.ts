@@ -5,7 +5,7 @@
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { FeatureOptions, HAPStatus, mqttTopic } from "homebridge-plugin-utils";
-import { deviceSerial, serialForm } from "../policy.ts";
+import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
@@ -177,7 +177,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
       off: (event: string): void => { removals.push(event); },
       on: (event: string): void => { registrations.push(event); }
     },
-    id: serialForm(CONTROLLER_ID),
+    id: controllerIdentity({ address: "1.2.3.4", mac: CONTROLLER_ID }),
     platform: makePlatformDouble({
 
       api: { hap: { Characteristic: SentinelCharacteristic, HapStatusError, Service: SentinelService } },

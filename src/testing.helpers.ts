@@ -23,16 +23,16 @@ import type { API, Logging } from "homebridge";
 import type { AccessBootstrapConfig, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
-import type { AccessLoginOutcome, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
+import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
 import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { TestClock, silentLog } from "homebridge-plugin-utils/testing";
+import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { AccessAccessory } from "./types.ts";
 import type { AccessController } from "./controller/controller.ts";
 import type { AccessPlatform } from "./platform.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
 import type { TestMqttClient } from "homebridge-plugin-utils/testing";
-import { deviceModel } from "./policy.ts";
 
 /**
  * The building every topology document below roots at, and the location an Enterprise hub is recognized as building-hosted by.
@@ -246,7 +246,7 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
  * reads of its controller, so a member the plugin starts reading enters here by the same grep, and a double missing a listed member is a compile error in this one
  * place rather than a silent fallback at every site that stands one up.
  */
-type ControllerSurface = Pick<AccessController, "client" | "config" | "events" | "getDeviceName" | "hasFeature" | "id" | "log" | "login" | "mqtt" | "mqttIdentity" |
+type ControllerSurface = Pick<AccessController, "client" | "config" | "events" | "getDeviceName" | "hasFeature" | "id" | "log" | "login" | "mqtt" |
   "mqttPublish" | "name" | "ownershipKey" | "platform" | "reclaimClaims" | "reclaimKeys" | "resolveDeviceModel" | "signal" | "spawnLoop">;
 
 /* The client members the plugin reads, each optional because an arm supplies only the ones its path reaches: the official surface and the transport are whatever the
@@ -278,7 +278,7 @@ export interface ControllerDoubleOptions {
   events?: ControllerEventsDouble;
   getDeviceName?: AccessController["getDeviceName"];
   hasFeature?: AccessController["hasFeature"];
-  id?: DecoratedSerial;
+  id?: ControllerIdentity;
   // Merged over a silent log, so an arm names only the channel it reads and hears nothing from the rest.
   log?: Partial<HomebridgePluginLogging>;
   login?: () => Promise<AccessLoginOutcome>;
@@ -294,8 +294,9 @@ export interface ControllerDoubleOptions {
 }
 
 /* Stand up the controller as a device or the platform reads it: every member the plugin reads, defaulted, with each derived member deriving from the same resolved
- * one the real controller derives it from - the identity and the configured address answer the MQTT identity and the ownership key, and the ownership key answers
- * the reclaim keys. An arm's override always wins, so an arm names the one fact its question is about and inherits the rest.
+ * one the real controller derives it from - the identity comes from the same policy function the real controller answers by, so a double an arm gives no identity
+ * to answers by its configured address exactly as a controller reached with an API token alone does, and the ownership key answers the reclaim keys. An arm's
+ * override always wins, so an arm names the one fact its question is about and inherits the rest.
  *
  * Each double-typed dependency is widened once here, and the surface once at the return: the client, the event rail, and the broker are classes carrying
  * private state nothing structural satisfies, and so is the controller itself. Every cast this factory needs lives here and at no site that stands a
@@ -308,7 +309,7 @@ export interface ControllerDoubleOptions {
 export function makeControllerDouble(options: ControllerDoubleOptions = {}): AccessController {
 
   const config = options.config ?? { address: "1.2.3.4" };
-  const id = options.id;
+  const id = options.id ?? controllerIdentity({ address: config.address });
   const mqtt = options.mqtt ?? null;
   const platform = options.platform ?? makePlatformDouble();
   const resolveDeviceModel = options.resolveDeviceModel ?? deviceModel;
@@ -321,12 +322,11 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
     config,
     events: { emitPacket: (): void => undefined, off: (): void => undefined, on: (): void => undefined, ...options.events } as unknown as AccessEvents,
     getDeviceName: options.getDeviceName ?? ((): string => "Test Hub [UA Hub]"),
-    hasFeature: options.hasFeature ?? ((option: string, device?: DecoratedSerial): boolean => platform.featureOptions.test(option, device ?? id, id)),
+    hasFeature: options.hasFeature ?? ((option: string, device?: DecoratedSerial): boolean => platform.featureOptions.test(option, device, id)),
     id,
     log: { ...silentLog(), ...options.log },
     login: options.login ?? (async (): Promise<AccessLoginOutcome> => "reporting"),
     mqtt: mqtt as unknown as Nullable<MqttClient>,
-    mqttIdentity: id ?? config.address,
     mqttPublish: options.mqttPublish ?? ((topic, payload, init): void => mqtt?.publishGuarded(topic, payload, init)),
     name: options.name ?? "Test Controller",
     ownershipKey: config.address,

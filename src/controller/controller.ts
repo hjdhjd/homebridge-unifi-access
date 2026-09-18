@@ -4,7 +4,7 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerOwnershipKeys, DecoratedSerial,
+import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
   MembershipClaims } from "../policy.ts";
 import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAccessWebhookDelivery, selectDoorStates, verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
@@ -12,8 +12,8 @@ import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoi
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, membershipDelta,
   mqttConnectionSettings, onAbort, prefixedLog, retry, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
-import { accessoryOwnership, canTransition, composeConnectIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel, deviceRecord,
-  deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
+import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel,
+  deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
   webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import { AccessDeliveryLedger } from "../webhooks.ts";
@@ -100,8 +100,8 @@ export class AccessController {
      * controller's own scope so a controller-suffixed Log.Debug entry turns on this controller and everything it manages.
      *
      * The gate wraps the prefix rather than the other way around, so a suppressed debug line costs one predicate call and no string composition. The predicate reads
-     * this controller's identity on every call rather than capturing it here...a controller consulted before it has connected has no id yet and logs at global scope,
-     * the only scope that can name it.
+     * this controller's identity on every call rather than capturing it here...the identity derives from the controller document the live client holds, so the gate
+     * reads the address form until that document arrives and the serial from then on, and a Log.Debug entry applies while it names the form then in force.
      */
     this.log = debugGatedLog(prefixedLog(this.platform.log, () => this.name), () => this.platform.featureOptions.test("Log.Debug", undefined, this.id));
 
@@ -173,8 +173,8 @@ export class AccessController {
    */
   public async login(): Promise<AccessLoginOutcome> {
 
-    // The plugin has been disabled globally. The controller's identity is unknown until we connect, so this pre-connect gate consults global feature-option scope
-    // directly rather than hasFeature, which would read a MAC address we do not yet have.
+    // The plugin has been disabled globally. This gate asks the plugin-wide question alone, so it consults global feature-option scope directly rather than
+    // hasFeature, whose answer a per-controller entry would speak for...whether this particular controller is wanted is the check below, once it has connected.
     if(!this.platform.featureOptions.test("Device")) {
 
       this.log.info("Disabling this UniFi Access controller.");
@@ -226,9 +226,9 @@ export class AccessController {
      * configuration properties answer only where no option speaks. A null answer means there is nothing to connect to, so no client is constructed at all. The
      * client binds to our terminal shutdown signal, so its connection ends on plugin shutdown rather than leaking past it.
      *
-     * A token-only controller resolves no MAC address for the life of the process, since the controller document a MAC comes from is credential surface the
-     * published API does not serve. Per-controller option entries cannot address such a controller at all, so its broker and topic are carried by the
-     * configuration properties and the canonical topic prefix alone.
+     * A controller reached with an API token alone answers by its address identity, so a per-controller option entry addresses it exactly as it addresses a
+     * credentialed controller and its broker and topic resolve at controller scope like any other's. The configuration properties answer only where no option
+     * speaks, whichever identity the controller holds.
      */
     const mqttSettings = mqttConnectionSettings({ config: this.config, controller: this.id, featureOptions: this.platform.featureOptions });
 
@@ -380,8 +380,8 @@ export class AccessController {
       // A non-null official surface IS official capability: the client's own getter folds the capability flag into it.
       official = this.client.official;
 
-      /* Turning the option off also cleans the controller, rather than leaving it delivering to a port nothing is listening on. A token-only controller resolves
-       * this option at global scope, since it never learns a MAC address for a per-controller entry to name it by.
+      /* Turning the option off also cleans the controller, rather than leaving it delivering to a port nothing is listening on. A controller reached with an API
+       * token alone answers by its address identity, so a per-controller entry names it and this option resolves at its own scope like any other controller's.
        */
       if(!this.hasFeature("Controller.Webhooks")) {
 
@@ -1219,13 +1219,13 @@ export class AccessController {
   // Utility function to return a floating point configuration parameter on a device.
   public getFeatureFloat(option: string): Nullable<number | undefined> {
 
-    return this.platform.featureOptions.getFloat(option, this.id);
+    return this.platform.featureOptions.getFloat(option, undefined, this.id);
   }
 
   // Utility function to return an integer configuration parameter on a device.
   public getFeatureNumber(option: string): Nullable<number | undefined> {
 
-    return this.platform.featureOptions.getInteger(option, this.id);
+    return this.platform.featureOptions.getInteger(option, undefined, this.id);
   }
 
   /* Utility for checking feature options on the controller, and on one of its devices where the caller names one.
@@ -1236,7 +1236,7 @@ export class AccessController {
    */
   public hasFeature(option: string, device?: DecoratedSerial): boolean {
 
-    return this.platform.featureOptions.test(option, device ?? this.id, this.id);
+    return this.platform.featureOptions.test(option, device, this.id);
   }
 
   // The controller's own information document, read through to the live state, or null before one has been fetched.
@@ -1329,19 +1329,21 @@ export class AccessController {
     return (state !== undefined) && this.#membershipClaims(state).serials.has(serialForm(mac));
   }
 
-  // Return a unique identifier for an Access controller.
-  public get id(): DecoratedSerial | undefined {
-
-    return this.uda ? serialForm(this.uda.host.mac) : undefined;
-  }
-
-  /* The identity this controller's own MQTT topics are published under: its serial where a controller document exists, and its configured address where one never
-   * will. A controller reached with an API token alone reads no controller document for the life of the process, so its address is the only stable name it has,
-   * exactly as the ownership key above reasons. A credentialed controller publishes under its serial, the same identity form every device topic carries.
+  /* The one name this controller answers by: the identity its feature-option entries are scoped on, its own MQTT topics open with, and the settings page stamps
+   * its controller entry with. The derivation lives in the policy module, so this getter and the webUI server that lists the same controller compose one answer.
+   *
+   * It re-derives on every call from the document the live client holds rather than caching one, which is what makes the transition between the two forms
+   * automatic: a controller holding no document answers by its configured address in the scope form, and one that has read its document answers by its serial
+   * from that moment on. A controller reached with an API token alone holds no document for the life of the process, so the address form is its permanent
+   * answer and its per-controller entries resolve exactly as a credentialed controller's do.
+   *
+   * The only read that reaches this getter before the first connect is the debug-level log gate above, because the MQTT settings resolve inside login() after
+   * #connect() has returned. A credentialed controller therefore gates one process's worth of debug logging on its address form and everything afterwards on
+   * its serial, and no user-visible read falls in that window.
    */
-  public get mqttIdentity(): string {
+  public get id(): ControllerIdentity {
 
-    return this.id ?? this.config.address;
+    return controllerIdentity({ address: this.config.address, mac: this.uda?.host.mac });
   }
 
   // The name this controller's log lines are prefixed with.

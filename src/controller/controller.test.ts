@@ -770,21 +770,54 @@ test("a controller that has learned its MAC address still owns the accessories i
   assert.deepEqual(harness.unregistered, ["uuid-carried"], "an accessory keyed by this controller's prior identity is still its own");
 });
 
-test("a token-only controller publishes its telemetry under its configured address", () => {
+test("a token-only controller answers by its configured address in the scope form", () => {
 
   const harness = makeController({ controllerInfo: null });
 
-  // No controller document means no serial, and the address is the one stable name such a controller has, exactly as its ownership key reasons.
-  assert.equal(harness.controller.mqttIdentity, "1.2.3.4");
+  /* No controller document means no serial, and the configured address is the one stable name such a controller has. It answers in the scope form rather than
+   * raw: a scope identifier may carry neither a period nor an equals sign, and the literal is deliberate here, because it proves the spelling the identity
+   * actually carries rather than agreeing with whatever the repair returns.
+   */
+  assert.equal(harness.controller.id, "1-2-3-4");
 });
 
-test("a controller that has read its document publishes its telemetry under its serial, in the same form as a device identity", () => {
+test("a controller that has read its document answers by its serial, in the same form as a device identity", () => {
 
   const harness = makeController({ config: { password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
 
-  // The literal is deliberate: it proves the spelling the topic carries rather than agreeing with whatever the normalizer returns.
-  assert.equal(harness.controller.mqttIdentity, "112233445566");
-  assert.notEqual(harness.controller.mqttIdentity, harness.controller.ownershipKey, "the MQTT identity is the serial form, where the ownership key keeps the raw MAC");
+  // The literal is deliberate for the same reason: it proves the spelling the topic and every controller-scoped entry carry.
+  assert.equal(harness.controller.id, "112233445566");
+  assert.notEqual(harness.controller.id, harness.controller.ownershipKey, "the identity is the serial form, where the ownership key keeps the raw MAC");
+});
+
+test("a token-only controller resolves its own controller-scoped options under its address identity", () => {
+
+  /* The discriminating pair: a controller-suffixed entry against a global one that says the opposite. A controller whose reads resolved only globally would
+   * answer false here, and one whose entry was keyed in a spelling the read never asks for would answer false too.
+   */
+  const entry = makeController({ controllerInfo: null, options: [ "Enable.Controller.Publish.Telemetry.1-2-3-4", "Disable.Controller.Publish.Telemetry" ] });
+
+  assert.equal(entry.controller.hasFeature("Controller.Publish.Telemetry"), true,
+    "the entry naming this controller's address identity is what answers, ahead of the global entry that turns the option off");
+
+  const global = makeController({ controllerInfo: null, options: ["Disable.Controller.Publish.Telemetry"] });
+
+  assert.equal(global.controller.hasFeature("Controller.Publish.Telemetry"), false,
+    "and with that entry gone the global answer stands, which is what makes the pair tell them apart");
+});
+
+test("a token-only controller resolves a controller-scoped numeric option under its address identity", () => {
+
+  const own = makeController({ controllerInfo: null, options: ["Enable.Controller.DelayDeviceRemoval.1-2-3-4=30"] });
+
+  assert.equal(own.controller.getFeatureNumber("Controller.DelayDeviceRemoval"), 30, "the numeric read resolves the entry keyed by this controller's own identity");
+
+  // The same entry keyed by a device serial instead, which is the pair that tells the controller slot from the device slot: a read that passed the identity in the
+  // device slot would answer this entry, and the controller slot does not.
+  const elsewhere = makeController({ controllerInfo: null, options: ["Enable.Controller.DelayDeviceRemoval." + CONTROLLER_MAC + "=30"] });
+
+  assert.equal(elsewhere.controller.getFeatureNumber("Controller.DelayDeviceRemoval"), 60,
+    "an entry naming something other than this controller leaves the registered default answering");
 });
 
 test("an accessory created under an earlier form of the device's identity is never adopted, while one under its identity is", () => {

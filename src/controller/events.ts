@@ -81,7 +81,7 @@ export class AccessEvents extends EventEmitter {
     // If enabled, publish all the event traffic coming from the Access controller to MQTT.
     if(this.mqttPublishTelemetry) {
 
-      this.controller.mqttPublish(mqttTopic(this.controller.mqttIdentity, mqttTopics.telemetry.topic), JSON.stringify(packet));
+      this.controller.mqttPublish(mqttTopic(this.controller.id, mqttTopics.telemetry.topic), JSON.stringify(packet));
     }
 
     if(packet.event === ACCESS_DEVICE_UPDATE_EVENT) {

@@ -11,7 +11,7 @@ import type { AccessBootstrapConfig, AccessDoorConfig } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, readerRecord } from "./testing.helpers.ts";
 import { TestMqttClient } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
-import { serialForm } from "./policy.ts";
+import { controllerIdentity } from "./policy.ts";
 import test from "node:test";
 
 // The doors a topology document carries, reached the way the library's own door-state derivation reaches them: through the building's single floor.
@@ -139,12 +139,11 @@ test("makeControllerDouble with no options answers the members the plugin reads 
 
   const controller = makeControllerDouble();
 
-  /* A controller reached with an API token alone never learns a serial, so its identity stays undefined and every member derived from an identity falls back to the
-   * configured address. Reading the derived members rather than the address alone is what proves the factory derives them the way the controller does.
+  /* The default double stands in for a controller reached with an API token alone, which never learns a serial and answers by its configured address repaired
+   * into a scope identifier. Reading the derived members rather than the address alone is what proves the factory derives them the way the controller does.
    */
-  assert.equal(controller.id, undefined, "the default double stands in for the controller that never learned its own serial");
-  assert.equal(controller.mqttIdentity, "1.2.3.4", "so its topics are published under the configured address");
-  assert.equal(controller.ownershipKey, "1.2.3.4", "and the key it stamps its accessories with is that same address");
+  assert.equal(controller.id, "1-2-3-4", "the default double answers by its configured address in the scope form, as a token-only controller does");
+  assert.equal(controller.ownershipKey, "1.2.3.4", "while the key it stamps its accessories with is that same address raw");
   assert.deepEqual(controller.reclaimKeys, { currentKey: "1.2.3.4", priorKey: undefined }, "with no prior key, because it has answered by no other one");
   assert.equal(controller.reclaimClaims(), undefined, "a controller with no live client claims nothing");
   assert.equal(await controller.login(), "reporting", "and it logs in as one that serves its membership");
@@ -159,10 +158,10 @@ test("makeControllerDouble with no options answers the members the plugin reads 
 
 test("an identity and an address given to makeControllerDouble reach the members derived from them", () => {
 
-  const controller = makeControllerDouble({ config: { address: "5.6.7.8" }, id: serialForm("aa:bb:cc:dd:ee:ff") });
+  const controller = makeControllerDouble({ config: { address: "5.6.7.8" }, id: controllerIdentity({ address: "5.6.7.8", mac: "aa:bb:cc:dd:ee:ff" }) });
 
   // An address no default carries and an identity beside it, so a factory ignoring either option could not coincide with both readings.
-  assert.equal(controller.mqttIdentity, "AABBCCDDEEFF", "an identity takes the MQTT identity over the address, as the real controller resolves it");
+  assert.equal(controller.id, "AABBCCDDEEFF", "a MAC address given to the identity composition wins over the address, as the real controller resolves it");
   assert.equal(controller.ownershipKey, "5.6.7.8", "while the ownership key is the configured address whatever the identity says");
   assert.equal(controller.reclaimKeys.currentKey, "5.6.7.8", "and the key it answers by now is that address rather than the default one");
 

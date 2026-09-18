@@ -10,7 +10,8 @@
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { accessMethodChoices, composeConnectIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
+import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceSerial, doorGuardChoices, membershipRecords, officialDeviceModel,
+  serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import { officialUsers } from "./users-census.js";
@@ -193,19 +194,39 @@ class PluginUiServer extends HomebridgePluginUiServer {
            * empty set - which is what lets a token-only user configure per-device options in the very keyspace the runtime resolves, ready the moment credentials
            * are added.
            *
-           * No controller row comes out of this arm. The official surface exposes no console identity at all, and inventing one would put option entries under a key
-           * nothing can read.
+           * The controller leads the list here exactly as it does below, keyed by the same function the runtime keys its controller-scope reads by, so an option
+           * the user sets on this page's controller entry is read back at runtime under the name it was written under. The official surface answers no console
+           * document, so the row carries the configured address as its name and honest empty values wherever a credentialed row carries the host's own.
            */
           if(!controllerInfo) {
 
-            return { devices: officialDevices(await client.official.devices.fetchAll(), users), kind: "token-only" };
+            /* eslint-disable camelcase */
+            const controllerRecord = {
+
+              alias: controller.address,
+              capabilities: [],
+              device_type: "",
+              display_model: "controller",
+              ip: "",
+              is_online: true,
+              mac: "",
+              model: "",
+              name: controller.address,
+              serialNumber: controllerIdentity({ address: controller.address }),
+              unique_id: controller.address
+            };
+            /* eslint-enable camelcase */
+
+            // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
+            return { devices: [ controllerRecord, ...officialDevices(await client.official.devices.fetchAll(), users) ], kind: "token-only" };
           }
 
           const host = controllerInfo.host;
 
           /* The controller itself, projected into the shape a device record carries so the browser renders it through the same path as everything else. The serial is
            * the controller's MAC in the exact spelling the plugin's runtime keys controller-scoped option entries by, which is what makes an option edited on the
-           * controller's own page resolve at runtime.
+           * controller's own page resolve at runtime. It is spelled through serialForm rather than through the identity composition above because the two answer
+           * the same string for a known MAC, and this arm has the host document in hand.
            */
           /* eslint-disable camelcase */
           const controllerRecord = {

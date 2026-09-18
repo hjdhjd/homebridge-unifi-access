@@ -11,8 +11,9 @@
  *
  * Two settings substrates meet here. A feature option is where a setting lives, and a set of per-controller configuration properties are a second home the plugin
  * honors so that a configuration nobody has opened the webUI on keeps working. Reconciling the two is the migration's whole job: it moves each property's value into
- * the option that supersedes it and rebuilds the item without it. The module takes no imports at all - the engine class, the served catalog index, and the entry
- * enumerator are handed in - so the whole of it is exercisable under node against the real engine and the real catalog, with no network and no DOM.
+ * the option that supersedes it and rebuilds the item without it. The module takes no imports at all - the engine class, the served catalog index, the scope
+ * enumerator, and the identifier repair are handed in - so the whole of it is exercisable under node against the real engine and the real catalog, with no network
+ * and no DOM.
  */
 
 /* The keys a controllers[] item converges to: everything the plugin's own controller options type declares, less the properties that migrate into feature
@@ -92,13 +93,6 @@ const STALE_SELECTION_MESSAGE = "Its entry left the configuration after the side
 // What to do about a sidebar entry whose controller left the configuration, rendered as the error view's guidance.
 const STALE_SELECTION_GUIDANCE = "Refresh the controller list to take it off the sidebar.";
 
-/* The notice for a controller reachable through its API token alone whose console lists nothing adopted, rendered in the options pane in place of the option table.
- * The Settings tab is what it names because that is the one surface able to take the credentials in this state: the page docks its connection editor only with a
- * device in view, and this controller has none to dock it under.
- */
-export const TOKEN_ONLY_EMPTY_NOTICE = "This controller answered through its API token alone, and the Access console lists no adopted devices for it. To bring " +
-  "its doors and devices into HomeKit, add a local user's username and password for this controller on the Settings tab.";
-
 /* Read the UI server's device probe, which is the ONE place the three-state response protocol is interpreted.
  *
  * The server answers a kind-tagged union rather than a device list the browser has to interpret, because the two successful outcomes differ in what a user can do
@@ -143,10 +137,11 @@ export const staleSelectionVerdict = () => ({ devices: [], guidance: STALE_SELEC
   message: STALE_SELECTION_MESSAGE });
 
 /* Map a probe verdict onto the device list and connection outcome the framework's own hook contract carries, with each outcome's own copy beside it. A success
- * carries its devices and an empty message, a failure carries no devices, its reason, its headline, and its guidance where it has one, and the one success with
- * nothing to list - a token-only controller whose console has no adopted devices - carries the notice that declares it, which the framework renders in place of an
- * option table whose entries no runtime read could resolve. Only the members an outcome carries are written, because an absent member is how the contract says the
- * framework's own wording applies.
+ * carries its devices and an empty message, and a failure carries no devices, its reason, its headline, and its guidance where it has one. Only the members an
+ * outcome carries are written, because an absent member is how the contract says the framework's own wording applies.
+ *
+ * No success needs a nothing-to-list notice: every device list a controller answers with opens with that controller's own row, whichever way it was reached, so
+ * the shortest list a reachable controller can produce still carries a node to select and an options table to render against it.
  */
 export const deviceListResult = (verdict) => {
 
@@ -160,13 +155,6 @@ export const deviceListResult = (verdict) => {
 
       result.guidance = verdict.guidance;
     }
-
-    return result;
-  }
-
-  if((verdict.kind === "token-only") && !verdict.devices.length) {
-
-    result.emptyMessage = TOKEN_ONLY_EMPTY_NOTICE;
   }
 
   return result;
@@ -224,18 +212,13 @@ const withIdentityApplied = (base, identity) => {
   return successor;
 };
 
-/* Produce the controllers patch that writes one controller's identity, either onto the item it already has or as a new item at the end.
+/* Compose the controllers array that writes one controller's identity, either onto the item it already has or as a new item at the end.
  *
  * The item the write lands on is found by the address the caller started from, not by the address being written, so an edit that changes a controller's address
  * replaces that controller rather than adding a second one beside it. An `originalAddress` that names no configured item - and the absent one an add passes -
  * appends instead, which is the whole of what distinguishes adding a controller from editing one.
- *
- * @param config     - The platform configuration entry.
- * @param controller - The identity to write, and the address of the item to write it onto.
- *
- * @returns The `{ controllers }` patch for the session's commit to merge onto the platform entry.
  */
-export const withControllerSaved = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
+const controllersWithSave = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
 
   const identity = { address, password, tokens, username, verifyTls };
   const items = controllers(config);
@@ -243,14 +226,14 @@ export const withControllerSaved = (config, { address, originalAddress, password
 
   if(index === -1) {
 
-    return { controllers: [ ...items, withIdentityApplied({}, identity) ] };
+    return [ ...items, withIdentityApplied({}, identity) ];
   }
 
   const next = [...items];
 
   next[index] = withIdentityApplied(items[index], identity);
 
-  return { controllers: next };
+  return next;
 };
 
 /* Produce the patch that writes an identity onto the primary controller, preserving any additional controllers and the primary's other fields. This is the first-run
@@ -278,69 +261,18 @@ export const withPrimaryIdentity = (config, identity) => {
   return { controllers: next };
 };
 
-/* Every option name the served catalog declares, expanded through the engine's own composition rule - a category name joined to an option name by a dot, with a
- * nameless option addressing its category alone. The sweep below walks this list rather than the configured entries' own text, because what an entry addresses is
- * knowledge the entry format owns and the plugin must never re-derive.
+/* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, and the predicate
+ * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the scope enumerator, and the identifier repair is what
+ * keeps this module import-free and exercisable under node against the real engine and the real catalog, rather than against a stand-in that could drift from either.
+ *
+ * @param injected.FeatureOptions        - The feature-option engine class.
+ * @param injected.catalog               - The catalog index built from the served categories and options, which carries both alongside its derived indices.
+ * @param injected.enumerateScopeEntries - The framework's own enumerator over the configured entries reading at one scope identifier.
+ * @param injected.scopeSafeId           - The framework's repair of an arbitrary string into a scope identifier.
+ *
+ * @returns The interpreters: the migration, the awaiting-migration predicate, the controller save, and the controller removal.
  */
-const expandedOptionNames = (catalog) => {
-
-  const names = [];
-
-  for(const [ category, entries ] of Object.entries(catalog?.options ?? {})) {
-
-    for(const entry of entries) {
-
-      names.push(entry.name.length ? (category + "." + entry.name) : category);
-    }
-  }
-
-  return names;
-};
-
-/* Produce the patch that removes one controller, and optionally the configuration entries scoped to the devices it brought with it.
- *
- * The two halves are deliberately separable. Dropping the item is what removal means and always happens; stripping the entries is the user's own follow-on choice,
- * because the settings they configured for those devices are worth keeping when a controller is being re-added under a new address, and worth deleting when it is
- * gone for good. An empty MAC set therefore carries no options array at all, which leaves every configured entry exactly where it was.
- *
- * What an entry addresses is decided by the framework's own entry enumerator rather than by any reading of the entry's text. Several spellings resolve to one scope
- * - a bare enable or disable, the canonical form whose value sits behind the payload delimiter, and the legacy dot form - and a sweep that matched only the
- * canonical one would leave a removed controller's settings behind in the others. Each entry is enumerated on its own against every option the catalog declares, so
- * the answer is the same grammar the plugin's runtime resolves through. The bound that buys: an entry addressing an option the catalog does not declare is left
- * standing, which is the right answer anyway, since nothing in this plugin can resolve such an entry either.
- */
-const addressesSweptScope = ({ catalog, entry, enumerate, macs, optionNames }) => {
-
-  if(typeof entry !== "string") {
-
-    return false;
-  }
-
-  for(const option of optionNames) {
-
-    for(const configured of enumerate({ catalog, configuredOptions: [entry], option })) {
-
-      if(configured.id.length && macs.includes(configured.id.toLowerCase())) {
-
-        return true;
-      }
-    }
-  }
-
-  return false;
-};
-
-/* Build the configuration interpreters that need the served catalog: the legacy-settings migration, and the controller removal whose settings sweep resolves entry
- * identity through the framework's own enumerator. Injecting the engine class, the catalog index, and the enumerator is what keeps this module import-free and
- * exercisable under node against the real engine and the real catalog, rather than against a stand-in that could drift from either.
- *
- * @param injected.FeatureOptions             - The feature-option engine class.
- * @param injected.catalog                    - The catalog index built from the served categories and options, which carries both alongside its derived indices.
- * @param injected.enumerateConfiguredEntries - The framework's own enumerator over the configured entries addressing one option.
- *
- * @returns The interpreters: the legacy-settings migration, and the controller removal.
- */
-export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredEntries }) => {
+export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateScopeEntries, scopeSafeId }) => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
   // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
@@ -400,7 +332,62 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
     return (Object.keys(item ?? {}).length === keys.length) && keys.every((key) => item[key] === successor[key]);
   };
 
+  /* The scope identifier a configured address answers by, or null for an address there is no identity to compose from. A configured item's address is typed
+   * unknown because a hand-edited configuration file can carry anything under that name, and the framework's repair throws on a value that is not a string - so
+   * the string test runs first and an item with no usable address simply has no address identity. Every reader of that identity here asks through this one walk.
+   */
+  const addressIdentity = (address) => ((typeof address === "string") ? scopeSafeId(address) : null);
+
   return {
+
+    /* The configured controllers whose per-controller settings still need a MAC address, each carried with the full identity and TLS preference a probe needs in
+     * order to reach it. This is what lets the wiring probe exactly the controllers whose settings have somewhere left to go, and skip the network entirely once
+     * every one of them has converged.
+     *
+     * An item is awaiting migration exactly when it carries a complete credential pair AND something that a MAC address would move: a legacy property, or at
+     * least one option entry keyed by its address identity. A token-only item is out, because the controller information document a MAC comes from is never
+     * served to a token, so such an item would be probed forever and resolve nothing. An item whose identity the plugin cannot connect with at all is out for the
+     * same never-converges reason. An item carrying a token BESIDE a complete pair is in, because its credentials resolve a MAC exactly like any other item's -
+     * excluding it on the mere presence of a token would strand a controller that was always resolvable. Every excluded item keeps its legacy properties, which
+     * the plugin's own MQTT resolution still reads, and its address-keyed entries, which still resolve while the controller answers by that address.
+     *
+     * The entry probe runs only for an item whose address is a string, on the same reading the migration's own move takes: an item with no usable address has no
+     * address identity and answers on its legacy property alone.
+     *
+     * A configuration we cannot parse answers the empty array rather than throwing, on the same terms the migration declines one: the caller's next move is a
+     * network probe, and there is nothing here worth probing for.
+     *
+     * @param config - The platform configuration entry.
+     *
+     * @returns Each awaiting controller's identity and TLS preference.
+     */
+    controllersAwaitingMigration: (config) => {
+
+      const configuredOptions = Array.isArray(config?.options) ? config.options : [];
+      const properties = Object.keys(PER_CONTROLLER_SETTINGS);
+
+      const hasAddressEntry = (item) => {
+
+        const identity = addressIdentity(item?.address);
+
+        if(identity === null) {
+
+          return false;
+        }
+
+        for(const _entry of enumerateScopeEntries({ catalog, configuredOptions, id: identity })) {
+
+          return true;
+        }
+
+        return false;
+      };
+
+      return controllers(config)
+        .filter((item) => item?.username?.length && item?.password?.length &&
+          (properties.some((property) => item?.[property] !== undefined) || hasAddressEntry(item)))
+        .map((item) => ({ address: item.address, password: item.password, tokens: item.tokens, username: item.username, verifyTls: item.verifyTls }));
+    },
 
     /* Move the legacy per-controller configuration properties into their feature options, as a patch for the session to stage. This is transitional work with a
      * planned end: once a configuration has been all the way through it, there is nothing left to find and every later pass answers null.
@@ -416,6 +403,12 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
      *
      * Any top-level array field the migration reads declines the whole pass when it is present but not an array: a `controllers` or an `options` field in that
      * shape is one we cannot parse, and we do not guess at it. Absent is not the same thing and is entirely valid.
+     *
+     * An entry written while the controller answered by its address identity is the same setting a credentialed controller keys by its serial, so it moves onto
+     * the MAC through the engine's own scope move before the property step runs. That order is the rule that an option the user configured outranks the property,
+     * stated for an entry made under the controller's earlier identity: the moved entry is already in place when the property asks whether it has anywhere to
+     * land, so the property composes only where no entry speaks. The engine's own rule settles a collision the other way round - an option the user already keyed
+     * by the MAC keeps its place and the address entry is forgotten - because the settings built against the identity in use are the ones they are looking at.
      *
      * @param config       - The platform configuration entry.
      * @param macByAddress - The MAC address resolved for each controller address that answered a probe this pass.
@@ -441,6 +434,7 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
 
         const mac = macByAddress?.get(item?.address);
         const successor = {};
+        const identity = addressIdentity(item?.address);
 
         for(const key of CONTROLLER_KEYS) {
 
@@ -448,6 +442,13 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
 
             successor[key] = item[key];
           }
+        }
+
+        // The move runs ahead of the property step, and the flag is set rather than folded through a logical assignment: folding would skip the move entirely
+        // once an earlier item had composed, leaving the second controller's entries stranded under an address nothing resolves.
+        if((identity !== null) && mac && engine.moveScope({ from: identity, to: mac })) {
+
+          composed = true;
         }
 
         for(const [ property, option ] of Object.entries(PER_CONTROLLER_SETTINGS)) {
@@ -493,6 +494,14 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
 
     /* Produce the patch that removes one controller, with the settings sweep the user chose.
      *
+     * The two halves are deliberately separable. Dropping the item is what removal means and always happens; stripping the entries is the user's own follow-on
+     * choice, because the settings they configured for those devices are worth keeping when a controller is being re-added under a new address, and worth
+     * deleting when it is gone for good. An empty MAC set therefore carries no options array at all, which leaves every configured entry exactly where it was.
+     *
+     * The engine's scope clear is the one answer to which entries address an identity - it folds case and reads every spelling the resolver reads, the bare
+     * enable, the canonical value form, and the legacy dot form alike - so the plugin runs it once per swept identity rather than deciding for itself what an
+     * entry addresses. The survivors come back in the engine's canonical spelling, exactly as a save through the engine already leaves them.
+     *
      * @param config  - The platform configuration entry.
      * @param removal - The address of the controller to drop, and the MAC addresses whose entries to strip with it.
      *
@@ -507,43 +516,57 @@ export const makeAccessConfig = ({ FeatureOptions, catalog, enumerateConfiguredE
         return { controllers: remaining };
       }
 
-      // The comparison runs in lower case on both sides: the enumerator answers an entry's scope identifier in the casing the entry carried, and a MAC's casing in
-      // the configuration file says nothing about which scope it names.
-      const swept = macs.map((mac) => String(mac).toLowerCase());
-      const optionNames = expandedOptionNames(catalog);
+      const engine = engineFor(config);
 
-      return {
+      for(const mac of macs) {
 
-        controllers: remaining,
-        options: (Array.isArray(config?.options) ? config.options : [])
-          .filter((entry) => !addressesSweptScope({ catalog, entry, enumerate: enumerateConfiguredEntries, macs: swept, optionNames }))
-      };
+        engine.clearScope({ id: String(mac) });
+      }
+
+      return { controllers: remaining, options: engine.configuredOptions };
+    },
+
+    /* Produce the patch that writes one controller's identity, carrying its feature options across when the address itself changed.
+     *
+     * The connection editor is the one place a controller's address is edited, so it is the one place those settings can follow it. A controller reached with an
+     * API token alone is addressed by its configured address, so the entries the user built for it are keyed by that address and would be stranded under a name
+     * nothing resolves the moment the address moves. The move runs through the engine's own scope verb, the single statement of what addresses a scope, and the
+     * options array joins the patch only when that verb actually moved something - a credentialed controller has no entry under its address, so the rule runs for
+     * every changed address and costs one reference comparison for the controllers that carry nothing.
+     *
+     * An address edited by hand in the configuration file is outside this rule, and the generated MQTT document says so where it names the token-only topic form.
+     *
+     * The configuration handed in is read and never edited: the engine composes a fresh array for every transform it makes, which is the composer's own term the
+     * page's coordinated write states, since the page's store holds that options array by reference.
+     *
+     * @param config     - The platform configuration entry.
+     * @param controller - The identity to write, and the address of the item to write it onto.
+     *
+     * @returns The patch for the session's commit to merge onto the platform entry.
+     */
+    withControllerSaved: (config, controller) => {
+
+      const patch = { controllers: controllersWithSave(config, controller) };
+      const from = addressIdentity(controller.originalAddress);
+      const to = addressIdentity(controller.address);
+
+      /* An add names no address to move from, and a hand-edited value that is not a string names no identity at all - neither has anything to carry across. The
+       * unchanged-address test beside them is a cost short-circuit rather than a correctness one: the engine refuses a move onto the same scope on its own and
+       * answers false for it, so what this saves is building an engine over the whole options array on every save that only edited a credential.
+       */
+      if((from === null) || (to === null) || (from === to)) {
+
+        return patch;
+      }
+
+      const engine = engineFor(config);
+
+      if(engine.moveScope({ from, to })) {
+
+        patch.options = engine.configuredOptions;
+      }
+
+      return patch;
     }
   };
-};
-
-/* The configured controllers whose per-controller settings still need a MAC address, each carried with the full identity and TLS preference a probe needs in order
- * to reach it. This is what lets the wiring probe exactly the controllers whose settings have somewhere left to go, and skip the network entirely once every one of
- * them has converged.
- *
- * An item is awaiting migration exactly when it carries a legacy property AND a complete credential pair, and that one rule handles every identity shape correctly.
- * A token-only item is out, because the controller information document a MAC comes from is never served to a token, so such an item would be probed forever and
- * resolve nothing. An item whose identity the plugin cannot connect with at all is out for the same never-converges reason. An item carrying a token BESIDE a
- * complete pair is in, because its credentials resolve a MAC exactly like any other item's - excluding it on the mere presence of a token would strand a controller
- * that was always resolvable. Every excluded item keeps its legacy properties, which the plugin's own MQTT resolution still reads.
- *
- * A configuration we cannot parse answers the empty array rather than throwing, on the same terms the migration declines one: the caller's next move is a network
- * probe, and there is nothing here worth probing for.
- *
- * @param config - The platform configuration entry.
- *
- * @returns Each awaiting controller's identity and TLS preference.
- */
-export const controllersAwaitingMigration = (config) => {
-
-  const properties = Object.keys(PER_CONTROLLER_SETTINGS);
-
-  return controllers(config)
-    .filter((item) => properties.some((property) => item?.[property] !== undefined) && item?.username?.length && item?.password?.length)
-    .map((item) => ({ address: item.address, password: item.password, tokens: item.tokens, username: item.username, verifyTls: item.verifyTls }));
 };

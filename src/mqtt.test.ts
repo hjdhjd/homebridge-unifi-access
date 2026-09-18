@@ -99,16 +99,25 @@ test("a broker option carrying no usable value leaves MQTT off for that controll
   assert.equal(resolve(["Enable.Mqtt.Url." + CONTROLLER_MAC], { mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC), null);
 });
 
-test("a controller that resolves no MAC address is carried by its legacy configuration", () => {
+test("a controller no entry speaks for is carried by its legacy configuration", () => {
 
-  /* A token-only identity never resolves a controller MAC, so no per-controller option entry can ever address it and the fallback chain is the whole of its MQTT
-   * provenance. That is a bound of the identity rather than a transient startup window, so it is asserted here as the deliberate answer.
+  /* Wherever the options are silent the configuration properties answer, which is the fallback chain's whole job and is true of every controller rather than of
+   * any one kind. A controller named by no scope at all is the sharpest way to read it: nothing can address such a controller, so the properties are all it has.
    */
   assert.deepEqual(resolve([], { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, undefined), { brokerUrl: LEGACY_BROKER, topicPrefix: LEGACY_TOPIC });
 
   // Another controller's entries must not reach it either, which is what fails a resolution that ignores the scope it was handed.
   assert.deepEqual(resolve([ "Enable.Mqtt.Url." + CONTROLLER_MAC + "." + OPTION_BROKER, "Enable.Mqtt.Topic." + CONTROLLER_MAC + "." + OPTION_TOPIC ],
     { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, undefined), { brokerUrl: LEGACY_BROKER, topicPrefix: LEGACY_TOPIC });
+});
+
+test("a controller reached with an API token alone is addressable by its address identity", () => {
+
+  /* Such a controller answers by its configured address with the periods repaired into hyphens, which is a scope identifier like any other - so its own broker and
+   * topic are configurable per-controller exactly as a credentialed controller's are, and the entries outrank the legacy properties sitting behind them.
+   */
+  assert.deepEqual(resolve([ "Enable.Mqtt.Topic.1-2-3-4=" + OPTION_TOPIC, "Enable.Mqtt.Url.1-2-3-4=" + OPTION_BROKER ],
+    { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, "1-2-3-4"), { brokerUrl: OPTION_BROKER, topicPrefix: OPTION_TOPIC });
 });
 
 test("the catalog declares the wire topics every subscriber already relies on", () => {

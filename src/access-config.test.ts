@@ -11,10 +11,10 @@
  * migrated configuration runs on the same effective values the legacy one did.
  */
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
-import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, TOKEN_ONLY_EMPTY_NOTICE, classifyProbeResponse,
-  controllersAwaitingMigration, deviceListResult, hasValidIdentity, makeAccessConfig, staleSelectionVerdict, withControllerSaved, withPrimaryIdentity }
-  from "../homebridge-ui/public/access-config.mjs";
-import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, mqttConnectionSettings } from "homebridge-plugin-utils";
+import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse, deviceListResult,
+  hasValidIdentity, makeAccessConfig, staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
+import { FeatureOptions, buildCatalogIndex, enumerateScopeEntries, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId }
+  from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -42,11 +42,27 @@ const LEGACY_TOPIC = "home/access";
 const RESOLVED = new Map([[ ADDRESS, CONTROLLER_MAC ]]);
 const UNRESOLVED = new Map<string, string>();
 
+/* The two addresses an address-keyed assertion works in, and the scope identity each answers by. The identity is the address with its periods repaired into
+ * hyphens, which is the spelling the runtime keys a token-only controller's entries by, and it is spelled as a literal here rather than derived so an assertion
+ * proves the spelling instead of agreeing with whatever the repair returns.
+ */
+const TOKEN_ADDRESS = "1.2.3.4";
+const TOKEN_IDENTITY = "1-2-3-4";
+const SECOND_ADDRESS = "5.6.7.8";
+const SECOND_IDENTITY = "5-6-7-8";
+
+// The value an address-keyed topic entry carries, distinct from every legacy value above so an assertion can tell which substrate answered.
+const ADDRESS_TOPIC = "unifi/gate";
+
 // The catalog index the webUI hands the interpreters, built from the real served catalog exactly as the browser builds it.
 const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 
-// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index, and the framework's own entry enumerator.
-const accessConfig = makeAccessConfig({ FeatureOptions, catalog, enumerateConfiguredEntries });
+// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index, the framework's own scope enumerator,
+// and its scope-identifier repair.
+const accessConfig = makeAccessConfig({ FeatureOptions, catalog, enumerateScopeEntries, scopeSafeId });
+
+// The interpreters the suite reads off that holder, named here once so every arm below reads them as plain functions.
+const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
 
 // The configuration shapes these tests build. The module's own declaration types every property as unknown, which is the honest shape of a hand-editable config
 // file...narrowing the fields these tests read back keeps the assertions free of casts without weakening anything the interpreters are handed.
@@ -173,6 +189,68 @@ test("a token-only controller is never probed for migration, and nothing compose
     "with no MAC address resolved there is nothing to compose and nothing to rewrite, so the pass stages no patch at all and converges on the spot");
   assert.deepEqual(config.controllers?.[0], { address: ADDRESS, mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER, tokens: TOKENS },
     "the legacy properties stay live, which is what keeps the runtime's own fallback answering for this controller");
+});
+
+test("an item carrying only address-keyed entries is awaiting migration, and its entries move onto the MAC address the probe resolves", () => {
+
+  const telemetry = "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY;
+  const topic = "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC;
+  const credentialed = { ...CREDENTIALS, address: TOKEN_ADDRESS };
+
+  // (i) An entry keyed by the address identity is a setting with somewhere to go, exactly as a legacy property is, so it is what makes an item worth probing.
+  assert.deepEqual(controllersAwaitingMigration({ controllers: [credentialed], options: [telemetry] }).map((entry) => entry.address), [TOKEN_ADDRESS],
+    "an item whose only migratable settings are address-keyed entries is still named, because a resolved MAC is what those entries are waiting on");
+  assert.deepEqual(controllersAwaitingMigration({ controllers: [credentialed] }), [],
+    "the same item with neither a legacy property nor an address-keyed entry has nothing to move, so it is never probed");
+  assert.deepEqual(controllersAwaitingMigration({ controllers: [{ address: TOKEN_ADDRESS, tokens: TOKENS }], options: [telemetry] }), [],
+    "a token-only item is out however many entries it carries, because a token never reaches the document a MAC address comes from");
+
+  const resolved = new Map([[ TOKEN_ADDRESS, CONTROLLER_MAC ]]);
+
+  // (ii) The move itself: every entry reading at the address identity lands at the MAC, and nothing is left under the identity the controller has outgrown.
+  const moved = migrated({ controllers: [credentialed], options: [ telemetry, topic ] }, resolved);
+  const movedEngine = engineWith(moved.options);
+
+  assert.equal(movedEngine.test("Controller.Publish.Telemetry", undefined, CONTROLLER_MAC), true, "the bare enable moved onto the controller's serial");
+  assert.equal(movedEngine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "and so did the entry carrying a value");
+  assert.deepEqual(moved.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [],
+    "nothing is left under the address identity, which is what makes the move a move rather than a copy");
+
+  // (iii) The destination outranks the source: a setting the user already made under the serial is the one they are looking at, so the address entry is forgotten.
+  const collided = migrated({ controllers: [credentialed],
+    options: [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, topic ] }, resolved);
+
+  assert.equal(engineWith(collided.options).value("Mqtt.Topic", undefined, CONTROLLER_MAC), LEGACY_TOPIC,
+    "an entry the user already keyed by the MAC keeps its place, and the address entry is dropped rather than written over it");
+
+  // (iv) The moved entries resolve through the engine at the MAC scope, which is the read the plugin's runtime actually makes.
+  assert.equal(engineWith(moved.options).scope("Mqtt.Topic", undefined, CONTROLLER_MAC), "controller",
+    "the moved entry answers at controller scope, which is the scope a controller-scoped read resolves through");
+
+  /* (v) A legacy property and an address-keyed entry for the same option in one item. The move runs first, so the entry is already in place when the property asks
+   * whether it has anywhere to land - which is the rule that an option the user configured outranks the property, stated for a choice made under the controller's
+   * earlier identity.
+   */
+  const both = migrated({ controllers: [{ ...credentialed, mqttTopic: LEGACY_TOPIC }], options: [topic] }, resolved);
+
+  assert.equal(engineWith(both.options).value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC,
+    "the entry the user configured under the address identity is their own choice, and it outranks the property exactly as a MAC-keyed entry would");
+  assert.ok(!Object.hasOwn(both.controllers?.[0] ?? {}, "mqttTopic"), "and the property leaves the item either way, composed or not");
+
+  /* (vi) Two items, each with its own address, its own entry value, and its own MAC. Both must move in one pass, which is what fails an implementation that folds
+   * the move into the composed flag with a logical assignment and skips every move after the first.
+   */
+  const pair = migrated({
+
+    controllers: [ credentialed, { ...CREDENTIALS, address: SECOND_ADDRESS } ],
+    options: [ topic, "Enable.Mqtt.Topic." + SECOND_IDENTITY + "=" + LEGACY_TOPIC ]
+  }, new Map([ [ TOKEN_ADDRESS, CONTROLLER_MAC ], [ SECOND_ADDRESS, OTHER_MAC ] ]));
+  const pairEngine = engineWith(pair.options);
+
+  assert.equal(pairEngine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "the first item's value lands at the first item's MAC");
+  assert.equal(pairEngine.value("Mqtt.Topic", undefined, OTHER_MAC), LEGACY_TOPIC, "and the second item's own value lands at its own, rather than being skipped");
+  assert.deepEqual(pair.options?.filter((entry) => [ TOKEN_IDENTITY, SECOND_IDENTITY ].some((id) => entry.toLowerCase().includes(id))), [],
+    "and neither address identity is left holding anything");
 });
 
 test("a partial credential pair is never probed either, with or without a token beside it", () => {
@@ -306,9 +384,9 @@ test("the device-list result carries each outcome's own copy and nothing else", 
 
   const nothingAdopted = deviceListResult(classifyProbeResponse({ devices: [], kind: "token-only" }));
 
-  assert.deepEqual(nothingAdopted, { devices: [], emptyMessage: TOKEN_ONLY_EMPTY_NOTICE, error: "" },
-    "a reachable controller whose console lists nothing declares that outcome with the notice the framework renders in place of the option table");
-  assert.deepEqual(Object.keys(nothingAdopted).sort(), [ "devices", "emptyMessage", "error" ], "and it carries no failure copy, because nothing failed");
+  assert.deepEqual(nothingAdopted, { devices: [], error: "" },
+    "a reachable controller whose console lists nothing carries no notice: every list opens with the controller's own row, so there is no empty list to declare");
+  assert.deepEqual(Object.keys(nothingAdopted).sort(), [ "devices", "error" ], "and it carries no copy at all, because nothing failed and nothing is missing");
 
   const reported = classifyProbeResponse({ kind: "error", message: "Invalid credentials." });
   const reportedResult = deviceListResult(reported);
@@ -344,7 +422,7 @@ test("a credential edit carries every other key the item holds", () => {
   const patch = withControllerSaved({ controllers: [item] },
     { address: ADDRESS, originalAddress: ADDRESS, password: "new secret", tokens: TOKENS, username: CREDENTIALS.username, verifyTls: true });
 
-  assert.deepEqual(patch.controllers[0], { ...item, password: "new secret" },
+  assert.deepEqual(patch.controllers?.[0], { ...item, password: "new secret" },
     "an un-migrated controller still owns settings the plugin runs on, and only the migration retires those");
 });
 
@@ -353,7 +431,7 @@ test("an edit clearing an identity field deletes it rather than storing it empty
   const patch = withControllerSaved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS, verifyTls: true }] },
     { address: ADDRESS, originalAddress: ADDRESS, password: CREDENTIALS.password, tokens: { access: "" }, username: CREDENTIALS.username, verifyTls: false });
 
-  assert.deepEqual(patch.controllers[0], CREDENTIALS, "a cleared field reads exactly as an absent one everywhere the configuration is consulted");
+  assert.deepEqual(patch.controllers?.[0], CREDENTIALS, "a cleared field reads exactly as an absent one everywhere the configuration is consulted");
 });
 
 test("a save that carries no token writes no tokens member at all, in every shape an editor can hand it one", () => {
@@ -365,7 +443,7 @@ test("a save that carries no token writes no tokens member at all, in every shap
   for(const tokens of [ undefined, {}, { access: "" } ]) {
 
     const item = withControllerSaved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS }] },
-      { address: ADDRESS, originalAddress: ADDRESS, password: CREDENTIALS.password, tokens, username: CREDENTIALS.username }).controllers[0] ?? {};
+      { address: ADDRESS, originalAddress: ADDRESS, password: CREDENTIALS.password, tokens, username: CREDENTIALS.username }).controllers?.[0] ?? {};
 
     assert.ok(!Object.hasOwn(item, "tokens"), "the tokens member deletes by omission for " + JSON.stringify(tokens ?? null) + " rather than being written empty");
     assert.deepEqual(item, CREDENTIALS, "and what is left is the item exactly as it reads with no token configured");
@@ -377,8 +455,8 @@ test("an address change edits that item rather than adding a second one beside i
   const moved = withControllerSaved({ controllers: [{ ...CREDENTIALS }] },
     { address: "10.0.0.9", originalAddress: ADDRESS, password: CREDENTIALS.password, username: CREDENTIALS.username });
 
-  assert.equal(moved.controllers.length, 1, "the address the write started from is what finds the item, so a changed address replaces rather than duplicates");
-  assert.deepEqual(moved.controllers[0], { ...CREDENTIALS, address: "10.0.0.9" }, "and the item now carries the new address");
+  assert.equal(moved.controllers?.length, 1, "the address the write started from is what finds the item, so a changed address replaces rather than duplicates");
+  assert.deepEqual(moved.controllers?.[0], { ...CREDENTIALS, address: "10.0.0.9" }, "and the item now carries the new address");
 
   const added = { address: "10.0.0.9", tokens: TOKENS };
 
@@ -386,6 +464,44 @@ test("an address change edits that item rather than adding a second one beside i
     "an absent original address is what makes a write an add");
   assert.deepEqual(withControllerSaved({ controllers: [{ ...CREDENTIALS }] }, { ...added, originalAddress: "10.0.0.250" }).controllers, [ CREDENTIALS, added ],
     "and an original address matching no item falls back to the same append rather than writing nothing");
+});
+
+test("an address edit carries the controller's own entries onto the new address identity, and every other save moves nothing", () => {
+
+  const telemetry = "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY;
+  const topic = "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC;
+  const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
+  const options = [ telemetry, topic ];
+  const before = [...options];
+  const edited = withControllerSaved({ controllers: [item], options },
+    { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS });
+  const engine = engineWith(edited.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, SECOND_IDENTITY), true, "the bare enable follows the address it was keyed to");
+  assert.equal(engine.value("Mqtt.Topic", undefined, SECOND_IDENTITY), ADDRESS_TOPIC, "and so does the entry carrying a value");
+  assert.deepEqual(edited.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [],
+    "nothing is left under the address the user replaced, which is the whole point of moving rather than copying");
+
+  /* The composer's own terms, which the page's coordinated write states and this interpreter is run as: the configuration handed in is read and never edited,
+   * because the page's store holds that options array by reference as the user's live edits and as the target a revert returns to.
+   */
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(edited.options, options, "and the patch answers with an array of its own rather than the one it was given");
+
+  // A save that changed no address must not re-key, which an entry sitting under the unchanged identity is what makes observable.
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
+    "options"), "an unchanged address composes no options member at all, so a re-key that ran unconditionally would be visible here");
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: SECOND_ADDRESS, tokens: TOKENS }), "options"),
+    "an add has no address to move entries from, so it composes none either");
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: SECOND_ADDRESS, originalAddress: 42, tokens: TOKENS }), "options"),
+    "and an original address that is not a string names no identity, so it composes none and never reaches the repair that would throw on it");
+
+  // A MAC-keyed entry belongs to the controller's hardware rather than to the address it is reached at, so an address edit is none of its business.
+  const keyedByMac = ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC];
+  const macSave = withControllerSaved({ controllers: [item], options: keyedByMac },
+    { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS });
+
+  assert.ok(!Object.hasOwn(macSave, "options"), "a controller keyed by its serial carries nothing under its address, so the move finds nothing and writes nothing");
 });
 
 test("the first-run save composes a complete identity as one patch and composes nothing for an incomplete one", () => {
@@ -451,6 +567,27 @@ test("an entry that does not address a swept scope survives the sweep", () => {
     { address: ADDRESS, macs: [ CONTROLLER_MAC, DEVICE_MAC ] });
 
   assert.deepEqual(patch.options, survivors, "a global entry, a sibling's entry, and a MAC that names no scope all come through the sweep untouched");
+});
+
+test("a sweep leaves its survivors in the engine's canonical spelling, exactly as a save through the engine does", () => {
+
+  /* The sweep runs on the engine's own scope clear, which normalizes what survives on the way through. A survivor already canonical comes back byte-identical -
+   * that is the arm above - and a hand-authored legacy dotted entry is rewritten into the canonical form the engine writes, which is the same upgrade-on-save a
+   * set through the engine already performs on the whole array.
+   */
+  const survivor = "Enable.Mqtt.Topic." + OTHER_MAC + "." + LEGACY_TOPIC;
+  const canonical = normalizeConfiguredOptions(catalog, [survivor]);
+  const options = [ "Enable.Log.Lock." + CONTROLLER_MAC, survivor ];
+  const before = [...options];
+  const patch = accessConfig.withControllerRemoved({ controllers: [{ ...CREDENTIALS }], options }, { address: ADDRESS, macs: [CONTROLLER_MAC] });
+
+  assert.deepEqual(canonical, ["Enable.Mqtt.Topic." + OTHER_MAC + "=" + LEGACY_TOPIC], "the engine's canonical spelling puts the value behind the payload delimiter");
+  assert.deepEqual(patch.options, canonical, "the survivor comes back in that spelling rather than in the one the configuration file happened to carry");
+  assert.equal(engineWith(patch.options).value("Mqtt.Topic", undefined, OTHER_MAC), LEGACY_TOPIC, "and it goes on resolving to exactly what it always resolved to");
+
+  // The composer's own terms, which this interpreter is run as by the page's coordinated write: the array handed in is read and never edited.
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(patch.options, options, "and the patch answers with an array of its own rather than the one it was given");
 });
 
 test("every migrated setting resolves to the same effective broker and topic the legacy configuration ran on", () => {

@@ -558,8 +558,8 @@ test("the API row renders every mode the library reports and reserves the widest
   const modes = [ "credential", "dual", "token" ] as const;
   const rowsFor = (mode: AccessApiMode): string[][] => idValues(composeStatusRows({ kind: "controller", mode, state }));
 
-  // Each mode reads as the surfaces its connect proved: both identity legs, credentials alone, or the token alone. The token arm is unreachable from the panel
-  // today - a token-only connect yields no controller entry to view - and it is mapped anyway, because the vocabulary belongs to the library.
+  // Each mode reads as the surfaces its connect proved: both identity legs, credentials alone, or the token alone. Every arm is reachable from the panel, since
+  // every controller answers the device picker with a row of its own and so has a controller view to render, whichever way it was reached.
   assert.deepEqual(rowsFor("dual"), [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
   assert.deepEqual(rowsFor("credential"), [ [ "api", "Credentials" ], [ "uptime", "" ] ]);
   assert.deepEqual(rowsFor("token"), [ [ "api", "API token" ], [ "uptime", "" ] ]);
@@ -1161,6 +1161,41 @@ test("a controller-as-device view resolves only through the controllerSerial rou
   // The pushed snapshot is where the whole path is observed at once: the call site reads the mode off the serving client, the derivation renders it, and the row
   // reaches the panel ahead of the uptime row. A call site that composed a controller view without the mode cannot produce this frame.
   assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "Credentials" ], [ "uptime", "127.6 day" ] ]);
+});
+
+test("a controller identity in either form resolves its own view, because both boundaries fold the registry key the same way", async () => {
+
+  /* The registry's key space is a JOIN KEY rather than a hardware claim. A controller reached with an API token alone answers by its configured address repaired
+   * into a scope identifier, so the identity arriving here is not a MAC address at all - and the join still holds, because the context boundary and the view
+   * boundary normalize through the same function. A hostname identity exercises the case fold on both sides; a hyphenated address proves the form an IP takes.
+   */
+  // One case: a controller whose context names it by the given identity, viewed by that same identity, answered by a client reporting a token-only connect.
+  const viewedBy = async (identity: string, joined: string): Promise<void> => {
+
+    const store = createStateStore({});
+
+    store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
+
+    const record = store.snapshot().devices.get("device1");
+    const { client } = makeClient(store, [{ doorId: "door1", record }], "token");
+    const frames: StatusEvent[] = [];
+    const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+
+    feed.context(contextRequest([SERIAL_ONE], { controllerSerial: identity }));
+
+    await feed.view(identity);
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    const answer = forSerial(frames, joined);
+
+    assert.deepEqual(answer.map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ],
+      "the identity " + identity + " resolves its controller's entry and establishes a view, so the join held across both boundaries");
+    assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "API token" ], [ "uptime", "" ] ],
+      "and the token arm composes its own row, with no controller document to read an uptime from");
+  };
+
+  await viewedBy("gate-local", "GATE-LOCAL");
+  await viewedBy("1-2-3-4", "1-2-3-4");
 });
 
 test("a throwing door resolution degrades the view to absence and starts no door loop", async () => {

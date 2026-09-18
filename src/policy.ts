@@ -20,12 +20,12 @@ import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOffic
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
 import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
+import { sameEntries, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import type { AccessControllerTokens } from "./options.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
-import { sameEntries } from "homebridge-plugin-utils";
 
 // The device type the controller reports for an Enterprise Access Hub, and the type whose per-port records carry a source_id that participates in accessory identity.
 const ENTERPRISE_HUB_DEVICE_TYPE = "UAH-Ent";
@@ -327,6 +327,39 @@ export type DecoratedSerial = string & { readonly [decoratedSerialBrand]: true }
 export function serialForm(identity: string): DecoratedSerial {
 
   return identity.replace(/:/g, "").toUpperCase() as DecoratedSerial;
+}
+
+// The brand's carrier symbol, declared rather than defined for the same reason the decorated serial's is: nothing at runtime ever reads it.
+declare const controllerIdentityBrand: unique symbol;
+
+/** The identity a controller answers by everywhere the user addresses it: a feature-option scope, an MQTT topic, the settings page's controller entry. */
+export type ControllerIdentity = string & { readonly [controllerIdentityBrand]: true };
+
+/**
+ * The one statement of how a controller names itself, in the two forms the two kinds of controller can offer.
+ *
+ * A controller whose credentials reach its own information document answers by the MAC address that document carries, in the decorated spelling every device
+ * identity shares. A controller reached with an API token alone never reads that document - it is served by the Access application's own endpoints rather than
+ * the published API - so the configured address is the only stable name it has, and it answers by that address repaired into a scope identifier: a scope
+ * identifier may carry neither a period nor an equals sign, and an address routinely carries periods, so the repair is what makes the name addressable at all.
+ *
+ * Deriving both forms here, once, is what lets the runtime and the webUI server key the same entries. The runtime resolves a controller-scoped option by this
+ * function's answer and the UI server stamps a controller's list entry with it, so an option the user sets on the settings page's controller entry is read back
+ * at runtime under the name it was written under.
+ *
+ * An empty address answers empty, which is the honest reading of a name that is not there. Nothing downstream has to defend against it: the platform's
+ * configuration gate refuses a controller carrying no address before one is ever constructed, so the value cannot reach a live controller's reads.
+ *
+ * @param options.address - The configured address, which a controller that has read no controller document answers by.
+ * @param options.mac     - The controller's MAC address from its controller document, when one has been read.
+ *
+ * @returns The identity in its scope form, carrying the {@link ControllerIdentity} brand.
+ */
+export function controllerIdentity(options: { address: string; mac?: string }): ControllerIdentity {
+
+  const spelled: string = (options.mac === undefined) ? scopeSafeId(options.address) : serialForm(options.mac);
+
+  return spelled as ControllerIdentity;
 }
 
 /**

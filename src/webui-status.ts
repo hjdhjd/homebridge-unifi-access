@@ -34,8 +34,8 @@ export const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 /**
  * One controller in a status context request: a controller the browser holds a kept probe answer for. The identity members are spelled exactly as a `controllers[]`
  * configuration item spells them - the card-values vocabulary - so the identity composition consumes them unchanged. `serials` carries the decorated serial numbers
- * of that answer's devices, the panel's join key; `controllerSerial` carries the decorated serial of the answer's controller-as-device record when the answer
- * carried one, and is absent for a token-only controller, whose official surface exposes no console identity.
+ * of that answer's devices, the panel's join key; `controllerSerial` carries the serial of the answer's controller row - the controller's identity in the decorated
+ * spelling - which every answer carries, since every controller answers with a row of its own whichever way it was reached.
  */
 export interface StatusContextController {
 
@@ -268,9 +268,10 @@ function sameChoice(choice: StatusChoice, previous: StatusChoice): boolean {
 /* Map the connection's API mode onto the row vocabulary. The mode a connected client reports is verified fact rather than a configuration echo: the library proves
  * every identity leg it was handed at connect, and a leg that fails there fails the connect, so the row states which surfaces this connection actually reached.
  *
- * The token arm renders nothing the settings panel can reach today, because a token-only connect answers the device picker with no console identity to lead with -
- * homebridge-ui/server.js, the token-only arm - and a sidebar with no controller entry offers no controller view. The mapping is total anyway: the vocabulary is
- * the library's rather than the panel's, so a mode the library adds is a compile error here rather than a row that silently renders nothing.
+ * The token arm is reachable from the settings panel exactly as every other arm is: a token-only connect answers the device picker with a controller row keyed by
+ * the controller's address identity - homebridge-ui/server.js, the token-only arm - so that controller has a node to select and a controller view to render. The
+ * mapping is total anyway: the vocabulary is the library's rather than the panel's, so a mode the library adds is a compile error here rather than a row that
+ * silently renders nothing.
  */
 const API_ROW_VALUES: Record<AccessApiMode, string> = {
 
@@ -600,8 +601,14 @@ export class AccessStatusFeed {
 
     const registry = new Map<DecoratedSerial, RegistryEntry>();
 
-    // Rebuild wholesale, last write wins. Every incoming serial is re-normalized through serialForm at this boundary, so the registry key is mechanically the
-    // hardware-id convention rather than a trust in the sender.
+    /* Rebuild wholesale, last write wins. Every incoming serial is re-normalized through serialForm at this boundary, so the registry key is mechanically the
+     * hardware-id convention rather than a trust in the sender.
+     *
+     * That convention is a JOIN KEY rather than a claim about hardware. A controller identity arrives here in either of its two forms, and both sides of the join
+     * fold the same way - the view boundary normalizes its request through the same function - so a hyphenated address passes through unchanged and a hostname
+     * identity such as `gate-local` joins as `GATE-LOCAL` on the context side and the view side alike. The decorated-serial type on the key and on the entry's
+     * member names that normalized convention, not a MAC address.
+     */
     for(const controller of request.controllers) {
 
       const entry: RegistryEntry = { address: controller.address,

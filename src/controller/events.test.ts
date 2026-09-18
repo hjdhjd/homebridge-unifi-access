@@ -8,8 +8,8 @@ import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessController } from "./controller.ts";
 import assert from "node:assert/strict";
+import { controllerIdentity } from "../policy.ts";
 import { makeControllerDouble } from "../testing.helpers.ts";
-import { serialForm } from "../policy.ts";
 import test from "node:test";
 
 // The controller's own MAC in the normalized form an identity carries, which is the identity every telemetry topic here opens with.
@@ -18,6 +18,10 @@ const CONTROLLER_SERIAL = "AABBCCDDEEFF";
 /* What the bridge is stood up over: the shared controller double told the two facts this suite varies - whether telemetry is on, and whether the controller ever
  * learned a hardware identity - beside the recorder standing in for the publish chokepoint. The rail the bridge subscribes to answers a disposable, because the
  * subscription is what the bridge holds for its own lifetime.
+ *
+ * An absent identity leaves the double to derive one from its configured address, which is what a controller reached with an API token alone answers by, so the
+ * two arms differ in exactly the fact they name. The credentialed arm composes its identity through the same policy function rather than asserting a serial into
+ * the brand, because the two identity brands are deliberately distinct types.
  */
 function makeController(options: { telemetry: boolean; tokenOnly?: boolean }): { controller: AccessController; publishes: { payload: string; topic: string }[] } {
 
@@ -29,7 +33,7 @@ function makeController(options: { telemetry: boolean; tokenOnly?: boolean }): {
 
       client: { on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }) },
       hasFeature: (): boolean => options.telemetry,
-      id: options.tokenOnly ? undefined : serialForm(CONTROLLER_SERIAL),
+      id: options.tokenOnly ? undefined : controllerIdentity({ address: "1.2.3.4", mac: CONTROLLER_SERIAL }),
       mqttPublish: (topic: string, payload: string): void => void publishes.push({ payload, topic })
     }),
     publishes
@@ -109,16 +113,18 @@ test("telemetry mirrors every frame exactly once, the excluded one included", ()
   assert.deepEqual(JSON.parse(publishes[2]?.payload ?? "null"), packet(ACCESS_DEVICE_UPDATE_EVENT));
 });
 
-test("telemetry for a controller with no hardware identity publishes under its configured address", () => {
+test("telemetry for a controller with no hardware identity publishes under its address identity", () => {
 
-  // A controller reached with an API token alone never reads the document its MAC address comes from, so its configured address is the identity its telemetry carries.
+  /* A controller reached with an API token alone never reads the document its MAC address comes from, so its configured address is the identity its telemetry
+   * carries - in the scope form, since that is the one identity such a controller answers by everywhere. The literal proves that spelling reaches the wire.
+   */
   const { controller, publishes } = makeController({ telemetry: true, tokenOnly: true });
   const events = new AccessEvents(controller);
 
   events.handleRawPacket(packet("access.remote_view"));
 
   assert.equal(publishes.length, 1, "the frame must be mirrored exactly once");
-  assert.equal(publishes[0]?.topic, "1.2.3.4/telemetry", "the topic must open with the configured address and never with an empty segment");
+  assert.equal(publishes[0]?.topic, "1-2-3-4/telemetry", "the topic must open with the address identity and never with an empty segment");
 });
 
 test("telemetry publishes nothing while the feature option is off", () => {
