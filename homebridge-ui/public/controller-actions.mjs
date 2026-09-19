@@ -20,6 +20,8 @@
  * framework, and the UI-server bridge.
  *
  * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer and answers what became of it.
+ * @param injected.controllerSerial  - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
+ *                                     controller-scoped entries by.
  * @param injected.interpreters      - The page's holder for the configuration interpreters that need the served catalog.
  * @param injected.probe             - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
  * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
@@ -29,7 +31,7 @@
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
-export const makeControllerActions = ({ commitConfig, interpreters, probe, processDeviceList, selectController, sendStatusContext, toast }) => {
+export const makeControllerActions = ({ commitConfig, controllerSerial, interpreters, probe, processDeviceList, selectController, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
@@ -128,6 +130,16 @@ export const makeControllerActions = ({ commitConfig, interpreters, probe, proce
     const priorAtAddress = byAddress.get(identity.address);
     const priorAtOriginal = replaced ? byAddress.get(originalAddress) : undefined;
 
+    /* The serial the controller being edited answered by when this session last reached it, and the serial this save's own validation answered. The interpreter
+     * carries the controller's feature options from the first onto the second, which is why the outgoing one is read here, ahead of the seed that replaces the
+     * answer it comes from: a credential pair being cleared is exactly the case where that serial exists nowhere else, because the token-only validation that
+     * follows reads no console document to name it. Each read is gated on the answer's kind because a token-only answer's controller row carries the address
+     * identity the UI server spelled for it rather than a serial, and the interpreter derives that identity from the address itself.
+     */
+    const serialOf = (answer) => ((answer?.kind === "connected") ? controllerSerial(answer) : undefined);
+    const originalSerial = serialOf(replaced ? priorAtOriginal : priorAtAddress);
+    const serial = serialOf(validation);
+
     /* Put the map back the way this save found it, restoring each address to the answer read above or deleting it where the map held none, and move the generation
      * again so a fetch issued against the seeded state loses its claim to be kept. A save that wrote nothing then costs the session nothing it knew, and a
      * controller that was token-only before the save still reads that way.
@@ -171,7 +183,7 @@ export const makeControllerActions = ({ commitConfig, interpreters, probe, proce
       // The holder read sits inside the try, so a catalog read that rejects renders the failure verdict rather than escaping this handler.
       const { withControllerSaved } = await interpreters();
 
-      result = await commitConfig((platform) => withControllerSaved(platform, { ...identity, originalAddress }));
+      result = await commitConfig((platform) => withControllerSaved(platform, { ...identity, originalAddress, originalSerial, serial }));
     } catch(err) {
 
       restoreCache();

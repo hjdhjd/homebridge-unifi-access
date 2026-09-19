@@ -473,9 +473,15 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
 
   /* The scope identifier a configured address answers by, or null for an address there is no identity to compose from. A configured item's address is typed
    * unknown because a hand-edited configuration file can carry anything under that name, and the framework's repair throws on a value that is not a string - so
-   * the string test runs first and an item with no usable address simply has no address identity. Every reader of that identity here asks through this one walk.
+   * the string test runs first and an item with no usable address simply has no address identity. An empty string names no identity either, because the engine
+   * refuses an empty scope identifier with a throw of its own, so the repair it would refuse never runs. Every reader of that identity here asks through this one
+   * walk.
    */
-  const addressIdentity = (address) => ((typeof address === "string") ? scopeSafeId(address) : null);
+  const addressIdentity = (address) => (((typeof address === "string") && address.length) ? scopeSafeId(address) : null);
+
+  // The scope identifier a controller serial answers by, or null where the page learned none. A serial arrives in the decorated scope form the UI server stamped
+  // the controller's row with, so it is read for presence and never repaired; an empty string is the absence a form field hands over, not a name.
+  const serialIdentity = (serial) => (((typeof serial === "string") && serial.length) ? serial : null);
 
   return {
 
@@ -670,42 +676,72 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
       return { controllers: remaining, options: engine.configuredOptions };
     },
 
-    /* Produce the patch that writes one controller's identity, carrying its feature options across when the address itself changed.
+    /* Produce the patch that writes one controller's identity, carrying its feature options onto the name the written item answers by.
      *
-     * The connection editor is the one place a controller's address is edited, so it is the one place those settings can follow it. A controller reached with an
-     * API token alone is addressed by its configured address, so the entries the user built for it are keyed by that address and would be stranded under a name
-     * nothing resolves the moment the address moves. The move runs through the engine's own scope verb, the single statement of what addresses a scope, and the
-     * options array joins the patch only when that verb actually moved something - a credentialed controller has no entry under its address, so the rule runs for
-     * every changed address and costs one reference comparison for the controllers that carry nothing.
+     * A controller answers by one name at a time, and the plugin's own controllerIdentity is where that rule lives: the serial of a controller whose credentials
+     * have read its own console document, and the configured address in the scope form otherwise. The UI server stamps a controller's row with the same two
+     * spellings, which is where the page reads a serial from. Every entry the user builds for a controller is keyed by the name it answered by at the time.
      *
-     * An address edited by hand in the configuration file is outside this rule, and the generated MQTT document says so where it names the token-only topic form.
+     * A save is the one place all three changes of that name happen - the address is edited, a credential pair is added, a credential pair is cleared - and the
+     * one moment the outgoing name is in hand, since a pair that has just been cleared leaves no source on the page or the UI server that knows the serial it
+     * answered by. So the entries follow here rather than waiting for the next page open.
+     *
+     * Onto the written item's name move the entries keyed by the address identity the item carried, which the migration would otherwise carry at the next open,
+     * and, only where the written item answers by no serial of its own, the entries keyed by the serial it answered by before. The serial's entries move first,
+     * because between two names moving onto a third the one that arrives first is the one the destination keeps, and the destination's own entries outrank both -
+     * the engine's rule, read as the migration reads it: the entries under the name the controller will answer by are the ones the page shows.
+     *
+     * A written item that answers by a serial of its own and carried a different one names different hardware, whose entries stay where they are exactly as a
+     * removal leaves them unless the sweep is asked for. A serial the page never learned names nothing to move from, so those entries wait for the migration,
+     * exactly as an address edited by hand in the configuration file is outside this rule - the generated MQTT document says so where it names the token-only
+     * topic form.
+     *
+     * The move runs through the engine's own scope verb, the single statement of what addresses a scope, and the options array joins the patch only when that
+     * verb actually moved something.
      *
      * The configuration handed in is read and never edited: the engine composes a fresh array for every transform it makes, which is the composer's own term the
      * page's coordinated write states, since the page's store holds that options array by reference.
      *
      * @param config     - The platform configuration entry.
-     * @param controller - The identity to write, and the address of the item to write it onto.
+     * @param controller - The identity to write, the address of the item to write it onto, the serial that item's controller answered by when the page last
+     *                     reached it, and the serial this save's own validation answered.
      *
      * @returns The patch for the session's commit to merge onto the platform entry.
      */
     withControllerSaved: (config, controller) => {
 
       const patch = { controllers: controllersWithSave(config, controller) };
-      const from = addressIdentity(controller.originalAddress);
-      const to = addressIdentity(controller.address);
+      const serial = serialIdentity(controller.serial);
+      const to = serial ?? addressIdentity(controller.address);
 
-      /* An add names no address to move from, and a hand-edited value that is not a string names no identity at all - neither has anything to carry across. The
-       * unchanged-address test beside them is a cost short-circuit rather than a correctness one: the engine refuses a move onto the same scope on its own and
-       * answers false for it, so what this saves is building an engine over the whole options array on every save that only edited a credential.
+      /* The names to carry entries from: the serial the item answered by, only where the written item answers by none of its own, and first so that where both
+       * names carry an entry for one option and neither is the destination, the serial's arrives first and the address's is the one forgotten; then the address
+       * identity the item carried. Where the destination itself already carries an entry for an option, the engine keeps the destination's and forgets the moved
+       * one, so a cleared pair leaves an address-keyed entry in place over the serial's: the entries under the name the controller will answer by are the ones
+       * the page shows, the same reading the migration takes in the other direction. A name the written item keeps answering by is left out, and so is one that
+       * is absent - an add carries no original address, and a hand-edited value that is not a string names no identity.
        */
-      if((from === null) || (to === null) || (from === to)) {
+      const from = [ (serial === null) ? serialIdentity(controller.originalSerial) : null, addressIdentity(controller.originalAddress) ]
+        .filter((name) => (name !== null) && (name !== to));
+
+      if((to === null) || !from.length) {
 
         return patch;
       }
 
       const engine = engineFor(config);
+      let moved = false;
 
-      if(engine.moveScope({ from, to })) {
+      // Each move runs on its own rather than folded through a logical assignment, which would skip every move after the first one that changed something.
+      for(const name of from) {
+
+        if(engine.moveScope({ from: name, to })) {
+
+          moved = true;
+        }
+      }
+
+      if(moved) {
 
         patch.options = engine.configuredOptions;
       }

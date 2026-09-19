@@ -50,7 +50,8 @@ export const mqttTopics = mqttTopicCatalog({
     publish: "All UniFi Access telemetry from the realtime events API. This is the raw feed - you're on your own to parse through it for the messages you may be " +
       "interested in. This is published to the controller's identity rather than a device's: the controller's serial number in the same form as a device identity, " +
       "or the configured address of a controller reached with an API token alone with each period replaced by a hyphen. Changing that address in the settings " +
-      "page carries the controller's feature options across with it; changing it by hand in the configuration file does not. Published only when " +
+      "page, or adding or clearing a local user's username and password there, carries the controller's feature options across with it; a change made by hand " +
+      "in the configuration file does not. Published only when " +
       "`Controller.Publish.Telemetry` is enabled.",
     topic: "telemetry" },
   unlock: { devices: ["allHubs"], group: DOOR_GROUP, label: "unlock",

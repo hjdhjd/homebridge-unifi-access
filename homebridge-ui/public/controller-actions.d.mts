@@ -60,6 +60,8 @@ export interface ControllerActions {
  * framework, and the UI-server bridge.
  *
  * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer of the configuration patch and answers what became of it.
+ * @param injected.controllerSerial  - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
+ *                                     controller-scoped entries by.
  * @param injected.interpreters      - The page's holder for the configuration interpreters, narrowed to the two an action reads.
  * @param injected.probe             - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
  * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
@@ -70,6 +72,7 @@ export interface ControllerActions {
  * @returns The kept answers, the controller removal, and the controller save.
  */
 export declare const makeControllerActions: (injected: { commitConfig: (compose: (platform: unknown) => unknown) => Promise<ControllerWriteResult>;
+  controllerSerial: (answer: AccessProbeSuccess) => unknown;
   interpreters: () => Promise<Pick<AccessConfigInterpreter, "withControllerRemoved" | "withControllerSaved">>;
   probe: (request: AccessIdentity & { verdict: ControllerVerdict }) => Promise<AccessProbeSuccess | null>;
   processDeviceList: (list: { address: unknown; devices: Record<string, unknown>[] }) => Record<string, unknown>[]; selectController: (address: unknown) => void;

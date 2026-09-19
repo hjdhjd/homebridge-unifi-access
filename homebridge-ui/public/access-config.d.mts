@@ -100,7 +100,8 @@ export interface AccessConfigInterpreter {
   controllersAwaitingMigration: (config?: AccessConfig) => AccessIdentity[];
   migrate: (config?: AccessConfig, macByAddress?: ReadonlyMap<string, string>) => AccessConfigPatch | null;
   withControllerRemoved: (config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }) => AccessConfigPatch;
-  withControllerSaved: (config: AccessConfig | undefined, controller: AccessIdentity & { originalAddress?: unknown }) => AccessConfigPatch;
+  withControllerSaved: (config: AccessConfig | undefined,
+    controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }) => AccessConfigPatch;
 }
 
 /** The headline a controller the plugin could not reach is rendered under. */

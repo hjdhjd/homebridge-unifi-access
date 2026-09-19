@@ -51,6 +51,9 @@ const TOKEN_IDENTITY = "1-2-3-4";
 const SECOND_ADDRESS = "5.6.7.8";
 const SECOND_IDENTITY = "5-6-7-8";
 
+// The scope identity the address at the top of this file answers by, spelled as a literal for the same reason and asserted against the repair the first time it is read.
+const ADDRESS_IDENTITY = "10-0-0-1";
+
 // The value an address-keyed topic entry carries, distinct from every legacy value above so an assertion can tell which substrate answered.
 const ADDRESS_TOPIC = "unifi/gate";
 
@@ -595,6 +598,150 @@ test("an address edit carries the controller's own entries onto the new address 
     { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS });
 
   assert.ok(!Object.hasOwn(macSave, "options"), "a controller keyed by its serial carries nothing under its address, so the move finds nothing and writes nothing");
+});
+
+test("a cleared credential pair carries the controller's serial-keyed entries onto its address identity, where an entry already there outranks the arriving one", () => {
+
+  assert.equal(ADDRESS_IDENTITY, scopeSafeId(ADDRESS), "the address identity spelled above is the one the framework's repair composes");
+
+  const item = { address: ADDRESS, tokens: TOKENS };
+  const options = [ "Enable.Controller.Publish.Telemetry." + CONTROLLER_MAC, "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC,
+    "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
+  const before = [...options];
+  const cleared = withControllerSaved({ controllers: [item], options },
+    { address: ADDRESS, originalAddress: ADDRESS, originalSerial: CONTROLLER_MAC, tokens: TOKENS });
+  const engine = engineWith(cleared.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, ADDRESS_IDENTITY), true,
+    "the entry only the serial carried follows the controller onto the name it answers by once its credentials are gone");
+  assert.equal(engine.value("Mqtt.Topic", undefined, ADDRESS_IDENTITY), ADDRESS_TOPIC,
+    "and for the option both names carried, the entry already under the destination is the one that survives");
+  assert.deepEqual(cleared.options?.filter((entry) => entry.toLowerCase().includes(CONTROLLER_MAC.toLowerCase())), [],
+    "nothing is left under the serial, which is the whole point of moving rather than copying");
+  assert.ok(Object.hasOwn(cleared, "options"), "a source entry the destination outranked is forgotten, which is a change the caller has to write out");
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(cleared.options, options, "and the patch answers with an array of its own rather than the one it was given");
+});
+
+test("an added credential pair carries the controller's address-keyed entries onto the serial its validation answered", () => {
+
+  const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
+  const options = [ "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
+  const before = [...options];
+  const added = withControllerSaved({ controllers: [item], options },
+    { ...CREDENTIALS, address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, serial: CONTROLLER_MAC, tokens: TOKENS });
+  const engine = engineWith(added.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, CONTROLLER_MAC), true, "the bare enable follows the controller onto the serial it answers by");
+  assert.equal(engine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "and so does the entry carrying a value");
+  assert.deepEqual(added.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [],
+    "nothing is left under the address identity the controller stopped answering by, which is the move the migration would otherwise make at the next page open");
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(added.options, options, "and the patch answers with an array of its own rather than the one it was given");
+});
+
+test("a cleared pair and an address edit together carry both names' entries onto the new address identity, the serial's arriving first", () => {
+
+  const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
+  const options = [ "Enable.Controller.Publish.Telemetry." + CONTROLLER_MAC, "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC,
+    "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC, "Enable.Mqtt.Url." + TOKEN_IDENTITY + "=" + LEGACY_BROKER ];
+  const before = [...options];
+  const moved = withControllerSaved({ controllers: [item], options },
+    { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, originalSerial: CONTROLLER_MAC, tokens: TOKENS });
+  const engine = engineWith(moved.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, SECOND_IDENTITY), true, "what the serial alone carried lands under the name the item answers by");
+  assert.equal(engine.value("Mqtt.Url", undefined, SECOND_IDENTITY), LEGACY_BROKER, "and so does what the old address alone carried");
+  assert.equal(engine.value("Mqtt.Topic", undefined, SECOND_IDENTITY), LEGACY_TOPIC,
+    "the option both names carried reads the serial's value, because between two names moving onto a third the one that arrives first is the one kept");
+  assert.deepEqual(moved.options?.filter((entry) => {
+
+    const lowered = entry.toLowerCase();
+
+    return lowered.includes(CONTROLLER_MAC.toLowerCase()) || lowered.includes(TOKEN_IDENTITY);
+  }), [], "and nothing is left under either name the save moved from, which a short-circuit after the first move would leave behind");
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(moved.options, options, "and the patch answers with an array of its own rather than the one it was given");
+});
+
+test("an added pair and an address edit together carry the old address's entries onto the serial", () => {
+
+  const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
+  const options = [ "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
+  const before = [...options];
+  const added = withControllerSaved({ controllers: [item], options },
+    { ...CREDENTIALS, address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, serial: CONTROLLER_MAC, tokens: TOKENS });
+  const engine = engineWith(added.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, CONTROLLER_MAC), true, "the bare enable follows the controller onto the serial it answers by");
+  assert.equal(engine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "and so does the entry carrying a value");
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, SECOND_IDENTITY), false,
+    "nothing lands under the address the item was written to, which is not the name the controller answers by");
+  assert.deepEqual(added.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [], "and nothing is left under the address the user replaced");
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(added.options, options, "and the patch answers with an array of its own rather than the one it was given");
+});
+
+test("a credential edit that leaves the controller answering by its serial carries a stray address-keyed entry onto it, and composes nothing where there is none", () => {
+
+  const item = { ...CREDENTIALS };
+  const save = { ...CREDENTIALS, originalAddress: ADDRESS, originalSerial: CONTROLLER_MAC, serial: CONTROLLER_MAC, tokens: TOKENS };
+  const options = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
+  const before = [...options];
+  const swept = withControllerSaved({ controllers: [item], options }, save);
+
+  assert.equal(engineWith(swept.options).value("Mqtt.Topic", undefined, CONTROLLER_MAC), LEGACY_TOPIC,
+    "the entry under the name the controller answers by outranks the one arriving from its address");
+  assert.deepEqual(swept.options?.filter((entry) => entry.toLowerCase().includes(ADDRESS_IDENTITY)), [], "and the stray entry is gone from the address it was keyed to");
+  assert.deepEqual(options, before, "the array handed in is untouched");
+  assert.notEqual(swept.options, options, "and the patch answers with an array of its own rather than the one it was given");
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC] }, save), "options"),
+    "with nothing under the address there is nothing to move or forget, so the save composes no options member at all");
+});
+
+test("a serial or an address that names no identity moves nothing, and an item answering by a different serial leaves the serial it carried alone", () => {
+
+  const item = { address: ADDRESS, tokens: TOKENS };
+  const keyedBySerial = ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC];
+
+  for(const originalSerial of [ 42, "" ]) {
+
+    assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: keyedBySerial },
+      { address: ADDRESS, originalAddress: ADDRESS, originalSerial, tokens: TOKENS }), "options"),
+    "an outgoing serial of " + JSON.stringify(originalSerial) + " names no identity to move from, so the save composes no options member");
+  }
+
+  const acrossBothNames = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
+
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: acrossBothNames }, { address: ADDRESS, originalAddress: "", tokens: TOKENS }),
+    "options"), "an empty original address names no identity to move from, so a save that carries no outgoing serial either composes no options member");
+
+  /* The same empty original address beside an outgoing serial: the empty name contributes nothing to the move list, and the serial is left as the one name to
+   * carry entries from, so the controller's serial-keyed entries still land under the name it answers by once its credentials are gone.
+   */
+  const withOutgoing = withControllerSaved({ controllers: [item], options: acrossBothNames },
+    { address: ADDRESS, originalAddress: "", originalSerial: CONTROLLER_MAC, tokens: TOKENS });
+  const acrossEngine = engineWith(withOutgoing.options);
+
+  assert.equal(acrossEngine.value("Mqtt.Topic", undefined, ADDRESS_IDENTITY), ADDRESS_TOPIC,
+    "the entry already under the destination survives, and the call returns rather than reaching the throw an empty source would have to earn");
+  assert.deepEqual(withOutgoing.options?.filter((entry) => entry.toLowerCase().includes(CONTROLLER_MAC.toLowerCase())), [],
+    "while nothing is left under the serial, which is the move the empty original address never stood in the way of");
+
+  const bothNames = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
+  const tokenItem = { address: TOKEN_ADDRESS, tokens: TOKENS };
+
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [tokenItem], options: bothNames }, { address: "", originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
+    "options"), "an empty written address names no identity to move onto, so the save composes none either and never reaches the throw an empty destination earns");
+
+  const replacement = withControllerSaved({ controllers: [tokenItem], options: bothNames },
+    { ...CREDENTIALS, address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, originalSerial: CONTROLLER_MAC, serial: OTHER_MAC, tokens: TOKENS });
+  const engine = engineWith(replacement.options);
+
+  assert.equal(engine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), LEGACY_TOPIC,
+    "an item that answers by a different serial names different hardware, whose entries stay where a removal without a sweep would leave them");
+  assert.equal(engine.value("Mqtt.Topic", undefined, OTHER_MAC), ADDRESS_TOPIC, "while the address's entries land under the serial the item answers by");
+  assert.notEqual(replacement.options, bothNames, "and the patch answers with an array of its own rather than the one it was given");
 });
 
 test("the first-run save composes a complete identity as one patch and composes nothing for an incomplete one", () => {

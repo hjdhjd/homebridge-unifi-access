@@ -114,6 +114,7 @@ interface Stand {
   seenDuringWrite: WriteObservation[];
   selections: Selection[];
   sends: () => number;
+  serialReads: AccessProbeSuccess[];
   toasts: Toast[];
 }
 
@@ -176,6 +177,7 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
   const renders: RenderedVerdict[] = [];
   const seenDuringWrite: WriteObservation[] = [];
   const selections: Selection[] = [];
+  const serialReads: AccessProbeSuccess[] = [];
   const toasts: Toast[] = [];
   let sends = 0;
 
@@ -212,6 +214,13 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
       }
 
       return write;
+    },
+    controllerSerial: (answer) => {
+
+      // Which answers the read was handed is what places it before the seed rather than after it, so each one is kept.
+      serialReads.push(answer);
+
+      return answer.devices[0]?.["serialNumber"];
     },
     interpreters: async () => {
 
@@ -274,7 +283,7 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
     }
   });
 
-  return { actions, card, composed, interpreterCalls, probeCalls, renders, seenDuringWrite, selections, sends: (): number => sends, toasts };
+  return { actions, card, composed, interpreterCalls, probeCalls, renders, seenDuringWrite, selections, sends: (): number => sends, serialReads, toasts };
 }
 
 /* Put an answer into the kept answers the only way a reader can, which exercises the keep rule on the way in.
@@ -478,8 +487,8 @@ test("s11: a save hands the interpreter the card's identity with the original ad
 
   await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS });
 
-  assert.deepEqual(stood.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ORIGINAL_ADDRESS } }],
-    "the save interpreter ran once, against the configuration the write composed over");
+  assert.deepEqual(stood.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ORIGINAL_ADDRESS,
+    originalSerial: undefined, serial: PROBE_SERIAL } }], "the save interpreter ran once, against the configuration the write composed over");
   assert.deepEqual(stood.composed, [SAVE_PATCH], "and the write received exactly the patch the interpreter composed");
 });
 
@@ -492,6 +501,56 @@ test("s12: a save that leaves the address alone seeds it before the write and as
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ADDRESS }), ADDRESS, "the save answers the address it wrote");
   assert.equal(stood.seenDuringWrite[0]?.atAddress?.message, PROBE_MESSAGE, "the address holds this save's own answer by the time the write runs");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+});
+
+test("s13: a save reads the outgoing serial from the answer held under the address it is writing over, ahead of the seed that replaces it", async () => {
+
+  const replacing = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+  seed(replacing, ADDRESS, priorAt(ADDRESS));
+  seed(replacing, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
+
+  await replacing.actions.saveController({ card: replacing.card, originalAddress: ORIGINAL_ADDRESS });
+
+  assert.deepEqual(replacing.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ORIGINAL_ADDRESS,
+    originalSerial: PRIOR_SERIALS[ORIGINAL_ADDRESS], serial: PROBE_SERIAL } }],
+  "an address edit reads the outgoing serial under the address it replaced, and the incoming one from this save's own validation");
+  assert.deepEqual(replacing.serialReads.map((answer) => answer.message), [ PRIOR_MESSAGE, PROBE_MESSAGE ],
+    "which is read from the answer this session was already holding rather than from the one the seed puts in its place");
+
+  const same = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+  seed(same, ADDRESS, priorAt(ADDRESS));
+
+  await same.actions.saveController({ card: same.card, originalAddress: ADDRESS });
+
+  assert.deepEqual(same.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ADDRESS,
+    originalSerial: PRIOR_SERIALS[ADDRESS], serial: PROBE_SERIAL } }], "a save that leaves the address alone reads the outgoing serial under that same address");
+  assert.deepEqual(same.serialReads.map((answer) => answer.message), [ PRIOR_MESSAGE, PROBE_MESSAGE ], "from the held answer there too, ahead of the seed");
+});
+
+test("s14: a token-only answer names no serial, on whichever side of the save it sits", async () => {
+
+  const validated = stand({ probe: probeAnswer("token-only"), write: { kind: "committed" } });
+
+  seed(validated, ADDRESS, priorAt(ADDRESS));
+
+  await validated.actions.saveController({ card: validated.card, originalAddress: ADDRESS });
+
+  assert.deepEqual(validated.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ADDRESS,
+    originalSerial: PRIOR_SERIALS[ADDRESS], serial: undefined } }],
+  "a token-only validation hands no serial, because the row it would be read from carries an address identity rather than one");
+  assert.deepEqual(validated.serialReads.map((answer) => answer.message), [PRIOR_MESSAGE], "and that row goes unread");
+
+  const held = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+  seed(held, ADDRESS, { ...priorAt(ADDRESS), kind: "token-only" });
+
+  await held.actions.saveController({ card: held.card, originalAddress: ADDRESS });
+
+  assert.deepEqual(held.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ADDRESS, originalSerial: undefined,
+    serial: PROBE_SERIAL } }], "and a token-only answer held under the address hands no outgoing serial either");
+  assert.deepEqual(held.serialReads.map((answer) => answer.message), [PROBE_MESSAGE], "its row going unread the same way");
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {

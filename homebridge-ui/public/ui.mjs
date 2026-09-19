@@ -225,6 +225,10 @@ const firstRunOnSubmit = async ({ commit, config }) => {
 // controller manages.
 const isController = (device) => device.display_model === "controller";
 
+// The serial a probe answer's controller row carries is the controller's identity in the exact spelling the runtime keys its controller-scoped entries by: the
+// decorated serial of a credentialed answer, and the address identity of a token-only one. Every read of it on the page goes through this one expression.
+const controllerSerial = (answer) => answer?.devices.find(isController)?.serialNumber;
+
 /* The platform configuration the framework last injected into one of our hooks, or null before the first of them runs.
  *
  * The framework re-reads the host configuration into its own session immediately before it calls these hooks, so what is held here is the configuration the page
@@ -261,11 +265,11 @@ const sendStatusContext = async () => {
 
     const entry = { address: item.address, password: item.password, serials: answer.devices.map((device) => device.serialNumber).filter((id) => typeof id === "string"),
       tokens: item.tokens, username: item.username, verifyTls: item.verifyTls };
-    const controllerSerial = answer.devices.find(isController)?.serialNumber;
+    const serial = controllerSerial(answer);
 
-    if(controllerSerial !== undefined) {
+    if(serial !== undefined) {
 
-      entry.controllerSerial = controllerSerial;
+      entry.controllerSerial = serial;
     }
 
     contextControllers.push(entry);
@@ -372,14 +376,16 @@ const patchControllerLabel = ({ address, devices }) => {
 
 /* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
  * outside themselves is handed in from here, because each of those reaches is the page's to own: the DOM a re-select clicks through, the host's toast, the
- * framework's coordinated write and the catalog-backed interpreters behind it, and the UI-server bridge the probe and the status-context send travel over. What
- * the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
+ * framework's coordinated write and the catalog-backed interpreters behind it, the UI-server bridge the probe and the status-context send travel over, and the
+ * row shape the UI server writes a controller into, which the serial read interprets. What the actions keep about each controller stays theirs, and the page
+ * reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
   // The write is reached through a closure rather than handed over as a reference, because the framework page is constructed further down and the method reads its
   // own object: taking the reference at call time is what binds it to the page that exists by then.
   commitConfig: (compose) => ui.featureOptions.commitConfig(compose),
+  controllerSerial,
   interpreters: accessConfig,
   probe: requestControllerProbe,
   processDeviceList,
@@ -1268,7 +1274,7 @@ const wireAccessConfig = async () => {
      * controller-scoped option entry by - and never the raw MAC address the record also carries. An entry composed against the raw form would be written in a
      * spelling no read at runtime ever asks for, so the migration would appear to succeed while the setting it moved silently stopped answering.
      */
-    const scopingId = classifyProbeResponse(response).devices.find(isController)?.serialNumber;
+    const scopingId = controllerSerial(classifyProbeResponse(response));
 
     if(scopingId) {
 
