@@ -5,8 +5,8 @@
 /* eslint-disable camelcase */
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessOfficialApiError, createStateStore, selectAccessPoints } from "unifi-access";
-import type { AccessEventPacket, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, OfficialApi } from "unifi-access";
+import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore, selectAccessPoints } from "unifi-access";
+import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
 import { HbpuAbortError, defaultRetryBackoff, membershipDelta, retry } from "homebridge-plugin-utils";
@@ -1341,6 +1341,8 @@ interface WebhookOptions {
 interface WebhookHarness {
 
   calls: string[];
+  // The logger this controller hands the library, so an arm can log through it exactly as the library does and read the line the user is left with.
+  clientLog: AccessLogging;
   // The clock this controller judges a delivery's age against, so an arm about staleness moves time rather than backdating a header.
   clock: TestClock;
   controller: AccessController;
@@ -1507,12 +1509,32 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     webhookPort: 10120
   });
 
-  const connect: AccessControllerConnect = async (): Promise<AccessClient> => client;
+  /* The logger the controller composes for the library, captured off the connect call rather than reached for through the controller's private field. The library
+   * receives it exactly this way, so an arm calling it is exercising the same object the library writes through.
+   */
+  let clientLog: AccessLogging | undefined;
+
+  const connect: AccessControllerConnect = async (connectOptions: ConnectOptions): Promise<AccessClient> => {
+
+    clientLog = connectOptions.log;
+
+    return client;
+  };
+
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, connect);
 
   return {
 
     calls,
+    get clientLog(): AccessLogging {
+
+      if(clientLog === undefined) {
+
+        throw new Error("The client logger is established by the connect call, so an arm must log in before reading it.");
+      }
+
+      return clientLog;
+    },
     clock,
     controller,
     deliveries,
@@ -1657,7 +1679,7 @@ test("a registration at a sibling controller's own path is left where it is", as
 test("a controller that refuses the sweep keeps the webhooks it just configured", async (t) => {
 
   const harness = makeWebhookController({ endpoints: [abandonedRecord()],
-    failures: { delete: new AccessOfficialApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) } });
+    failures: { delete: new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) } });
 
   t.after(() => harness.shutdown.abort());
 
@@ -1784,7 +1806,7 @@ test("a token that cannot manage endpoints is told what to grant, whichever way 
   };
 
   const permissions = await refused(new AccessAuthorizationError("The account lacks the privileges this operation requires on the UniFi Access controller."));
-  const envelope = await refused(new AccessOfficialApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }));
+  const envelope = await refused(new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }));
 
   // Both refusal classes reach the same remediation, because both mean the same thing to the person who has to act on it.
   for(const lines of [ permissions, envelope ]) {
@@ -1792,6 +1814,58 @@ test("a token that cannot manage endpoints is told what to grant, whichever way 
     assert.ok(lines.some(line => line.startsWith("warn: ") && line.includes("The API token cannot manage webhook endpoints") && line.includes(WEBHOOK_URL)),
       "the remediation must name the URL to register by hand");
   }
+});
+
+// The permissions warn exactly as the controller composes it, so an arm about the rendered failure reads the whole sentence rather than a fragment of it.
+const permissionsWarn = (name: string, rendered: string): string => "warn: " + name + ": The API token cannot manage webhook endpoints (" + rendered +
+  "). Grant it webhook permissions, or register " + WEBHOOK_URL + " with the ufa command line tool and the plugin will use it.";
+
+test("a webhook refusal carries the controller's own diagnostic, says nothing twice, and reads as one sentence without one", async (t) => {
+
+  const refused = async (failure: Error): Promise<WebhookHarness> => {
+
+    const harness = makeWebhookController({ failures: { fetch: failure } });
+
+    t.after(() => harness.shutdown.abort());
+
+    await harness.run();
+
+    return harness;
+  };
+
+  const message = "The controller refused the request.";
+  const bare = await refused(new AccessApiError(message, { code: "CODE_OPERATION_FORBIDDEN" }));
+  const diagnosed = await refused(new AccessApiError(message, { code: "CODE_OPERATION_FORBIDDEN", detail: "the token lacks the webhook scope" }));
+  const repeated = await refused(new AccessApiError(message, { code: "CODE_OPERATION_FORBIDDEN", detail: message }));
+
+  // The diagnostic is what names the permission that is missing, so it follows the message it explains rather than staying in a place only debug would show it.
+  assert.ok(diagnosed.lines.includes(permissionsWarn(diagnosed.controller.name, "The controller refused the request: the token lacks the webhook scope")),
+    "the diagnostic must follow the message it explains");
+
+  // A controller that answers with its message repeated as its diagnostic has said one thing, and the user reads it once.
+  assert.ok(repeated.lines.includes(permissionsWarn(repeated.controller.name, "The controller refused the request")),
+    "a diagnostic the message already carries must not be printed a second time");
+
+  // With nothing to add, the rendering is the message alone, without the terminal period that would otherwise close the sentence early.
+  assert.ok(bare.lines.includes(permissionsWarn(bare.controller.name, "The controller refused the request")),
+    "a refusal carrying no diagnostic must read as its message alone");
+});
+
+test("a refusal on any ground but privilege reads as a configuration failure rather than a permissions remedy", async (t) => {
+
+  const harness = makeWebhookController({ failures: { fetch: new AccessApiError("The controller refused the request.",
+    { code: "CODE_PARAMS_INVALID", detail: "the endpoint URL is malformed" }) } });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  /* The result code is what separates them: a forbidden refusal names a permission the user can grant, and every other code names a failure the remediation would
+   * only mislead them about. Each arm renders through the one renderer, so the diagnostic reads the same whichever reports it.
+   */
+  assert.ok(harness.lines.includes("error: " + harness.controller.name + ": Unable to configure Access webhook deliveries: The controller refused the request: " +
+    "the endpoint URL is malformed."), "the generic arm must report it with its diagnostic");
+  assert.ok(!harness.lines.some(line => line.includes("The API token cannot manage webhook endpoints")), "and no permissions remedy may be offered for it");
 });
 
 test("turning a controller off in HomeKit retires the registration the option left behind", async (t) => {
@@ -1954,4 +2028,121 @@ test("the publish chokepoint forwards the caller's own per-publish options to th
   // A publish with no options lands; one carrying an already-aborted signal is refused on that signal, which proves the options reached the client.
   assert.deepEqual(mqtt.published, [{ payload: "true", topic: "AABBCCDDEEFF/lock" }]);
   assert.deepEqual(debugs, ["MQTT publish aborted: AABBCCDDEEFF/lock."]);
+});
+
+/* The library's connection-lost sentence, split at the period a composed reason attaches in place of. Both halves are spelled out rather than derived from one
+ * another, so an arm reads the text the user would rather than recomputing the composition it is checking.
+ */
+const LOST_OPENING = "The UniFi Access controller appears to be unreachable; the connection is lost and recovery is polling for its return";
+const LOST_SENTENCE = LOST_OPENING + ".";
+
+// A controller taken far enough to have handed the library its logger, which is the object these arms write through.
+const loggedIn = async (options: string[] = []): Promise<WebhookHarness> => {
+
+  const harness = makeWebhookController({ options });
+
+  await harness.controller.login();
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  return harness;
+};
+
+test("a library line whose context carries a reason reaches the user with it, at every level the router serves", async (t) => {
+
+  const harness = await loggedIn();
+
+  t.after(() => harness.shutdown.abort());
+
+  const context = { reason: "fetch failed: connect ECONNREFUSED 1.2.3.4:443" };
+  const composed = harness.controller.name + ": " + LOST_OPENING + ": fetch failed: connect ECONNREFUSED 1.2.3.4:443.";
+
+  harness.clientLog.error(LOST_SENTENCE, context);
+  harness.clientLog.info(LOST_SENTENCE, context);
+  harness.clientLog.warn(LOST_SENTENCE, context);
+
+  // Colons inside a reason are text the library already composed, so they reach the user untouched rather than being read as structure.
+  assert.ok(harness.lines.includes("error: " + composed), "the error level must carry the reason while the controller still reports errors");
+  assert.ok(harness.lines.includes("info: " + composed), "as must the info level");
+  assert.ok(harness.lines.includes("warn: " + composed), "as must the warn level, which is where the loss is announced");
+
+  // Teardown is the one state that closes the error channel, and it closes a composed line exactly as it closes any other.
+  harness.shutdown.abort();
+
+  const settled = harness.lines.length;
+
+  harness.clientLog.error(LOST_SENTENCE, context);
+
+  assert.equal(harness.lines.length, settled, "a controller going away must not report an error its own teardown caused");
+});
+
+test("a library line with nothing a user could read arrives as its sentence alone", async (t) => {
+
+  const harness = await loggedIn();
+
+  t.after(() => harness.shutdown.abort());
+
+  const before = harness.lines.length;
+
+  harness.clientLog.warn(LOST_SENTENCE);
+  harness.clientLog.warn(LOST_SENTENCE, { reason: "" });
+  harness.clientLog.warn(LOST_SENTENCE, { reason: new Error("the socket closed") });
+  harness.clientLog.warn(LOST_SENTENCE, { attempts: 3 });
+
+  /* A context is debug material unless it holds words: an empty reason has nothing to say, and one carrying an object would reach the user as a type name rather
+   * than a sentence. Each of these arrives as the library's own sentence and nothing more.
+   */
+  const alone = "warn: " + harness.controller.name + ": " + LOST_SENTENCE;
+
+  assert.deepEqual(harness.lines.slice(before).filter(line => line.includes("polling for its return")), [ alone, alone, alone, alone ],
+    "a line with no readable reason must arrive exactly as the library wrote it");
+});
+
+test("the composed line ends in one period and finds a reason wherever the library attached it", async (t) => {
+
+  const harness = await loggedIn();
+
+  t.after(() => harness.shutdown.abort());
+
+  const prefix = harness.controller.name + ": ";
+  const before = harness.lines.length;
+
+  // A sentence the library sent without a terminal period of its own, which must end with exactly one rather than none.
+  harness.clientLog.warn("The controller stopped answering", { reason: "the request timed out" });
+
+  // A context sitting behind a parameter carrying no reason at all, which is what a line with details of its own looks like.
+  harness.clientLog.warn(LOST_SENTENCE, { attempts: 3 }, { reason: "the request timed out" });
+
+  assert.deepEqual(harness.lines.slice(before).filter(line => line.includes("the request timed out")),
+    [ "warn: " + prefix + "The controller stopped answering: the request timed out.", "warn: " + prefix + LOST_OPENING + ": the request timed out." ],
+    "the sentence must end in one period whichever parameter carried the reason");
+});
+
+test("the debug echo carries the library's own sentence and its whole context, and only where debug is on", async (t) => {
+
+  const loud = await loggedIn(["Enable.Log.Debug"]);
+  const quiet = await loggedIn();
+
+  t.after(() => loud.shutdown.abort());
+  t.after(() => quiet.shutdown.abort());
+
+  const context = { reason: "the request timed out" };
+  const loudBefore = loud.lines.length;
+  const quietBefore = quiet.lines.length;
+
+  loud.clientLog.warn(LOST_SENTENCE, context);
+  quiet.clientLog.warn(LOST_SENTENCE, context);
+
+  const written = loud.lines.slice(loudBefore).filter(line => line.includes("polling for its return"));
+  const [ userLine, echo ] = written;
+
+  /* The echo is the forensic record, so it carries the sentence as the library sent it with the context the user's line left out. It lands on the warn channel
+   * because that is where the gated logger emits debug, and the platform double records no debug level of its own.
+   */
+  assert.equal(written.length, 2, "debug logging must add the echo beside the user's line");
+  assert.equal(userLine, "warn: " + loud.controller.name + ": " + LOST_OPENING + ": the request timed out.", "the user's line is the composed one");
+  assert.ok(echo?.startsWith("warn: " + loud.controller.name + ": " + LOST_SENTENCE), "the echo must open with the sentence the library wrote");
+  assert.ok(echo?.includes("reason"), "and must carry the context the composed line left out");
+
+  assert.deepEqual(quiet.lines.slice(quietBefore).filter(line => line.includes("polling for its return")),
+    ["warn: " + quiet.controller.name + ": " + LOST_OPENING + ": the request timed out."], "with debug off the user's line is the whole of it");
 });

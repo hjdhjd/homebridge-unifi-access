@@ -12,7 +12,7 @@
 /* eslint-disable camelcase */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
-import { AccessCapabilityError, AccessOfficialApiError } from "unifi-access";
+import { AccessApiError, AccessCapabilityError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
 import { Characteristic, HapStatusError, Service, uuid } from "@homebridge/hap-nodejs";
@@ -2176,7 +2176,7 @@ test("an unlock that fails for any reason but the attribution is reported as it 
    * reporting and is never quietly sent a second time - a catch reaching wider than the capability refusal would open this door twice on a fault that named it.
    */
   const failure = "The controller rejected the request.";
-  const gate = makeGate({ unlockRefusal: new AccessOfficialApiError(failure, { code: "CODE_OPERATION_FORBIDDEN" }) });
+  const gate = makeGate({ unlockRefusal: new AccessApiError(failure, { code: "CODE_OPERATION_FORBIDDEN" }) });
 
   await gate.mqttSet("lock", "false");
   await settle();

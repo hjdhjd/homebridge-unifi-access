@@ -6,7 +6,7 @@ import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
   MembershipClaims } from "../policy.ts";
-import { AccessAuthorizationError, AccessClient, AccessOfficialApiError, isAccessWebhookDelivery, selectDoorStates, verifyWebhookSignature } from "unifi-access";
+import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, selectDoorStates, verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
@@ -36,6 +36,50 @@ export type AccessControllerConnect = (options: ConnectOptions) => Promise<Acces
 
 // The default port: the real client. Wrapped rather than referenced so the static's own this binding stays with its class.
 const defaultConnect: AccessControllerConnect = (options) => AccessClient.connect(options);
+
+/* The user-readable reason carried by a library line's structured context, or undefined where it carries none. Everything else a context holds is a raw object or a
+ * value that means nothing outside a debug transcript, so a reason is the one member lifted out of one: the library composes it from the failure's own cause chain,
+ * which makes it a sentence fragment already addressed to the user. The search walks every trailing parameter rather than the first alone, because a line is free to
+ * attach its context behind parameters of its own.
+ */
+const contextReason = (parameters: readonly unknown[]): string | undefined => {
+
+  for(const parameter of parameters) {
+
+    if((typeof parameter !== "object") || (parameter === null) || !("reason" in parameter)) {
+
+      continue;
+    }
+
+    const reason = parameter.reason;
+
+    if((typeof reason === "string") && (reason.length > 0)) {
+
+      return reason;
+    }
+  }
+
+  return undefined;
+};
+
+/* The one rendering of a failure to configure webhooks, shared by the permissions refusal and the generic failure so they cannot disagree about what a refusal
+ * reads as. The controller's own diagnostic joins the rendered message under the same containment rule formatErrorMessage applies to a cause, so a controller that
+ * answers with its message repeated as its diagnostic is printed once rather than twice.
+ */
+const renderWebhookFailure = (error: unknown): string => {
+
+  const rendered = formatErrorMessage(error);
+
+  if(!(error instanceof AccessApiError) || (error.detail === undefined)) {
+
+    return rendered;
+  }
+
+  // Trimmed of one terminal period exactly as a cause's message is, so the diagnostic lands inside the sentence it joins rather than ending it early.
+  const detail = error.detail.replace(/\.$/, "");
+
+  return rendered.includes(detail) ? rendered : (rendered + ": " + detail);
+};
 
 export class AccessController {
 
@@ -107,15 +151,21 @@ export class AccessController {
 
     /* The unifi-access client logger. The library logs complete sentences with structured context attached as trailing parameters, and rendering that context inline
      * would put raw object dumps in front of the user - so each non-debug level emits the sentence alone at its level and echoes the full line, context included, to
-     * debug, where the forensic detail belongs. Every level goes through our own logger, so a library line is attributable to the controller that produced it exactly as
-     * the lines we write ourselves are, and the echo answers to the debug gate. Error output is additionally gated by logApiErrors so teardown noise stays quiet, while
-     * the echo is left out of that gate so debug logging captures the full record even where the user-facing line is suppressed.
+     * debug, where the forensic detail belongs. A string reason is the one member that comes out of the context and into the user's line, because it is the only one
+     * that is already words for them: the library composes it from the failure's cause chain, so it joins the sentence in the same colon-then-reason form our own
+     * connect-failure line uses. Every level goes through our own logger, so a library line is attributable to the controller that produced it exactly as the lines we
+     * write ourselves are, and the echo answers to the debug gate. Error output is additionally gated by logApiErrors so teardown noise stays quiet, while the echo is
+     * left out of that gate so debug logging captures the full record even where the user-facing line is suppressed.
+     *
+     * The composed line reaches write() as one finished string with no format parameters, so a percent sign inside a reason is text rather than a format directive.
      */
     const routeClientContext = (write: (message: string) => void): ((message: string, ...parameters: unknown[]) => void) => {
 
       return (message: string, ...parameters: unknown[]): void => {
 
-        write(message);
+        const reason = contextReason(parameters);
+
+        write((reason === undefined) ? message : (message.replace(/\.$/, "") + ": " + reason + "."));
 
         if(parameters.length) {
 
@@ -525,10 +575,10 @@ export class AccessController {
         return;
       }
 
-      if((error instanceof AccessAuthorizationError) || (error instanceof AccessOfficialApiError)) {
+      if(isPrivilegeRefusal(error)) {
 
         this.log.warn("The API token cannot manage webhook endpoints (%s). Grant it webhook permissions, or register %s with the ufa command line tool and the " +
-          "plugin will use it.", error.message, url);
+          "plugin will use it.", renderWebhookFailure(error), url);
       } else if((error instanceof TypeError) || isHbpuAbortError(error)) {
 
         /* The listener refused, and its own message names the cause. A TypeError is the path already routed - two controllers configured with one address - or
@@ -538,7 +588,7 @@ export class AccessController {
         this.log.error("Unable to receive Access webhook deliveries. %s", error.message);
       } else {
 
-        this.log.error("Unable to configure Access webhook deliveries: %s.", formatErrorMessage(error));
+        this.log.error("Unable to configure Access webhook deliveries: %s.", renderWebhookFailure(error));
       }
 
       if(official) {

@@ -41,16 +41,22 @@ const PER_CONTROLLER_SETTINGS = {
  * configuration addresses those booleans by name and the served catalog declares none of them, so this table is what lets the framework's own grammar read such an
  * entry at all: each name is added back to a LEGACY catalog the composition reads through, and never to the catalog the page serves.
  *
- * The member keys are the list's own values, which is what a composed entry stores, and they are written in the order the list offers them rather than in key
- * order, so a composed entry reads the way the settings page lists it.
+ * Each member is a pair of the list's own value, which is what a composed entry stores, against the boolean that switched it. They are an ordered array because the
+ * order is the order the list offers its members, and that is the order a composed entry has to read in.
  */
-/* eslint-disable sort-keys */
 const RETIRED_FAMILIES = [
 
-  { members: { DPS: "Hub.DPS", REL: "Hub.REL", REN: "Hub.REN", REX: "Hub.REX", SideDoorDPS: "Hub.SideDoor.DPS" }, option: "Hub.Sensors" },
-  { members: { Doorbell: "Log.Doorbell", DPS: "Log.DPS", Lock: "Log.Lock", REL: "Log.REL", REN: "Log.REN", REX: "Log.REX" }, option: "Log.Events" }
+  {
+
+    members: [ [ "DPS", "Hub.DPS" ], [ "REL", "Hub.REL" ], [ "REN", "Hub.REN" ], [ "REX", "Hub.REX" ], [ "SideDoorDPS", "Hub.SideDoor.DPS" ] ],
+    option: "Hub.Sensors"
+  },
+  {
+
+    members: [ [ "Doorbell", "Log.Doorbell" ], [ "DPS", "Log.DPS" ], [ "Lock", "Log.Lock" ], [ "REL", "Log.REL" ], [ "REN", "Log.REN" ], [ "REX", "Log.REX" ] ],
+    option: "Log.Events"
+  }
 ];
-/* eslint-enable sort-keys */
 
 // The plain string identity fields an editor writes onto a controller item. Each one deletes by omission when the user leaves it empty, which is what makes clearing
 // a field in the editor mean the same thing as never having filled it in. The tokens object and the TLS preference are written by arms of their own below, since
@@ -308,7 +314,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
 
     for(const family of RETIRED_FAMILIES) {
 
-      for(const retired of Object.values(family.members)) {
+      for(const [ , retired ] of family.members) {
 
         const separator = retired.indexOf(".");
         const category = retired.slice(0, separator);
@@ -395,7 +401,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
 
     // Whether a raw entry addresses any retired name, asked through the legacy enumerator over that entry alone rather than by matching text, so every spelling the
     // grammar accepts is caught by the same reading that composed from it.
-    const retired = (rawEntry) => RETIRED_FAMILIES.some((family) => Object.values(family.members).some((option) => {
+    const retired = (rawEntry) => RETIRED_FAMILIES.some((family) => family.members.some(([ , option ]) => {
 
       for(const _entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions: [rawEntry], option })) {
 
@@ -409,13 +415,13 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
 
     for(const family of RETIRED_FAMILIES) {
 
-      const members = Object.keys(family.members);
-      const selectionAt = (scope) => members.filter((member) => legacyEngine.test(family.members[member], scope || undefined));
+      const members = family.members.map(([member]) => member);
+      const selectionAt = (scope) => family.members.filter(([ , option ]) => legacyEngine.test(option, scope || undefined)).map(([member]) => member);
 
       // The global scope is always composed, because a retired entry there is what every named scope's composition is measured against.
       const scopes = new Set([""]);
 
-      for(const option of Object.values(family.members)) {
+      for(const [ , option ] of family.members) {
 
         for(const entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions, option })) {
 

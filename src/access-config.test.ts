@@ -538,7 +538,9 @@ test("the side door's sensor and the doorbell category compose onto their own fa
 
   const events = migrated({ options: ["Disable.Log.Doorbell"] });
 
-  assert.deepEqual(selects(events.options, "Log.Events"), [ "DPS", "Lock", "REL", "REN", "REX" ], "and the doorbell category composes onto the logging list");
+  // The raw entry is read as well as its resolved reading, because the engine resolves members in its own domain order and only the entry shows the order composed.
+  assert.deepEqual(events.options, ["Enable.Log.Events=DPS,Lock,REL,REN,REX"], "and the doorbell category composes onto the logging list in the order it lists them");
+  assert.deepEqual(selects(events.options, "Log.Events"), [ "DPS", "Lock", "REL", "REN", "REX" ], "which resolves to exactly those categories");
 });
 
 test("an address change edits that item rather than adding a second one beside it, and an add appends", () => {
