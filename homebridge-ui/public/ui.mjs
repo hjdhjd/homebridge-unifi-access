@@ -10,6 +10,7 @@ import { classifyProbeResponse, controllers, deviceListResult, hasValidIdentity,
   withPrimaryIdentity } from "./access-config.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
+import { makeControllerActions } from "./controller-actions.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 
@@ -235,34 +236,10 @@ const isController = (device) => device.display_model === "controller";
  */
 let injectedConfig = null;
 
-/* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer - its
- * outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be reached
- * both answer an empty list and the page must go on telling them apart on every later re-entry.
- *
- * One answer serves every reader that needs it: the device view returns it on every re-entry, a removal derives from it the MAC addresses a settings sweep would
- * strip, and the sidebar reads the controller's own name from it. A controller connection costs a user real dead air, and almost nothing about a controller changes
- * between one re-entry and the next, so that price is paid once per address per session and the Refresh control is how a user asks to pay it again.
- *
- * Only an answer that actually arrived is ever kept, and the gate is the outcome tag rather than the list's length: a token-only controller's empty answer is a real
- * answer and caches like any other, while a failure writes nothing here so the connection-error view and the framework's own retry cycle always act on a live
- * attempt rather than on a hopeful memory of one. The map lives as long as this module copy, which is the page's own lifetime, so a reopened panel connects afresh.
- */
-const devicesByAddress = new Map();
-
-/* The generation the map above is on, bumped by every event that retires what it holds: a controller saved, a controller removed, and the Refresh control. A fetch
- * captures this value before it calls the bridge and compares it after, writing only when the two still agree.
- *
- * The bridge offers no cancellation, so a fetch issued before an invalidation cannot be recalled and would otherwise be free to land its pre-invalidation answer
- * afterwards - the same supersession problem a card's login verdict solves the same way. A retired fill costs one extra fetch at the next selection, where a stale
- * serve would cost the rest of the session. One counter covers every address deliberately: its only failure mode is that extra fetch, and a counter nobody can
- * misindex beats a map of counters somebody can.
- */
-let cacheGeneration = 0;
-
 /* Send the live-status feed its controller context: for each configured controller this session holds a kept probe answer for, the identity members exactly as the
  * configuration item spells them, the decorated serials of the answer's devices, and the decorated serial of the answer's controller record where one exists - a
- * token-only answer carries no console identity, so that member is honestly absent. The send follows every devicesByAddress write, the removal delete included, so
- * the feed's registry tracks what this session knows; the feed rebuilds its registry wholesale from each send.
+ * token-only answer carries no console identity, so that member is honestly absent. A send follows every write that keeps or drops an answer, the removal's own
+ * delete included, so the feed's registry tracks what this session knows; the feed rebuilds its registry wholesale from each send.
  *
  * The raw request promise feeds the shared panel's link-lost watchdog directly, on the donor discipline the family's status pages share: the watch observes the raw
  * promise so a rejection reaches its two-armed hook as a rejection, the console diagnostic runs on a separate chain off the same promise, and the panel handle is read
@@ -275,7 +252,7 @@ const sendStatusContext = async () => {
 
   for(const item of controllers(injectedConfig)) {
 
-    const answer = devicesByAddress.get(item?.address);
+    const answer = answers.get(item?.address);
 
     if(!item?.address || !answer) {
 
@@ -393,6 +370,28 @@ const patchControllerLabel = ({ address, devices }) => {
   }
 };
 
+/* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
+ * outside themselves is handed in from here, because each of those reaches is the page's to own: the DOM a re-select clicks through, the host's toast, the
+ * framework's coordinated write and the catalog-backed interpreters behind it, and the UI-server bridge the probe and the status-context send travel over. What
+ * the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
+ */
+const { answers, removeController, saveController } = makeControllerActions({
+
+  // The write is reached through a closure rather than handed over as a reference, because the framework page is constructed further down and the method reads its
+  // own object: taking the reference at call time is what binds it to the page that exists by then.
+  commitConfig: (compose) => ui.featureOptions.commitConfig(compose),
+  interpreters: accessConfig,
+  probe: requestControllerProbe,
+  processDeviceList,
+  selectController: (address) => {
+
+    // The entry is found the way patchControllerLabel finds it. A sidebar entry is named by its configured address, which is what the lookup matches on.
+    [...document.querySelectorAll("[data-navigation='controller']")].find((c) => c.getAttribute("data-device-serial") === address)?.click();
+  },
+  sendStatusContext,
+  toast: homebridge.toast
+});
+
 // Return the list of controllers from our plugin configuration, paired with a clean connection outcome - the list is configuration-derived, so no fetch is involved
 // and no failure can occur. The framework injects our primary platform-config entry; we map each configured controller to the sidebar shape, deliberately carrying
 // no credentials into the rendered list.
@@ -415,7 +414,7 @@ const getControllers = ({ config }) => {
 
     controllers: controllers(config).map((controller) => ({
 
-      name: devicesByAddress.get(controller.address)?.devices.find(isController)?.name ?? controller.address,
+      name: answers.get(controller.address)?.devices.find(isController)?.name ?? controller.address,
       serialNumber: controller.address
     })),
     error: ""
@@ -444,7 +443,7 @@ const getDevices = async (selectedController, { config }) => {
     return deviceListResult(staleSelectionVerdict());
   }
 
-  const cached = devicesByAddress.get(controller.address);
+  const cached = answers.get(controller.address);
 
   // A controller this session has already reached answers from what it said then, ahead of any bridge call at all. Every tab re-entry and every re-select passes
   // through here, and repeating a full connection for each of them is the wait the user notices most, for data that is almost never different.
@@ -457,7 +456,7 @@ const getDevices = async (selectedController, { config }) => {
 
   // The generation this fetch belongs to, read before the call and checked against after it, so an answer that an invalidation has overtaken can complete without
   // being kept.
-  const generation = cacheGeneration;
+  const generation = answers.generation();
 
   // The browser cannot reach the Access controller directly, so we bridge the request through the plugin's UI server, which holds the controller's identity.
   const answer = classifyProbeResponse(await homebridge.request("/getDevices", { address: controller.address, password: controller.password,
@@ -466,12 +465,8 @@ const getDevices = async (selectedController, { config }) => {
   processDeviceList({ address: controller.address, devices: answer.devices });
   patchControllerLabel({ address: controller.address, devices: answer.devices });
 
-  // Remember what this controller answered, so every later re-entry is served from it. A failure is never kept, which is what keeps the connection-error view and its
-  // retry acting on live attempts; an answer a save or a removal overtook while it was in flight is dropped for the same reason, at the cost of one more fetch the
-  // next time this controller is selected.
-  if((answer.kind !== "error") && (generation === cacheGeneration)) {
-
-    devicesByAddress.set(controller.address, answer);
+  // Offer what this controller answered for keeping, so every later re-entry is served from it. Whether it is worth keeping is the answers' own rule to apply.
+  if(answers.keep({ address: controller.address, answer, generation })) {
 
     // The status feed's registry tracks every kept answer, so the devices this fetch just listed become viewable the moment they are selectable.
     void sendStatusContext();
@@ -719,223 +714,6 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   return surface;
 };
 
-/* Validate a card's connection and persist it, which is the whole of what Save means.
- *
- * Validation comes first and a failure writes nothing at all: a controller the plugin cannot connect to is not a configuration worth saving, and the card's own
- * verdict line already says why. The write is then handed to the feature-options page as a composer rather than made through a session of this card's own,
- * because the page's store holds the options array the user loaded and a write made behind it is one the next option edit writes back over. The page drains
- * whatever option edits are in flight, composes against the configuration as it then stands, writes and saves through the one session it owns, and re-establishes
- * itself on what was written.
- *
- * The cache work goes AHEAD of that write rather than after it, because the page re-reads through getControllers and getDevices inside the call and getDevices
- * answers from the map: a seed made afterwards would leave the page showing what the controller answered before the save, a token-only list for a controller that
- * has just been given credentials above all. The seed therefore lands before the write is known to have landed, so what the map held under both addresses is read
- * first and a write that fails puts it back exactly as it stood.
- *
- * Success speaks through the host's toast rather than the card's verdict line. The page re-runs this plugin's status-panel content hook during and after the
- * write - each run re-populates the docked card, and populating blanks its verdict - and a re-entry through show() discards the frame the card sits on
- * altogether, so the toast is the one surface that survives every outcome. A failure still speaks on the card, because a write that changed nothing
- * re-establishes nothing and the card stands.
- *
- * @returns The address that was written, or null when nothing was.
- */
-const saveController = async ({ card, originalAddress }) => {
-
-  const identity = card.values();
-  const probe = await requestControllerProbe({ ...identity, verdict: card.verdict });
-
-  if(!probe) {
-
-    return null;
-  }
-
-  const replaced = originalAddress && (originalAddress !== identity.address);
-
-  // What the map holds under each address this save touches, read before the seed replaces it so a failed write has something exact to put back.
-  const priorAtAddress = devicesByAddress.get(identity.address);
-  const priorAtOriginal = replaced ? devicesByAddress.get(originalAddress) : undefined;
-
-  /* Put the map back the way this save found it, restoring each address to the answer read above or deleting it where the map held none, and move the generation
-   * again so a fetch issued against the seeded state loses its claim to be kept. A save that wrote nothing then costs the session nothing it knew, and a
-   * controller that was token-only before the save still reads that way.
-   */
-  const restoreCache = () => {
-
-    const restore = (address, prior) => (prior === undefined) ? devicesByAddress.delete(address) : devicesByAddress.set(address, prior);
-
-    restore(identity.address, priorAtAddress);
-
-    if(replaced) {
-
-      restore(originalAddress, priorAtOriginal);
-    }
-
-    cacheGeneration++;
-    void sendStatusContext();
-  };
-
-  /* What this session remembers about the controllers is now a write behind, so the generation moves and every fetch still in flight loses its claim to be kept.
-   * An address change also strands whatever was remembered under the address the user replaced, which names nothing the configuration holds any more; the Add
-   * Controller path has no previous address and strands nothing.
-   */
-  cacheGeneration++;
-
-  if(replaced) {
-
-    devicesByAddress.delete(originalAddress);
-  }
-
-  /* The address that was just written is then re-seeded from this save's own validation, which connected to the controller with exactly this identity moments ago
-   * and came back with its answer. That is newer than anything a deletion would have left behind, so the repaint the page makes inside the write labels the entry
-   * with the controller's live name rather than falling back to the raw address, and the next selection is served rather than reconnecting.
-   */
-  devicesByAddress.set(identity.address, { ...probe, devices: processDeviceList({ address: identity.address, devices: probe.devices }) });
-
-  let result;
-
-  try {
-
-    // The holder read sits inside the try, so a catalog read that rejects renders the failure verdict rather than escaping this handler.
-    const { withControllerSaved } = await accessConfig();
-
-    result = await ui.featureOptions.commitConfig((platform) => withControllerSaved(platform, { ...identity, originalAddress }));
-  } catch(err) {
-
-    restoreCache();
-    card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
-
-    return null;
-  }
-
-  switch(result.kind) {
-
-    case "committed": {
-
-      // A token-only connection is a successful save with a consequence worth saying out loud, since the controller's own facts stay out of reach until
-      // credentials arrive.
-      homebridge.toast.success((probe.kind === "token-only") ? "This controller has been saved. Its API token is valid. Its doors and devices appear in " +
-        "HomeKit; adding a local user's username and password lets the plugin read the controller's own document as well." : "This controller has been saved.");
-
-      break;
-    }
-
-    case "staged": {
-
-      homebridge.toast.warning("This controller has been saved, but Homebridge could not write the configuration file. Save the plugin's settings to keep the " +
-        "change.");
-
-      break;
-    }
-
-    case "failed": {
-
-      restoreCache();
-      card.verdict.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
-        lines: ["Unable to save this controller."], tone: "text-danger" });
-
-      return null;
-    }
-
-    /* A retired copy owns nothing on screen and its map has no reader, since a reopened panel is a fresh module copy with a map of its own, so the seed is left
-     * where it is and nothing is rendered. The default shares this arm rather than standing alone: an outcome this page does not recognize is one it cannot claim
-     * as a success, and refusing to render is the only honest answer to it.
-     */
-    case "superseded":
-    default: {
-
-      return null;
-    }
-  }
-
-  // The status feed's registry follows the re-seed, so the saved controller's devices are viewable under the identity that was just validated.
-  void sendStatusContext();
-
-  /* An address edit leaves the selection naming a controller the refreshed list no longer holds, and the framework drops such a selection to the global scope - so
-   * the entry the save just wrote is selected by a click on the page's own navigation, found the way patchControllerLabel finds it. A sidebar entry is named by its
-   * configured address, which is what the lookup matches on.
-   */
-  if(replaced) {
-
-    [...document.querySelectorAll("[data-navigation='controller']")].find((c) => c.getAttribute("data-device-serial") === identity.address)?.click();
-  }
-
-  return identity.address;
-};
-
-/* Remove a controller from the configuration, with the settings sweep the user chose.
- *
- * The write is handed to the feature-options page as a composer for the same reason Save's is: the page's store holds the options array the user loaded, and the
- * sweep's deletions written behind it are ones the next option edit writes back over. The page owns the session, answers a retired copy on its own terms, and
- * re-establishes itself on what was written.
- *
- * Where the page comes to rest is the framework's own reconciliation rather than a click of ours: a selection naming a controller the refreshed list no longer
- * holds falls back to the global scope, and a removal that leaves no controller at all re-enters the page through a fresh show() cycle whose boot owns the
- * no-controllers surface. A successful removal therefore says nothing, because the page arriving at the global view is the visible outcome; a removal the host
- * could not save to disk speaks through the toast, since the card it would otherwise speak through has left the page with the controller.
- *
- * The cache work stays after the write, where it sits for a save's own reasons reversed: nothing the page re-reads inside the call consults the removed address,
- * so clearing afterwards costs a failed write nothing.
- */
-const removeController = async ({ address, card, macs }) => {
-
-  let result;
-
-  try {
-
-    const { withControllerRemoved } = await accessConfig();
-
-    result = await ui.featureOptions.commitConfig((platform) => withControllerRemoved(platform, { address, macs }));
-  } catch(err) {
-
-    card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to remove this controller."], tone: "text-danger" });
-
-    return;
-  }
-
-  switch(result.kind) {
-
-    // A removal that landed says nothing: the page coming to rest on the global view, or on the no-controllers surface where this was the last controller, is
-    // the visible outcome and it needs no sentence beside it.
-    case "committed": {
-
-      break;
-    }
-
-    case "staged": {
-
-      homebridge.toast.warning("This controller has been removed, but Homebridge could not write the configuration file. Save the plugin's settings to keep the " +
-        "change.");
-
-      break;
-    }
-
-    case "failed": {
-
-      card.verdict.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
-        lines: ["Unable to remove this controller."], tone: "text-danger" });
-
-      return;
-    }
-
-    /* A retired copy renders nothing, and the default shares its arm for the same reason the save's does: an outcome this page does not recognize is one it
-     * cannot treat as a removal, so the cache below is left holding what it holds.
-     */
-    case "superseded":
-    default: {
-
-      return;
-    }
-  }
-
-  // The controller is gone from the configuration, so what this session remembered about it goes with it, and the generation moves so a fetch that was already in
-  // flight for that address cannot put it back. The settings sweep read its MAC addresses long before this, when the card was populated.
-  cacheGeneration++;
-  devicesByAddress.delete(address);
-
-  // The status feed's registry follows the delete, so a removed controller's serials leave it rather than lingering as viewable ghosts.
-  void sendStatusContext();
-};
-
 /* Mount a card that edits a controller already in the configuration, in whichever home the caller names.
  *
  * Each home differs in where it sits and in what a removal can offer, and in nothing else. The docked editor sits in a reachable controller's own stats panel
@@ -1021,7 +799,7 @@ const mountControllerEditor = ({ collapsible = false, container, heading, helper
       card.populate({
 
         address: address,
-        macs: sweepable ? (devicesByAddress.get(address)?.devices.map((device) => device.serialNumber).filter((id) => typeof id === "string") ?? []) : [],
+        macs: sweepable ? (answers.get(address)?.devices.map((device) => device.serialNumber).filter((id) => typeof id === "string") ?? []) : [],
         password: item?.password ?? "",
         tokens: item?.tokens,
         username: item?.username ?? "",
@@ -1115,7 +893,7 @@ const showAccessDetails = ({ device, panel, signal }) => {
 
   // Whether the selection is the controller's own row AND that controller answered this session with an API token alone, which is what decides both the notice
   // below and whether the connection editor is offered on this render.
-  const tokenOnlyController = Boolean(device) && isController(device) && (devicesByAddress.get(device.hbuaConfigAddress)?.kind === "token-only");
+  const tokenOnlyController = Boolean(device) && isController(device) && (answers.get(device.hbuaConfigAddress)?.kind === "token-only");
 
   /* The docked editor sits on the controller's own node and nowhere else. Every controller answers with a row of its own whichever way it was reached, so that row
    * is the one place its connection is edited and a device render leaves the editor out of sight - a device is not a thing whose connection can be edited. It is
@@ -1170,8 +948,7 @@ const featureOptionsParams = {
       label: "Refresh controllers",
       onRefresh: () => {
 
-        cacheGeneration++;
-        devicesByAddress.clear();
+        answers.clear();
       }
     }
   },
