@@ -19,29 +19,34 @@
 `homebridge-unifi-access` is a [Homebridge](https://homebridge.io) plugin that provides HomeKit support to the [UniFi Access](https://ui.com/door-access) device ecosystem. [UniFi Access](https://ui.com/door-access) is [Ubiquiti's](https://www.ui.com) door access security platform, with doorbell, reader, lock, and controller hardware options for you to choose from, as well as an app which you can use to view, configure and manage your door access security.
 
 ## <A NAME="why"></A>Why Use This Plugin For UniFi Access Support In HomeKit?
-This plugin attempts to bridge a gap in the UniFi Access ecosystem by providing native HomeKit support on par with what you would expect from a first-party of native HomeKit solution. My north star is to create a plugin that *just works* with minimal required configuration by you to get up and running. The goal is to provide as close to a streamlined experience as you would expect from a first-party or native HomeKit solution. For the adventurous, there are more granular options available to enable you to further tailor your experience.
+This plugin attempts to bridge a gap in the UniFi Access ecosystem by providing native HomeKit support on par with what you would expect from a first-party native HomeKit solution. My north star has always been to create a plugin that *just works* with minimal required configuration by you to get up and running. All you need is the hostname or IP address of your Access controller and either a local user's credentials, an API token, or both. That's it. The defaults are sane and correct for the vast majority of people. For the adventurous, there are rich capabilities you can explore to enable you to further tailor your experience. All provided through an elegant webUI accessed through the Homebridge Config UI that allows you to explore all of the more sophisticated capabilities of this plugin in an approachable way.
 
-What does *just works* mean in practice? It means that this plugin will discover all your supported UniFi Access devices and make them available in HomeKit. It supports all known UniFi Access controller configurations (UniFi CloudKey Gen2+, UniFi Dream Machine Pro/SE, and UniFi NVR, etc).
+What does *just works* mean in practice? It means that this plugin will discover all your supported UniFi Access devices and make them available in HomeKit. It supports all known UniFi Access controller configurations (UniFi CloudKey Gen2+, UniFi Dream Machine Pro/SE, UniFi NVR, etc).
 
-For the more technically inclined - this plugin has continued to pioneer the HomeKit user experience for UniFi Access by being the ***first*** Homebridge plugin (and first third-party app, to my knowledge) to successfully reverse engineer the UniFi Access native events API that was introduced with UniFi OS. This allows realtime capturing of events as they occur in the Access ecosystem, allowing us to provide that to HomeKit.
+For the more technically inclined - this plugin has continued to pioneer the HomeKit user experience for UniFi Access by being the ***first*** Homebridge plugin (and first third-party app, to my knowledge) to successfully reverse engineer the UniFi Access native events API that was introduced with UniFi OS. This allows realtime capturing of events as they occur in the Access ecosystem, allowing us to provide that to HomeKit. Version 2 builds on that foundation with the official Access API alongside it, and shares its plugin framework and device identity model with [homebridge-unifi-protect](https://github.com/hjdhjd/homebridge-unifi-protect), laying the groundwork for deeper integration across the UniFi plugin family.
 
 ### Supported Devices
-- **UniFi Access Hub (UA Hub)** - Lock, doorbell, door position sensor (DPS), and terminal inputs (REL, REN, REX).
-- **UniFi Access Hub Door Mini (UA Hub Door Mini)** - Lock, door position sensor (DPS), and request to exit sensor (REX).
-- **UniFi Access Ultra (UA Ultra)** - Lock, door position sensor (DPS), and request to exit sensor (REX).
-- **UniFi Access Gate (UA Gate)** - Main gate with lock or garage door opener accessory, side door (pedestrian gate) with separate lock, and door position sensors for both doors.
-- **UniFi Access Readers** - Access method switches to enable or disable individual authentication methods (Face, Hand Wave, Mobile, NFC, PIN, QR).
+- **UniFi Access Hub (UA Hub)** - Lock, doorbell, door position sensor (DPS), terminal inputs (REL, REN, REX), and tamper status.
+- **UniFi Access Hub Door Mini (UA Hub Door Mini)** - Lock, door position sensor (DPS), request to exit sensor (REX), and tamper status.
+- **UniFi Access Ultra (UA Ultra)** - Lock, door position sensor (DPS), request to exit sensor (REX), and tamper status.
+- **UniFi Access Enterprise Hub** - Each door port is its own accessory, with a lock and door position sensor (DPS).
+- **UniFi Access Gate (UA Gate)** - Main gate as a garage door opener or lock accessory, side door (pedestrian gate) with its own lock, and door position sensors for both doors.
+- **UniFi Access Readers** - Access method switches to enable or disable individual authentication methods (Face, Hand Wave, Mobile, NFC, PIN, QR, TouchPass), on standalone readers and on hubs with reader functionality.
 
 ### Features
-- ***Easy* configuration - all you need is your UniFi Access controller IP address, username, and password to get started.** The defaults work quite well for the vast majority of users. When you want more, there are [additional options](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md) you can play with, if you choose.
+- ***Easy* configuration - all you need is your UniFi Access controller address and either a local user's credentials, an API token, or both.** The defaults work quite well for the vast majority of users. When you want more, there are [additional options](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md) you can play with, if you choose.
 
-- **Full HomeKit support for the UniFi Access ecosystem.** All generally available UniFi Access hub and reader devices are supported. This includes lock accessories, doorbell capabilities, door position sensors, terminal input sensors (REL, REN, REX), access method switches for readers, and automation accelerators.
+- **Full HomeKit support for the UniFi Access ecosystem.** All generally available UniFi Access hub and reader devices are supported. This includes lock and garage door opener accessories, doorbell capabilities, door position sensors, terminal input sensors (REL, REN, REX), tamper status, access method switches for readers, and automation accelerators.
+
+- **Doors presented the way you expect.** Any door can be a lock or a garage door opener in HomeKit, and a garage door opener shows real opening, closing, and stopped states backed by the door position sensor. Accessories tell the truth about availability: while a controller or a device cannot be reached, HomeKit shows it as Not Responding rather than a stale reading.
+
+- **API token support.** Configure a controller with an API token and this plugin works with the official Access API. A token on its own is enough to bring your doors into HomeKit, and it unlocks webhooks, so you can see who unlocked a door and how in the Homebridge log and over MQTT, and unlock attribution, so doors unlocked through HomeKit show as *Homebridge* in the Access activity history.
 
 - **Support for multiple controllers.** This plugin can support multiple UniFi Access controllers. If you have more than one controller, it's easy to add them to this plugin, and integrate them seamlessly into HomeKit.
 
 - **Automatic *realtime* detection and configuration of all UniFi Access devices.** By default - all of your supported UniFi Access devices are made available in HomeKit without needing any further configuration on your part. Additionally, if you add or remove hubs or other devices to your UniFi Access controller, this plugin will autodetect those configuration changes and add or remove those devices in HomeKit, seamlessly, *in realtime*. No need to restart Homebridge to see your new Access devices added or removed.
 
-- **A builtin webUI using the Homebridge webUI plugin framework allows you the ability to [customize the plugin to your needs](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md).** You can apply options globally, for all devices connected to a specific Access controller, or for individual Access devices in an intuitive way using the Homebridge HBUA webUI.
+- **A builtin webUI using the Homebridge webUI plugin framework allows you the ability to [customize the plugin to your needs](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/FeatureOptions.md).** Everything is configured there, MQTT included. You can apply options globally, for all devices connected to a specific Access controller, or for individual Access devices in an intuitive way using the Homebridge HBUA webUI. Selecting a device shows its live status streaming in real time - lock, door position, tamper, availability, and a reader's access methods - so you can see what HomeKit sees.
 
 - **MQTT support.** [MQTT](https://mqtt.org) support is available for those that want to [make UniFi Access accessible to an MQTT broker](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/MQTT.md).
 
@@ -59,21 +64,44 @@ For the more technically inclined - this plugin has continued to pioneer the Hom
   * [API Documentation](https://github.com/hjdhjd/unifi-access): documentation of the native Ubiquiti UniFi Access API. The API is a superset of the public API that Ubiquiti has made available.
 
 ## Installation
-If you are new to Homebridge, please first read the [Homebridge](https://homebridge.io) [documentation](https://github.com/homebridge/homebridge/wiki) and installation instructions before proceeding.
 
-If you have installed the [Homebridge Config UI](https://github.com/homebridge/homebridge-config-ui-x), you can install this plugin by going to the `Plugins` tab and searching for `homebridge-unifi-access` and installing it.
+> [!IMPORTANT]
+>  ### Prerequisites
+>   * **Homebridge 2.0 and Node 22.20 (or better) are required.** Homebridge 1.x is not supported.
+>   * If you are new to Homebridge, please first read the [Homebridge](https://homebridge.io) [documentation](https://github.com/homebridge/homebridge/wiki) and installation instructions before proceeding. Ensure you've installed Homebridge and the [Homebridge Config UI](https://github.com/homebridge/homebridge-config-ui-x) before proceeding.
+>   * Decide how this plugin will reach your Access controller. You can use either or both of the following, and I recommend both:
+>     * A ***local user*** account on your UniFi console dedicated to `homebridge-unifi-access`. **I strongly recommend a dedicated local user rather than your Ubiquiti account.** 2FA is not supported. To create one:
+>       * Sign in to your UniFi console directly by its IP address (for example, `https://192.168.1.1`) rather than through unifi.ui.com.
+>       * Go to ***Admins & Users*** in the left-hand menu and select the ***Admins*** tab.
+>       * Click ***+*** in the top right corner and select ***Add Admin***.
+>       * Select ***Restrict to local access only*** and enter a username and password for the new local user.
+>       * Under the admin's role, make sure the new user has access to the ***UniFi Access*** application.
+>     * An ***API token*** for the official Access API. A token is what enables webhooks and unlock attribution. To create one:
+>       * Open the ***UniFi Access*** application on your console.
+>       * Go to ***Settings > General*** and select ***API Token***.
+>       * Click ***Create New***, give the token a name and validity period, and select its permission scopes. Grant the scopes for the features you want; if the token lacks a permission this plugin needs, the Homebridge log will tell you.
+>       * Copy the token when it is shown. It is displayed only once, so store it somewhere safe before closing the dialog.
+>
+> ### Getting Started
+> To install `homebridge-unifi-access`:
+>
+> 1. Go to the `Plugins` tab in the Homebridge Config UI and search for `homebridge-unifi-access` and install it.
+> 2. Click on the ***Set Up*** icon located in the top right corner of the Homebridge UniFi Access tile and then enter the hostname or IP address of the Access controller along with the local user's username and password, the API token, or both.
+> 3. For the moment, don't make any other configuration changes and click ***Save*** and then click ***Restart Homebridge***.
+> 4. After restarting Homebridge, click on the ***Set Up Child Bridge*** icon located in the top right corner of the Homebridge UniFi Access tile. Toggle the child bridge setting for UniFi Access to ***on*** and then save and restart Homebridge.
+> 5. After restarting Homebridge, click on the ***Connect to HomeKit*** icon located in the top right corner of the Homebridge UniFi Access tile. Use the Home app on your iPhone and scan the QR code to connect UniFi Access to HomeKit.
+> 6. That's it! You should now be able to access all your UniFi Access devices in HomeKit. You can further tailor your experience by going to the Homebridge UniFi Access webUI and exploring the various features and options that are available to you.
 
-### Things To Be Aware Of
-- **Make sure you are running on the latest production / stable firmwares for both your controller platform (UCKgen2+, UDM-Pro, UNVR, etc.) as well as the latest production / stable UniFi Access controller firmware.**
-- **No beta versions of iOS, iPadOS, macOS, tvOS, or watchOS are supported. You are on your own if you choose to install / run beta firmwares - don't expect support or sympathy if you run into issues.**
-- **No beta or early access versions of device controller firmware (UCKgen2+, UDM-Pro, UNVR, etc.) are supported by this plugin. You are on your own if you choose to install / run beta firmwares - don't expect support or sympathy if you run into issues.**
-- **No beta or early access versions of UniFi Access firmware are supported by this plugin. You are on your own if you choose to install / run beta firmwares - don't expect support or sympathy if you run into issues.**
-- **No beta or early access versions of UniFi Access hardware are supported by this plugin. You are on your own if you choose to use non-production/GA hardware - don't expect support or sympathy if you run into issues.**
-- **My philosophy is to aggressively adopt the capability and features (that make sense in a HomeKit context) in the latest production / stable Ubiquiti firmware releases and to deprecate old functionality that's been superceded by newer, richer, or more performant capabilities - either by HomeKit or Ubiquiti. Read the [Changelog](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md) carefully for the latest information on what's new.**
-- ***For extra clarity and to reiterate the above - before you install this plugin, make sure you are on the latest production / stable controller platform firmware and the latest production / stable UniFi Access firmware.***
+> [!TIP]
+> - Only official releases of UniFi Access and UniFi OS firmwares are supported. **No beta, early access, or release candidate versions of any kind are supported**.
+> - Only official hardware releases for UniFi Access are supported. Early access or beta hardware is unsupported.
+> - No support is provided for any beta versions of Apple operating systems (iOS, iPadOS, macOS, tvOS, etc.).
+> - **My philosophy is to aggressively adopt the capability and features (that make sense in a HomeKit context) in the latest official Ubiquiti firmware releases and to deprecate old functionality that's been superceded by newer, richer, or more performant capabilities - either by HomeKit or Ubiquiti. Read the [Changelog](https://github.com/hjdhjd/homebridge-unifi-access/blob/main/docs/Changelog.md) carefully for the latest information on what's new.**
 
 ## Plugin Configuration
-If you choose to configure this plugin directly instead of using the [Homebridge Configuration webUI](https://github.com/homebridge/homebridge-config-ui-x), you'll need to add the platform to your `config.json` in your home directory inside `.homebridge`.
+**For most people, I recommend using the [Homebridge Configuration web UI](https://github.com/homebridge/homebridge-config-ui-x) to configure this plugin rather than doing so directly. It's easier to use for most users, especially newer users, and less prone to typos, leading to other problems. This plugin has a custom webUI built on top of the Homebridge webUI framework where everything - controllers, feature options, and MQTT - is configured in one place.**
+
+If you choose to configure this plugin directly instead, you'll need to add the platform to your `config.json` in your home directory inside `.homebridge`. A controller takes a local user's credentials, an API token, or both:
 
 ```js
 "platforms": [
@@ -84,15 +112,15 @@ If you choose to configure this plugin directly instead of using the [Homebridge
       {
         "address": "1.2.3.4",
         "username": "some-unifi-access-user (or create a new one just for homebridge)",
-        "password": "some-password"
+        "password": "some-password",
+        "tokens": {
+          "access": "some-access-api-token"
+        }
       }
     ]
   }
 ]
 ```
-**For most people, I recommend using [Homebridge Configuration web UI](https://github.com/homebridge/homebridge-config-ui-x) to configure this plugin rather than doing so directly. It's easier to use for most users, especially newer users, and less prone to typos, leading to other problems. This plugin has a custom webUI built on top of the Homebridge webUI framework that should simplify feature configuration, and make them more accessible to users.**
-
-You can use your Ubiquiti account credentials, though 2FA is not currently supported. That said, **I strongly recommend creating a local user just for Homebridge instead of using this option.**
 
 ## Plugin Development Dashboard
 This is mostly of interest to the true developer nerds amongst us.

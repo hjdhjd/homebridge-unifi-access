@@ -56,7 +56,7 @@
                   "title": "Access API Token",
                   "required": false,
                   "placeholder": "e.g. an Access console API token",
-                  "description": "API token generated in the UniFi Access console, under Security > Advanced. A token reaches the official Access API and can be used on its own or alongside a local user's credentials."
+                  "description": "API token generated in the UniFi Access console, under Settings > General. A token reaches the official Access API and can be used on its own or alongside a local user's credentials."
                 }
               }
             },
