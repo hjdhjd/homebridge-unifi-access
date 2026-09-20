@@ -972,6 +972,8 @@ const featureOptionsParams = {
         "below." },
       "auth-missing": { label: "Sign-in required", message: "Live status needs a way to sign in to this controller. Add a local user's username and password, or " +
         "an API token, in the card below." },
+      "misconfigured": { label: "Certificate rejected", message: "This controller presented a TLS certificate that could not be verified. Turn off " +
+        "certificate verification for this controller in the card below, or install a trusted certificate on the console and on the Access developer API." },
       "not-found": { message: "This device was not listed by a configured controller in this session. Refresh the controller list to relist it." }
     },
     identity: (device) => [

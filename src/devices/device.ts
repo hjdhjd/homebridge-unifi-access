@@ -217,7 +217,7 @@ export abstract class AccessDevice extends AccessBase {
 
         if((synced !== undefined) && (this.accessoryName !== synced)) {
 
-          this.log.info("Name change detected. A restart of Homebridge may be needed in order to complete name synchronization with HomeKit.");
+          this.log.info("Detected a name change on the controller; updating the HomeKit name to %s.", synced);
           this.configureInfo();
         }
 

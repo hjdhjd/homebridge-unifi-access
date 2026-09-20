@@ -325,7 +325,11 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   // The pass runs behind the logins it awaits, so yielding once is what lets it reach its own decision.
   await settle();
 
-  assert.ok(failures.some(line => line.includes("Startup did not complete")), "the failure must be said against the controller it belongs to");
+  // The whole sentence, spelled out, so the arm cannot pass on a prefix that a wording dropping the consequence would satisfy just as well.
+  const refused = "Unable to log in to this controller: Connection refused. " +
+    "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.";
+
+  assert.ok(failures.includes(refused), "the failure must be said against the controller it belongs to, naming the refusal and what it costs the session");
   assert.deepEqual(wired.unregistered, [], "and the pass must stand down for the session");
 });
 

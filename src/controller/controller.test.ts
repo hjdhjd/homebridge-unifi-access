@@ -199,8 +199,8 @@ interface ControllerHarness {
  * @param options - The controller's configuration, the controller document its client answers with, and the state store behind that client.
  */
 function makeController(options: { config?: Partial<AccessControllerOptions>; connection?: unknown;
-  controllerInfo?: { host: { device_type?: string; mac: string; shortname?: string } } | null; handles?: Map<string, unknown>; options?: string[];
-  store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
+  controllerInfo?: { host: { device_type?: string; firmware_version?: string; mac: string; shortname?: string }; version?: string } | null;
+  handles?: Map<string, unknown>; options?: string[]; store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
 
   const accessories: AccessAccessory[] = [];
   const clock = new TestClock();
@@ -679,10 +679,11 @@ test("a connected controller qualifies its name with the host hardware's type, a
 
   /* The controller document here answers with a hardware type and a short name at once, which is what states the resolution order out loud: the hardware type is
    * what a user sees, and the short name is the fallback for a host that reports no type at all. A composition consulting them in the other order would render the
-   * short name here.
+   * short name here. The document carries both software versions as well, so the connected line below is read whole rather than by a prefix that a composition
+   * dropping the software would still satisfy.
    */
-  const harness = makeController({ controllerInfo: { host: { device_type: "UNVRAI8", mac: CONTROLLER_MAC, shortname: "UNVR G2 Pro" } },
-    handles: new Map([[ "plain", deviceHandle(record) ]]), store });
+  const harness = makeController({ controllerInfo: { host: { device_type: "UNVRAI8", firmware_version: "5.1.33", mac: CONTROLLER_MAC,
+    shortname: "UNVR G2 Pro" }, version: "4.3.9" }, handles: new Map([[ "plain", deviceHandle(record) ]]), store });
 
   t.after(() => harness.shutdown.abort());
 
@@ -695,7 +696,8 @@ test("a connected controller qualifies its name with the host hardware's type, a
   assert.equal(harness.controller.name, "Test Controller [UNVRAI8]");
 
   // The connect's own line reads through the name it just settled, so the qualification reaches the log rather than living only on the getter.
-  assert.ok(harness.logged.some(line => line.startsWith("Test Controller [UNVRAI8]: Connected to 1.2.3.4 ")), "the connected line must carry the qualified name");
+  assert.ok(harness.logged.includes("Test Controller [UNVRAI8]: Connected to 1.2.3.4 (UniFi Access 4.3.9 running on UniFi OS 5.1.33)."),
+    "the connected line must carry the qualified name and the software the controller document answered with");
 
   const adoption = harness.logged.filter(line => line.includes("Adding"));
 
@@ -729,7 +731,8 @@ test("the bracket comes from the controller document alone: a host reporting onl
      */
     assert.equal(tokenOnly.controller.name, "Test Controller");
     assert.ok(!tokenOnly.controller.name.includes("undefined"), "a controller with no type to render must never say so out loud");
-    assert.ok(tokenOnly.logged.some(line => line.startsWith("Test Controller: Connected to 1.2.3.4 ")), "and its lines carry the undecorated name");
+    assert.ok(tokenOnly.logged.includes("Test Controller: Connected to 1.2.3.4."),
+      "and its lines carry the undecorated name, with no software parenthetical composed over versions nothing answered");
   });
 
 test("a token-only controller keys ownership by its configured address and reclaims nothing that names another owner", () => {
@@ -1581,7 +1584,8 @@ test("with webhooks on but no published API to register through, a controller sa
 
   await harness.run();
 
-  assert.ok(harness.lines.some(line => line.includes("Webhooks require an API token with webhook permissions for this controller.")), "the reason must be named");
+  assert.ok(harness.lines.some(line => line.startsWith("warn: ") && line.includes("Webhooks require an API token with webhook permissions for this controller.")),
+    "the reason must be named, and warned rather than mentioned in passing");
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.listenerRequests, 0);
 });
@@ -1659,8 +1663,8 @@ test("a registration this plugin holds at an address no configured controller an
    * never cost the user the registration this attempt just made.
    */
   assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:abandoned" ]);
-  assert.ok(harness.lines.some(line => line.includes("Removed a webhook registration this plugin left at a controller address it is not configured for: " +
-    ABANDONED_NAME + ".")), "the removal must name the registration it removed");
+  assert.ok(harness.lines.some(line => line.includes("Removed a leftover webhook registration: " + ABANDONED_NAME +
+    ". It points at an address this plugin is no longer configured for.")), "the removal must name the registration it removed");
 });
 
 test("a registration at a sibling controller's own path is left where it is", async (t) => {

@@ -98,6 +98,13 @@ function sentenceCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase();
 }
 
+// A sentence that continues one already opened: its first character lowered. The library glosses a doorbell outcome as a complete sentence of its own, and the
+// line carrying it names the call ahead of a colon, so the gloss has to read as the rest of that sentence rather than as a second one starting mid-line.
+function lowerFirst(text: string): string {
+
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
  * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
  */
@@ -235,6 +242,14 @@ export class AccessHub extends AccessDevice {
      */
     this.hints.logEvents = new Set(this.getFeatureValueList("Log.Events", logEventChoices().map(choice => choice.value)) as readonly LogEventName[]);
 
+    /* A selection the user emptied is a deviation from the default that nothing else in the log would state, so the hub states it here, once, at the one read of
+     * the list. A narrowed selection needs no summary: each category that is still on announces itself as it speaks.
+     */
+    if(!this.hints.logEvents.size) {
+
+      this.log.info("No event categories enabled.");
+    }
+
     return true;
   }
 
@@ -248,6 +263,20 @@ export class AccessHub extends AccessDevice {
   #selectedSensors(): readonly string[] {
 
     return this.getFeatureValueList("Hub.Sensors", HUB_SENSOR_DOMAIN);
+  }
+
+  /* Whether this device's model offers any contact sensor at all, read through the same list the settings page narrows its own picker with, so the hub and the
+   * page agree on what a model carries rather than each deciding for itself.
+   *
+   * The model is resolved rather than read off the record, because a record the official API answers with carries a device type and no display model of its own,
+   * and a bare read would answer that every token-reached hub offers nothing.
+   *
+   * @returns True when the model drives at least one member of the sensor table.
+   */
+  #offersSensors(): boolean {
+
+    // eslint-disable-next-line camelcase
+    return hubSensorChoices({ capabilities: this.uda.capabilities, display_model: this.controller.resolveDeviceModel(this.uda) }).length > 0;
   }
 
   // The HomeKit service the door is presented through, resolved from the configured choice against this hub's hardware on every read.
@@ -304,7 +333,7 @@ export class AccessHub extends AccessDevice {
 
       if(!initialized) {
 
-        this.log.warn("No doors found in Access API. Door event handling may not work correctly.");
+        this.log.warn("The controller reports no doors, so this hub's door events cannot be matched to a door.");
       }
 
       return [];
@@ -346,7 +375,7 @@ export class AccessHub extends AccessDevice {
 
         if(initialized) {
 
-          this.log.warn("The gate's " + role + " binding was withdrawn, so its services stand at their last reading.");
+          this.log.warn("The controller no longer reports a door for the gate's " + role + "; its accessories keep the last state they showed.");
         }
 
         continue;
@@ -1031,6 +1060,19 @@ export class AccessHub extends AccessDevice {
     // The selection is resolved once for the whole pass and each input tests its own membership, rather than the option being resolved again for every input.
     const selected = this.#selectedSensors();
 
+    /* The same statement for a sensor selection the user emptied, made at adoption alone. A later pass finding the list empty has already narrated what changed
+     * through the per-service line each retiring sensor writes, so a summary repeated on every device update would say nothing the user has not already read. A
+     * device that offers no sensor in the settings page has nothing to state, so the model's own list is what the line is gated on...read through the same
+     * resolver the settings page and the model characteristic read, because a record from the official API carries a device type and no display model at all.
+     *
+     * The list is read last in the condition, so a device update - which always carries an initialized pass - and a user on the default selection both settle the
+     * gate without walking the member table.
+     */
+    if(!initialized && !selected.length && this.#offersSensors()) {
+
+      this.log.info("No sensors enabled.");
+    }
+
     for(const { label, member, terminal } of terminalInputs) {
 
       const facts = terminalInput(this.uda, terminal);
@@ -1218,7 +1260,7 @@ export class AccessHub extends AccessDevice {
     const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined, () => {
 
       initialized = false;
-      this.log.info("Configuring door as %s service.", this.doorServiceType);
+      this.log.info("Presenting the door in HomeKit as a %s.", (this.doorServiceType === "GarageDoorOpener") ? "garage door opener" : "lock");
     });
 
     if(initialized) {
@@ -1418,7 +1460,7 @@ export class AccessHub extends AccessDevice {
 
         case "unavailable":
 
-          this.log.error("Ringing the doorbell requires the official Access API, which needs an API token configured.");
+          this.log.error("Ringing the doorbell requires the official Access API, which needs an API token to be configured.");
 
           break;
 
@@ -1662,7 +1704,7 @@ export class AccessHub extends AccessDevice {
 
         default:
 
-          this.log.error("MQTT: Unknown lock set message received: %s.", value);
+          this.log.error("Unable to process MQTT lock setting: %s.", value);
 
           break;
       }
@@ -1707,7 +1749,7 @@ export class AccessHub extends AccessDevice {
 
           default:
 
-            this.log.error("MQTT: Unknown side door lock set message received: %s.", value);
+            this.log.error("Unable to process MQTT side door lock setting: %s.", value);
 
             break;
         }
@@ -2078,7 +2120,7 @@ export class AccessHub extends AccessDevice {
      */
     if(!this.hubProjection) {
 
-      this.#refuseDoorCommand({ action, doorName, reason: "This device has no door control surface." });
+      this.#refuseDoorCommand({ action, doorName, reason: "This device does not expose door controls." });
 
       return null;
     }
@@ -2108,7 +2150,7 @@ export class AccessHub extends AccessDevice {
 
     if(!doorId) {
 
-      this.#refuseDoorCommand({ action: target.action, doorName: target.doorName, reason: "No door record was found for it." });
+      this.#refuseDoorCommand({ action: target.action, doorName: target.doorName, reason: "The controller reports no door for it." });
 
       return null;
     }
@@ -2294,7 +2336,8 @@ export class AccessHub extends AccessDevice {
      */
     if(decision.kind === "refuse") {
 
-      this.log.error("Unable to manually relock the %s when the lock relay is configured to the default settings.", target.doorName);
+      this.log.error("Unable to manually relock the %s because the lock relay is on its default settings. " +
+        "Set a lock delay interval for this door to relock it from HomeKit.", target.doorName);
 
       return false;
     }
@@ -2697,7 +2740,7 @@ export class AccessHub extends AccessDevice {
 
           if(this.hints.logEvents.has("DPS")) {
 
-            this.log.info("Side door position sensor %s.", contactDetected ? "closed" : "open");
+            this.log.info("%s is %s.", sentenceCase(SIDE_DOOR_DPS_LABEL), contactDetected ? "closed" : "open");
           }
         } else {
 
@@ -2706,7 +2749,7 @@ export class AccessHub extends AccessDevice {
 
           if((this.doorServiceType === "GarageDoorOpener") || this.hints.logEvents.has("DPS")) {
 
-            this.log.info("%s %s.", sentenceCase(DPS_LABEL), contactDetected ? "closed" : "open");
+            this.log.info("%s is %s.", sentenceCase(DPS_LABEL), contactDetected ? "closed" : "open");
           }
         }
       }
@@ -2788,7 +2831,7 @@ export class AccessHub extends AccessDevice {
 
         if(this.hints.logEvents.has(member)) {
 
-          this.log.info("%s %s.", sentenceCase(label), contactDetected ? "closed" : "open");
+          this.log.info("%s is %s.", sentenceCase(label), contactDetected ? "closed" : "open");
         }
       }
     }
@@ -2868,7 +2911,7 @@ export class AccessHub extends AccessDevice {
 
       case true:
 
-        this.log.warn("Tampering detected.");
+        this.log.info("Tampering detected.");
 
         break;
 
@@ -3018,7 +3061,7 @@ export class AccessHub extends AccessDevice {
 
     if(this.hints.logEvents.has("Doorbell")) {
 
-      this.log.info("Doorbell call ended: %s", doorbellOutcome(delivery.data.object.reason_code));
+      this.log.info("Doorbell call ended: %s", lowerFirst(doorbellOutcome(delivery.data.object.reason_code)));
     }
   }
 

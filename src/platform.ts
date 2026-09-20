@@ -204,7 +204,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       (error: unknown): AccessControllerReport => {
 
         // A login that rejects outright leaves this controller's identity unknown, which the fence reads as unavailable...the reclaim stands down for the session.
-        controller.log.error("Startup did not complete, so stranded-accessory cleanup is skipped for this session: %s.", formatErrorMessage(error));
+        controller.log.error("Unable to log in to this controller: %s. " +
+          "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.", formatErrorMessage(error));
 
         return { controller, outcome: "unavailable" };
       }));

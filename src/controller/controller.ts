@@ -194,7 +194,7 @@ export class AccessController {
 
     if(identity.error !== undefined) {
 
-      this.log.error(identity.error);
+      this.log.info(identity.error);
 
       return;
     }
@@ -369,8 +369,12 @@ export class AccessController {
 
     this.transition("running");
 
-    // We successfully connected.
-    this.log.info("Connected to %s (UniFi Access %s running on UniFi OS %s).", this.config.address, controllerInfo?.version, controllerInfo?.host.firmware_version);
+    /* The software parenthetical is written only where a controller document was read. A controller reached with an API token alone reads none, so both versions
+     * answer nothing there, and an unconditional composition would put the word "undefined" in front of the user twice.
+     */
+    const software = controllerInfo ? " (UniFi Access " + controllerInfo.version + " running on UniFi OS " + controllerInfo.host.firmware_version + ")" : "";
+
+    this.log.info("Connected to %s%s.", this.config.address, software);
 
     return true;
   }
@@ -446,7 +450,7 @@ export class AccessController {
       // Enabled, but this controller has no published API to register through, so there is nothing to arrange and one line says why.
       if(!official) {
 
-        this.log.info("Webhooks require an API token with webhook permissions for this controller.");
+        this.log.warn("Webhooks require an API token with webhook permissions for this controller.");
 
         return;
       }
@@ -557,7 +561,7 @@ export class AccessController {
           // eslint-disable-next-line no-await-in-loop
           await official.webhooks.deleteEndpoint(record.id);
 
-          this.log.info("Removed a webhook registration this plugin left at a controller address it is not configured for: %s.", record.name);
+          this.log.info("Removed a leftover webhook registration: %s. It points at an address this plugin is no longer configured for.", record.name);
         } catch(error) {
 
           this.log.debug("Unable to remove the webhook registration %s: %s.", record.name, formatErrorMessage(error));
@@ -1040,7 +1044,7 @@ export class AccessController {
       // Notify the user we see this device, but we aren't adding it to HomeKit.
       this.#unsupportedDevices[device.mac] = true;
 
-      this.log.info("UniFi Access device type '%s' is not currently supported, ignoring: %s.", device.device_type, this.getDeviceName(device));
+      this.log.info("UniFi Access device type %s is not currently supported, ignoring: %s.", device.device_type, this.getDeviceName(device));
 
       return false;
     }

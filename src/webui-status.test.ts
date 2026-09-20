@@ -9,8 +9,8 @@
  */
 /* eslint-disable camelcase */
 import type { AccessApiMode, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
-import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore,
-  noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
+import { AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError,
+  AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
@@ -264,6 +264,8 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
   assert.equal(classifyStatusError(new AccessAuthorizationError("Not an administrator.")), "auth-invalid");
   assert.equal(classifyStatusError(new AccessTimeoutError("The request timed out.", { elapsedMs: 5000 })), "timeout");
   assert.equal(classifyStatusError(new AccessStallError("The channel went silent.", { silentForMs: 5000 })), "timeout");
+  assert.equal(classifyStatusError(new AccessCertificateError({ cause: new Error("unable to verify"), host: "hubble:12445", identity: "token" })),
+    "misconfigured");
   assert.equal(classifyStatusError(new AccessNetworkError("The connection failed.")), "unreachable");
   assert.equal(classifyStatusError(new AccessThrottledError("The controller is throttled.", { cooldownMs: 1000 })), "unreachable");
 

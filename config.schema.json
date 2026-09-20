@@ -71,9 +71,9 @@
 
             "verifyTls": {
               "type": "boolean",
-              "title": "Verify TLS Certificate",
+              "title": "Verify TLS Certificates",
               "required": false,
-              "description": "Require this controller to present a TLS certificate that verifies. Leave this off for a controller presenting the self-signed certificate it ships with; turn it on where a trusted certificate has been installed. Default: false."
+              "description": "Require this controller to present TLS certificates that verify. Verification covers the console's own connection and, when an API token is configured, the Access developer API on port 12445, which presents a certificate of its own: a certificate installed on the console does not reach it, so a token identity needs a trusted certificate installed on the developer port as well. Leave this off for a controller presenting the self-signed certificates it ships with. Default: false."
             }
           }
         }

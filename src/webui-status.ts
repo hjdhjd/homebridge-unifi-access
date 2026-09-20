@@ -17,8 +17,8 @@
  */
 import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions, ConnectionEvents,
   ConnectionState, StateStore } from "unifi-access";
-import { AccessAuthError, AccessAuthorizationError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, isTamperCapable, selectController,
-  selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
+import { AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader,
+  isTamperCapable, selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
   dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
@@ -178,8 +178,9 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
 
 /**
  * Classify a connect failure into the wire contract's error vocabulary. The typed error classes are the library's own: an authentication or authorization fault
- * answers `auth-invalid`, and a timeout or a stalled bootstrap answers `timeout`. Everything else - the library's network and throttle classes among them - answers
- * `unreachable`, the honest default: the panel's unreachable copy names connectivity, which is what an unclassified throw is to a user.
+ * answers `auth-invalid`, a timeout or a stalled bootstrap answers `timeout`, and a certificate that does not verify answers `misconfigured`. Everything else -
+ * the library's remaining network and throttle classes among them - answers `unreachable`, the honest default: the panel's unreachable copy names connectivity,
+ * which is what an unclassified throw is to a user.
  *
  * The identity-composition rejection deliberately does not route through here: it is a refusal to attempt, not a thrown failure, so the view path answers it with
  * `auth-missing` directly.
@@ -198,6 +199,12 @@ export function classifyStatusError(error: unknown): StatusErrorReason {
   if((error instanceof AccessTimeoutError) || (error instanceof AccessStallError)) {
 
     return "timeout";
+  }
+
+  // Verification on without a trusted certificate on the listener is a configuration the user must change, not a device that cannot be reached.
+  if(error instanceof AccessCertificateError) {
+
+    return "misconfigured";
   }
 
   return "unreachable";
@@ -955,7 +962,7 @@ export class AccessStatusFeed {
           listener();
         } catch(error) {
 
-          this.#log.error("A status connection listener did not complete: %s.", formatErrorMessage(error));
+          this.#log.error("Unable to update the device status shown in the plugin settings: %s.", formatErrorMessage(error));
         }
       };
     };

@@ -995,7 +995,7 @@ test("a doorbell call that ended on this hub's reader is logged, and one on anot
   harness.deliver(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, doorbellDelivery());
 
   // The outcome is the library's own gloss for the code, and nothing is published - a call ending is a fact about the call rather than about the door.
-  assert.deepEqual(harness.lines, [LOG_PREFIX + "Doorbell call ended: The call timed out."]);
+  assert.deepEqual(harness.lines, [LOG_PREFIX + "Doorbell call ended: the call timed out."]);
   assert.deepEqual(harness.publishes, []);
 
   /* The delivery names its hub only through the ringing reader's own record - the live capture's host member reads empty - so a reader hanging off another hub is
@@ -1393,7 +1393,7 @@ test("a hub with no door control surface refuses every door command with the one
   await writeLock(lockService(hub), Characteristic.LockTargetState.UNSECURED);
 
   assert.deepEqual(hub.commands, [], "a hub with nothing to dispatch on is refused here rather than dispatched into");
-  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door. This device has no door control surface."]);
+  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door. This device does not expose door controls."]);
 
   /* The locking direction reaches the command through MQTT rather than through the tile: the lock service's write handler suppresses a lock write on a hub whose
    * reading is already secured, so the topic is the surface that drives that direction here.
@@ -1402,8 +1402,8 @@ test("a hub with no door control surface refuses every door command with the one
   await settle();
 
   assert.deepEqual(hub.commands, []);
-  assert.deepEqual(hub.errors, [ LOG_PREFIX + "Unable to unlock the door. This device has no door control surface.",
-    LOG_PREFIX + "Unable to lock the door. This device has no door control surface." ]);
+  assert.deepEqual(hub.errors, [ LOG_PREFIX + "Unable to unlock the door. This device does not expose door controls.",
+    LOG_PREFIX + "Unable to lock the door. This device does not expose door controls." ]);
 
   // The garage door opener's momentary pulse names the same door for the same reason.
   const opener = makeOpener({ hubless: true });
@@ -1411,7 +1411,7 @@ test("a hub with no door control surface refuses every door command with the one
   await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
 
   assert.deepEqual(opener.commands, []);
-  assert.deepEqual(opener.errors, [LOG_PREFIX + "Unable to operate the door. This device has no door control surface."]);
+  assert.deepEqual(opener.errors, [LOG_PREFIX + "Unable to operate the door. This device does not expose door controls."]);
 
   // A UA Gate hears it on both directions, its locking one arriving through the close command.
   const gate = makeGate({ hubless: true });
@@ -1421,8 +1421,8 @@ test("a hub with no door control surface refuses every door command with the one
   await gate.mqttSet("lock", "false");
   await settle();
 
-  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. This device has no door control surface.",
-    LOG_PREFIX + "Unable to unlock the gate. This device has no door control surface." ]);
+  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. This device does not expose door controls.",
+    LOG_PREFIX + "Unable to unlock the gate. This device does not expose door controls." ]);
   assert.deepEqual(gate.commands, []);
 });
 
@@ -1438,8 +1438,8 @@ test("a UA Gate whose door was never discovered refuses its commands for the rec
   await gate.mqttSet("lock", "false");
   await settle();
 
-  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. No door record was found for it.",
-    LOG_PREFIX + "Unable to unlock the gate. No door record was found for it." ]);
+  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to close the gate. The controller reports no door for it.",
+    LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it." ]);
   assert.deepEqual(gate.commands, []);
 });
 
@@ -2015,8 +2015,8 @@ test("a door hub's lock accessory still refuses a manual relock at the default s
   await writeLock(tile, Characteristic.LockTargetState.SECURED);
 
   assert.deepEqual(hub.commands, [], "the relock is refused before any command is dispatched");
-  assert.ok(hub.errors.some(line => line.includes("Unable to manually relock the door when the lock relay is configured to the default settings.")),
-    "the refusal says why the door cannot be relocked");
+  assert.ok(hub.errors.some(line => line.includes("Unable to manually relock the door because the lock relay is on its default settings. " +
+    "Set a lock delay interval for this door to relock it from HomeKit.")), "the refusal says why the door cannot be relocked");
 });
 
 test("a UA Gate's lock accessory closes the gate, reads secured afterward, and cancels the relock it no longer needs", async () => {
@@ -2409,7 +2409,7 @@ test("a gate whose side door binding is withdrawn says so once and keeps the sid
 
   restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
 
-  assert.equal(warnCount(gate, "The gate's side door binding was withdrawn, so its services stand at their last reading."), 1,
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1,
     "and the binding going is warned, because a role nothing occupies is not a role the gate can drive");
   assert.ok(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), "the side door's lock is option-gated, so it stands where the user asked for it");
 
@@ -2419,7 +2419,7 @@ test("a gate whose side door binding is withdrawn says so once and keeps the sid
 
   restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
 
-  assert.equal(warnCount(gate, "The gate's side door binding was withdrawn, so its services stand at their last reading."), 1,
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1,
     "a role that was already vacant did not move, so the warning is not repeated");
 });
 
@@ -3536,6 +3536,33 @@ test("a hub enabled for the sensor list with nothing named keeps every sensor it
   }
 });
 
+test("a hub whose sensor selection is emptied says so once at adoption and says it no second time on a later update", () => {
+
+  /* An emptied selection is a deviation from the default that nothing else in the log states: no sensor is created, so no per-sensor line is written, and a user
+   * who sees a hub carrying nothing has nothing to read about why. The once-at-adoption placement is what the count taken after the update below is about.
+   */
+  const emptied = makeHub({ keepAdoptionLines: true, options: ["Enable.Hub.Sensors="], record: wiredHub("on") });
+
+  assert.equal(lineCount(emptied, "No sensors enabled."), 1, "a hub carrying no sensor at all says why, once, as it is adopted");
+
+  refreshRecord(emptied, wiredRows("off"));
+
+  assert.equal(lineCount(emptied, "No sensors enabled."), 1,
+    "and the re-gate every device update runs says it no second time, which a check reading the selection without the adoption guard would fail");
+
+  const selected = makeHub({ keepAdoptionLines: true, record: wiredHub("on") });
+
+  assert.equal(lineCount(selected, "No sensors enabled."), 0, "while the default selection is not a deviation and is not announced");
+
+  // A device whose model the sensor list offers no member for has nothing to state, whatever the selection reads, because it would carry no sensor either way.
+  const reader = makeHub({ keepAdoptionLines: true, options: ["Enable.Hub.Sensors="],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], device_type: "UA-G2-PRO" }) });
+
+  assert.deepEqual(hubSensorChoices({ capabilities: reader.hub.uda.capabilities, display_model: officialDeviceModel(reader.hub.uda.device_type) }), [],
+    "the fixture is a model the list offers nothing for, which is what makes the silence below mean something rather than agree by accident");
+  assert.equal(lineCount(reader, "No sensors enabled."), 0, "and a device with no sensor to offer says nothing about a selection it could not have filled");
+});
+
 test("the logging list is what decides which categories a hub announces", () => {
 
   const silent = makeHub({ options: ["Disable.Log.Events"] });
@@ -3549,6 +3576,22 @@ test("the logging list is what decides which categories a hub announces", () => 
   deliverDoorState(locksOnly, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
   assert.equal(lineCount(locksOnly, "Door unlocked."), 1, "which is the category that still speaks");
+});
+
+test("a hub whose logged-category selection is emptied says so once, whichever way the user emptied it", () => {
+
+  const emptied = makeHub({ keepAdoptionLines: true, options: ["Enable.Log.Events="] });
+
+  assert.equal(lineCount(emptied, "No event categories enabled."), 1, "the one read of the list is where a hub announcing nothing says so");
+
+  // Turning the option off altogether reaches the same empty set through the other half of the grammar, and a user who did that has made the same deviation.
+  const silenced = makeHub({ keepAdoptionLines: true, options: ["Disable.Log.Events"] });
+
+  assert.equal(lineCount(silenced, "No event categories enabled."), 1, "and the option turned off reads as the same empty selection");
+
+  const selected = makeHub({ keepAdoptionLines: true });
+
+  assert.equal(lineCount(selected, "No event categories enabled."), 0, "while every category being announced is the default and says nothing");
 });
 
 test("a hub keeps a terminal input's sensor through a silence about its wiring and retires it only when the user turns the option off", () => {
@@ -3587,19 +3630,19 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
 
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
     "the input opening reaches the characteristic");
-  assert.equal(lineCount(harness, "Remote release open."), 1, "and is announced once");
+  assert.equal(lineCount(harness, "Remote release is open."), 1, "and is announced once");
 
   restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] });
 
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
     "the input closing reaches it too");
-  assert.equal(lineCount(harness, "Remote release closed."), 1, "and is announced once");
+  assert.equal(lineCount(harness, "Remote release is closed."), 1, "and is announced once");
 
   // The same reading restated is not a change, so it reaches none of them.
   restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] });
 
   assert.deepEqual(topicPayloads(harness, "rel"), [ "true", "false" ], "each change publishes exactly once, and a repeat publishes nothing");
-  assert.equal(lineCount(harness, "Remote release closed."), 1, "and a repeat is announced no second time");
+  assert.equal(lineCount(harness, "Remote release is closed."), 1, "and a repeat is announced no second time");
 
   // The Door Mini reports the same kind of input through a key of its own, and its readings travel the request to exit surface the same way.
   const mini = makeHub({ record: doorMiniHub("on") });
@@ -3608,12 +3651,12 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
   restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": "off" }) ] });
 
   assert.equal(miniSensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_NOT_DETECTED);
-  assert.equal(lineCount(mini, "Request to exit sensor open."), 1);
+  assert.equal(lineCount(mini, "Request to exit sensor is open."), 1);
 
   restateRecord(mini, { configs: [ ...D1_PAIR_LIVE, ...inputRows({ "input_d1_button": "on" }) ] });
 
   assert.deepEqual(topicPayloads(mini, "rex"), [ "true", "false" ], "the Door Mini's readings reach the request to exit topic");
-  assert.equal(lineCount(mini, "Request to exit sensor closed."), 1);
+  assert.equal(lineCount(mini, "Request to exit sensor is closed."), 1);
 
   // The log option is the user's own, and turning it off silences the sentence without withholding the reading from anything else.
   const quiet = makeHub({ options: [listLess("Log.Events", logEventChoices(), "REL")],
@@ -3624,7 +3667,29 @@ test("a hub carries a terminal input's change to the characteristic, the topic, 
   assert.equal(contactSensor(quiet, AccessReservedNames.CONTACT_REL).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_NOT_DETECTED, "the reading still reaches HomeKit");
   assert.deepEqual(topicPayloads(quiet, "rel"), ["true"], "and is still published");
-  assert.equal(lineCount(quiet, "Remote release open."), 0, "while the sentence the user turned off is not written");
+  assert.equal(lineCount(quiet, "Remote release is open."), 0, "while the sentence the user turned off is not written");
+});
+
+test("every position and terminal sensor is the subject of its own sentence, named by the one spelling its label is held under", () => {
+
+  const hub = makeHub();
+
+  deliverDoorState(hub, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(lineCount(hub, "Door position sensor is open."), 1, "the main door's position sensor opens its line and the reading completes it");
+
+  // The side door's label is spelled in a constant of its own, so a line composing the main door's spelling with a prefix would read wrong here and nowhere else.
+  const gate = securedGate({ doorStates: new Map([[ SIDE_DOOR, { dps: "open", location_id: SIDE_DOOR, lock: "lock" } ]]) });
+
+  deliverDoorState(gate, { dps: "close", location_id: SIDE_DOOR, lock: "lock" });
+
+  assert.equal(lineCount(gate, "Side door position sensor is closed."), 1, "and the side door names itself in full");
+
+  const wired = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
+
+  refreshRecord(wired, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ]);
+
+  assert.equal(lineCount(wired, "Remote release is open."), 1, "while a terminal input reads the label the table holds for it");
 });
 
 test("a UA Hub reads each terminal input from its own row, so no input can answer with another's reading", () => {
@@ -3667,7 +3732,7 @@ test("a terminal input whose wiring falls silent keeps its sensor, reads closed,
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
     "and an input with no wiring evidence reads closed whatever its row still says");
   assert.deepEqual(topicPayloads(harness, "rel"), [], "the closed default is not a reading to publish");
-  assert.equal(lineCount(harness, "Remote release closed."), 0, "and not a change to announce");
+  assert.equal(lineCount(harness, "Remote release is closed."), 0, "and not a change to announce");
 });
 
 /* A UA Gate carrying whatever side door terminal rows an arm names, over a topology of one door. The one-door topology is what keeps the construction seed off the
@@ -3766,7 +3831,7 @@ test("a tamper-capable hub carries a raise to the characteristic, the warning, a
 
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "the raise reaches the characteristic through the sweep alone, which an implementation writing nothing would fail by leaving it normal");
-  assert.equal(warnCount(harness, "Tampering detected."), 1, "and is warned exactly once");
+  assert.equal(lineCount(harness, "Tampering detected."), 1, "and is warned exactly once");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
 
   // The same reading restated is not a change, so it reaches none of them.
@@ -3774,7 +3839,7 @@ test("a tamper-capable hub carries a raise to the characteristic, the warning, a
 
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "a restated raise leaves the characteristic where it stands");
-  assert.equal(warnCount(harness, "Tampering detected."), 1, "warns no second time");
+  assert.equal(lineCount(harness, "Tampering detected."), 1, "warns no second time");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and publishes no second payload");
 });
 
@@ -3835,7 +3900,7 @@ test("a reading the library withdraws clears the status, says why once, publishe
   refreshRecord(harness, tamperRows({ "tamper_event": "true", "tampering": "true" }));
 
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED, "the reading returning raises the status again");
-  assert.equal(warnCount(harness, "Tampering detected."), 0,
+  assert.equal(lineCount(harness, "Tampering detected."), 0,
     "and is not warned, which an implementation that kept the held verdict through the withdrawal would fail by warning here");
   assert.deepEqual(topicPayloads(harness, "tamper"), [ "unknown", "true" ], "while the topic tells a subscriber holding unknown that the reading came back");
 });
@@ -3868,7 +3933,7 @@ test("a hub whose hardware cannot detect tampering carries the characteristic on
   refreshRecord(harness, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }), ...tamperRows({ "tamper_event": "false" }) ]);
 
   assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "a reading changing on such hardware still reaches no characteristic");
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "and neither sentence is written for it");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "and neither sentence is written for it");
   assert.equal(lineCount(harness, "Tampering no longer detected."), 0);
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "and nothing is published for it");
 });
@@ -3887,7 +3952,7 @@ test("a sensor of tamper-capable hardware carries the characteristic from creati
 
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "the first reading to arrive reaches the sensor on that same delivery");
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "a reading seen for the first time is not one anybody observed changing, so it is not warned");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "a reading seen for the first time is not one anybody observed changing, so it is not warned");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic carries every change of the held verdict, an adoption included");
 });
 
@@ -3950,7 +4015,7 @@ test("a tamper capability appearing mid-run dresses every standing sensor once, 
   }
 
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "the topic carries the verdict the projection adopted");
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "and a reading seen for the first time is not announced");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "and a reading seen for the first time is not announced");
 });
 
 test("a tamper capability appearing while alerts are off dresses every standing sensor as not tampered", () => {
@@ -3986,7 +4051,7 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
       "adoption dresses every sensor from the reading the record arrived with");
   }
 
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "and says nothing about it, adoption being silent");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "and says nothing about it, adoption being silent");
 
   // The rows stand; the capability alone is gone, which is what tells hardware that stopped reporting from a reading that changed.
   restateRecord(harness, { capabilities: ["is_hub"] });
@@ -4013,7 +4078,7 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
   }
 
   assert.deepEqual(topicPayloads(harness, "tamper"), [ "unknown", "true" ], "and the reading is published as the first sighting a forgotten verdict makes it");
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "rather than announced");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "rather than announced");
 });
 
 test("a sensor the accessory arrived carrying loses its tamper characteristic at adoption when the hardware reports no capability", () => {
@@ -4077,7 +4142,7 @@ test("a hub constructed while the tampering alert is off reads normal, and the a
 
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "the alert coming back on establishes the reading");
-  assert.equal(warnCount(harness, "Tampering detected."), 0, "which is a first sighting rather than a transition, so it is not warned");
+  assert.equal(lineCount(harness, "Tampering detected."), 0, "which is a first sighting rather than a transition, so it is not warned");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic says it, so a subscriber holding unknown hears the reading return");
 });
 
@@ -4111,7 +4176,7 @@ test("a sensor the re-gate creates on the delivery that changes the verdict read
   assert.ok(sensor.testCharacteristic(Characteristic.StatusTampered), "the sensor carries the characteristic from its creation");
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
     "and reads the verdict this delivery established, which a sensor dressed from the verdict held before it and never swept would fail");
-  assert.equal(warnCount(harness, "Tampering detected."), 1, "the raise is warned exactly once");
+  assert.equal(lineCount(harness, "Tampering detected."), 1, "the raise is warned exactly once");
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "and published exactly once");
 });
 
@@ -4255,7 +4320,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
   await tokenlessTrigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
 
   assert.deepEqual(tokenless.rings, [], "a hub with no official path dispatches nothing");
-  assert.deepEqual(tokenless.errors, [LOG_PREFIX + "Ringing the doorbell requires the official Access API, which needs an API token configured."]);
+  assert.deepEqual(tokenless.errors, [LOG_PREFIX + "Ringing the doorbell requires the official Access API, which needs an API token to be configured."]);
 
   tokenless.clock.advance(REVERT_DELAY_MS);
 

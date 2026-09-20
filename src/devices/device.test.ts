@@ -724,7 +724,7 @@ test("a record whose alias empties out under HomeKit's naming rules is neither w
   // The tick genuinely moved the held record, which is what makes the assertions below mean something.
   assert.equal(device.uda.alias, "...", "the loop must have written the record the yield carried");
 
-  assert.deepEqual(harness.infoLines.filter(line => line.includes("Name change detected")), [],
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [],
     "a name the rules empty out is not a change, so the loop has nothing to report and cannot report it on every update");
   assert.deepEqual(renames, [], "and the accessory is never handed a name HomeKit would refuse");
   assert.deepEqual(infoWrites.filter(write => [ "ConfiguredName", "Name" ].includes(write.characteristic)), [],
@@ -751,5 +751,7 @@ test("a record whose alias changed re-synchronizes the accessory name through th
   assert.deepEqual(infoWrites.filter(write => [ "ConfiguredName", "Name" ].includes(write.characteristic)),
     [ { characteristic: "ConfiguredName", value: "Back Door" }, { characteristic: "Name", value: "Back Door" } ],
     "and the library writes the configured name and then the name onto the information service it found inside the accessory's own services");
-  assert.equal(harness.infoLines.filter(line => line.includes("Name change detected")).length, 1, "and the change is reported once");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")),
+    ["Test Hub [UA Hub]: Detected a name change on the controller; updating the HomeKit name to Back Door."],
+    "and the change is reported once, naming the name it settled on");
 });
