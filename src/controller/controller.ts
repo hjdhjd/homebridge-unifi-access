@@ -323,10 +323,25 @@ export class AccessController {
    *
    * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
    * serving it out in real seconds.
+   *
+   * The policy tells us why a retried attempt failed when a run of failures begins and whenever its reason changes, and we say so at error level: an unbounded retry
+   * that reports nothing leaves a user with no way to tell a controller that is slow to appear from one that fails the same way on every attempt. A connect that
+   * succeeds ends the run and announces itself below, and an attempt torn down by our own shutdown is an orderly teardown rather than a reason to report.
    */
   async #connect(): Promise<boolean> {
 
-    const { shouldRetry } = createConnectRetryPolicy();
+    const { shouldRetry } = createConnectRetryPolicy({
+
+      onFailure: (reason: string): void => {
+
+        if(this.#isShuttingDown()) {
+
+          return;
+        }
+
+        this.log.error("Unable to connect to the UniFi Access controller, and will keep trying: %s.", reason);
+      }
+    });
 
     try {
 

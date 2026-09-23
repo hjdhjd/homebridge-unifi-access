@@ -323,18 +323,78 @@ test("officialDeviceModel answers an unmapped type with the type itself", () => 
 
 test("the connect retry policy budgets authentication faults and forgives everything else", () => {
 
-  const { shouldRetry } = createConnectRetryPolicy(3);
+  const { shouldRetry } = createConnectRetryPolicy({ limit: 3 });
 
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), false, "the auth budget must be exhausted at the limit");
 
   // A non-auth fault resets the budget, so a controller that is merely slow to appear is retried without bound.
-  const policy = createConnectRetryPolicy(2);
+  const policy = createConnectRetryPolicy({ limit: 2 });
 
   assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
   assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true, "a non-auth fault must reset the consecutive auth count");
+});
+
+test("the connect retry policy reports a run's first failure, and a repeat of the same reason stays silent", () => {
+
+  const reports: string[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+
+  /* Three distinct error instances that read identically, which is the shape a reducer fault takes when it throws afresh on every attempt. A comparison by
+   * identity or by class would report each of them, and one that remembered nothing would too.
+   */
+  for(let attempt = 0; attempt < 3; attempt++) {
+
+    assert.equal(shouldRetry(new TypeError("Cannot read properties of undefined (reading 'doors')")), true, "a non-auth fault is always retried");
+  }
+
+  assert.deepEqual(reports, ["Cannot read properties of undefined (reading 'doors')"], "the run reports its reason once, as the text a user reads");
+
+  // The negative control: the same policy with no callback retries identically, so reporting is an addition to the verdict and never a change to it.
+  const { shouldRetry: silent } = createConnectRetryPolicy();
+
+  assert.equal(silent(new TypeError("Cannot read properties of undefined (reading 'doors')")), true);
+});
+
+test("the connect retry policy reports again whenever the reason changes, including a return to an earlier one", () => {
+
+  const reports: string[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+
+  /* A timeout giving way to a reducer fault, then the timeout coming back. The return is what tells a comparison against the last reason apart from one against
+   * every reason ever seen...the latter would stay silent when the timeout returns and hide from the user that the fault moved again.
+   */
+  const faults = [ "Request timed out.", "Request timed out.", "Unexpected reducer fault.", "Unexpected reducer fault.", "Request timed out." ];
+
+  for(const fault of faults) {
+
+    assert.equal(shouldRetry(new Error(fault)), true);
+  }
+
+  assert.deepEqual(reports, [ "Request timed out", "Unexpected reducer fault", "Request timed out" ]);
+});
+
+test("the connect retry policy reports auth faults on the same terms while they still spend the budget", () => {
+
+  const reports: string[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ limit: 3, onFailure: (reason: string): void => void reports.push(reason) });
+
+  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), false, "reporting must leave the auth budget exhausted at the limit");
+  assert.deepEqual(reports, ["Bad credentials"], "a run of the same auth fault reports once, like any other");
+
+  /* The attempt that spends the budget carries a reason no attempt before it did, so a policy that reported before deciding would announce a retry that never
+   * comes. The attempt the policy refuses belongs to the caller's terminal line, and nothing is reported for it here.
+   */
+  const refused: string[] = [];
+  const policy = createConnectRetryPolicy({ limit: 1, onFailure: (reason: string): void => void refused.push(reason) });
+
+  assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
+  assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), false);
+  assert.deepEqual(refused, ["Network unreachable"]);
 });
 
 test("canTransition refuses same-phase and terminal moves while permitting every legitimate one", () => {

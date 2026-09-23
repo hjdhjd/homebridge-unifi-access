@@ -21,7 +21,7 @@ import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOffic
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
 import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
 import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
-import { sameEntries, scopeSafeId } from "homebridge-plugin-utils";
+import { formatErrorMessage, sameEntries, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
@@ -128,24 +128,42 @@ export function canTransition(options: { from: AccessControllerPhase; to: Access
  * sorting out its own auth state recovers, but genuinely-wrong credentials fail fast rather than looping forever. Any non-auth fault - network, transient - resets
  * the budget, so a slow-to-appear controller is retried without bound. A pure factory, so the budget logic is testable without standing up a client.
  *
- * @param limit - The consecutive-auth-failure ceiling.
+ * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A failed attempt the policy retries hands its reason to
+ * `onFailure` when the run's first failure arrives and again whenever the reason changes, so a caller hears why the connect is failing and when that changes rather
+ * than hearing every attempt. The comparison is on the formatted reason, the text a user reads, so two faults that read identically are one reason and a timeout
+ * giving way to a different fault is two. An attempt the policy refuses to retry is never reported here...the caller's own terminal line owns that outcome.
  *
- * @returns A `shouldRetry` predicate suitable for the retry options; it closes over the running consecutive-auth count.
+ * @param options - The consecutive-auth-failure ceiling, and the callback that receives each newly-arrived reason, each optional.
+ *
+ * @returns A `shouldRetry` predicate suitable for the retry options; it closes over the running consecutive-auth count and the last reason reported.
  */
-export function createConnectRetryPolicy(limit = ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT): { shouldRetry: (error: unknown) => boolean } {
+export function createConnectRetryPolicy({ limit = ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, onFailure }: { limit?: number;
+  onFailure?: (reason: string) => void; } = {}): { shouldRetry: (error: unknown) => boolean } {
 
   let consecutiveAuth = 0;
+  let reported: string | undefined;
 
   return {
 
     shouldRetry: (error: unknown): boolean => {
 
-      if(error instanceof AccessAuthError) {
+      // A non-auth fault resets the budget. An auth fault that spends the last of it ends the run, and the caller's terminal line reports why.
+      if(!(error instanceof AccessAuthError)) {
 
-        return ++consecutiveAuth < limit;
+        consecutiveAuth = 0;
+      } else if(++consecutiveAuth >= limit) {
+
+        return false;
       }
 
-      consecutiveAuth = 0;
+      const reason = formatErrorMessage(error);
+
+      // A run of identical failures reads as one report, and only a reason that differs from the last one reported earns another.
+      if(reason !== reported) {
+
+        reported = reason;
+        onFailure?.(reason);
+      }
 
       return true;
     }

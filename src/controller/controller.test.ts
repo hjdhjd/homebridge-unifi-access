@@ -1199,6 +1199,56 @@ test("a login whose connect exhausts its authentication budget reports no identi
     "so a change to the library's ladder reddens this arm rather than drifting past it");
 });
 
+test("a connect that keeps failing says why once per reason, and a shutdown landing mid-attempt says nothing", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+
+  let attempts = 0;
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
+
+  /* A controller that answers every attempt with a fault the retry never gives up on: the same reducer fault thrown afresh on each early attempt, then a timeout
+   * on the ones after, then a shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a reason no attempt before it
+   * gave, so a controller that reported it would add a line here...the token in the identity is what registers this controller's teardown against the plugin's
+   * lifetime, so the abort below reaches it.
+   */
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    if(attempts <= 3) {
+
+      throw new TypeError("Cannot read properties of undefined (reading 'doors')");
+    }
+
+    if(attempts <= 5) {
+
+      throw new Error("Request timed out.");
+    }
+
+    shutdown.abort();
+
+    throw new Error("The connection was torn down.");
+  });
+
+  t.after(() => shutdown.abort());
+
+  // The login is started rather than awaited, because the waits between attempts are only registered once it is running and nothing else would step them.
+  const login = controller.login();
+
+  await drainClock(clock);
+
+  assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
+  assert.equal(attempts, 6, "every attempt the fixture scripts is made, so the silence below is not an attempt that never ran");
+  assert.deepEqual(errors, [
+    "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors').",
+    "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Request timed out."
+  ], "each run of one reason is reported once, a changed reason again, and neither the interrupted attempt nor the ended retry adds a line");
+});
+
 test("an accessory under the device identity that records none is adopted rather than retired, because membership is read before the record", async (t) => {
 
   const store = createStateStore({});
