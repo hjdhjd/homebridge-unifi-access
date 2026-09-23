@@ -1,6 +1,11 @@
 # Changelog
 
-All notable changes to this project will be documented in this file. This project uses [semantic versioning](https://semver.org/).
+All notable changes to this project will be documented in this file.
+
+## 2.0.1 (2026-09-22)
+  * Fix: HBUA now connects to controllers that have a floor with no doors on it, which failed in 2.0.0 with "doors is not iterable".
+  * Improvement: when HBUA cannot complete a connection to a controller, the log now tells you why - once when the failures begin, and again if the reason changes - instead of retrying silently.
+  * Housekeeping.
 
 ## 2.0.0 (2026-09-19)
   * **HBUA 2 is a ground-up redesign of the plugin, rebuilt from first principles on the unifi-access v2 client, homebridge-plugin-utils v2, and a Homebridge 2.0 base. The goal was a plugin that is futureproof, scalable, and maintainable, with room for more capabilities and deeper integration across the UniFi plugin family, Protect included. A modern Node baseline let me build entirely on modern JavaScript and Node runtime features. This is a major version bump, so please read through the notes below before you upgrade.**
