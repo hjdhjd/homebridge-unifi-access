@@ -354,12 +354,19 @@ test("the probe verdict reads all three response kinds and refuses a shape the s
 
   const devices = [{ name: "Front Door" }];
 
-  assert.deepEqual(classifyProbeResponse({ devices, kind: "connected" }), { devices, kind: "connected", message: "" },
+  assert.deepEqual(classifyProbeResponse({ devices, kind: "connected" }), { devices, kind: "connected", message: "", tokenRefused: false },
     "a credentialed connect answers its device list, and carries no display copy, so every surface keeps the wording it wrote for a success");
-  assert.deepEqual(classifyProbeResponse({ devices, kind: "token-only" }), { devices, kind: "token-only", message: "" },
+  assert.deepEqual(classifyProbeResponse({ devices, kind: "token-only" }), { devices, kind: "token-only", message: "", tokenRefused: false },
     "a token-only connect answers the official inventory, so its devices reach the page exactly as a credentialed connect's do");
   assert.equal(classifyProbeResponse({ devices: [], kind: "token-only" }).kind, "token-only",
     "and a token-only controller with nothing adopted is still a success rather than a failure");
+
+  // Whether the controller refused the token beside the credentials is carried through as the server stated it. The answers above state nothing, and each reads
+  // as false rather than undefined, so a surface that speaks for a success always branches on a boolean.
+  assert.deepEqual(classifyProbeResponse({ devices, kind: "connected", tokenRefused: true }), { devices, kind: "connected", message: "", tokenRefused: true },
+    "a connect whose token the controller refused says so, so every surface that speaks for a success can warn");
+  assert.deepEqual(classifyProbeResponse({ devices, kind: "connected", tokenRefused: false }), { devices, kind: "connected", message: "", tokenRefused: false },
+    "and a connect whose token the controller accepted says that");
 
   const reported = classifyProbeResponse({ kind: "error", message: "Invalid credentials." });
 

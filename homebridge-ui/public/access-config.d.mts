@@ -65,6 +65,9 @@ export interface AccessProbeSuccess {
   devices: Record<string, unknown>[];
   kind: "connected" | "token-only";
   message: string;
+
+  /** Whether the controller refused the API token supplied beside a connected answer's credentials; a token-only answer always carries false. */
+  tokenRefused: boolean;
 }
 
 export type AccessProbeVerdict = AccessProbeFailure | AccessProbeSuccess;

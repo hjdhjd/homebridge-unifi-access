@@ -131,11 +131,14 @@ export const classifyProbeResponse = (response) => {
 
   switch(response?.kind) {
 
-    // Both successes carry a device list, so one arm validates the shape for each and the tag is carried through to tell the two apart downstream.
+    /* Both successes carry a device list, so one arm validates the shape for each and the tag is carried through to tell the two apart downstream. Whether the
+     * controller refused a token supplied beside the credentials is carried through as well, and an answer that does not state it reads as false rather than
+     * undefined, so every surface that speaks for a success branches on a boolean.
+     */
     case "connected":
     case "token-only":
 
-      return Array.isArray(response.devices) ? { devices: response.devices, kind: response.kind, message: "" } :
+      return Array.isArray(response.devices) ? { devices: response.devices, kind: response.kind, message: "", tokenRefused: response.tokenRefused === true } :
         { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
           message: "The plugin's UI server answered a connection without a device list." };
 

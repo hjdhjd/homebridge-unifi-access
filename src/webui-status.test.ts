@@ -8,9 +8,9 @@
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
 /* eslint-disable camelcase */
-import type { AccessApiMode, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
-import { AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessNetworkError, AccessStallError, AccessThrottledError,
-  AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
+import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessNetworkError, AccessStallError,
+  AccessThrottledError, AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
+import type { AccessCapabilities, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
@@ -113,10 +113,11 @@ function deviceConfigsEvent(deviceId: string, entries: Record<string, string>): 
  * a connect establishes and the controller row renders, and a counted disposal. The counters-not-booleans convention is what tells a no-op from a double call. An
  * entry marked as a port is answered by the access-point lookup alone, which is how the real client separates one door-serving port of an Enterprise hub from a hub
  * that answers for itself. The stub reaches the port through a cast, so the compiler forces none of these members: the capabilities member is spelled here
- * deliberately, and the arm that reads a controller view's API row off a NON-default mode is what keeps its absence from passing silently.
+ * deliberately, and the arm that reads a controller view's API row off NON-default capabilities is what keeps its absence from passing silently.
  */
 function makeClient(store: StateStore, hubs: { doorId?: string; port?: boolean; record?: AccessStateDevice; throwOnDoorId?: boolean }[] = [],
-  mode: AccessApiMode = "dual"): { client: StatusFeedClient; connection: { fire: (event: string) => void; state: string }; disposeCount: () => number } {
+  capabilities: Pick<AccessCapabilities, "mode" | "official"> = { mode: "dual", official: true }): { client: StatusFeedClient;
+  connection: { fire: (event: string) => void; state: string }; disposeCount: () => number; } {
 
   const handlers = new Map<string, Set<() => void>>();
 
@@ -170,7 +171,7 @@ function makeClient(store: StateStore, hubs: { doorId?: string; port?: boolean; 
   const client = {
 
     accessPoint: (id: string): StatusFeedHubHandle | undefined => handleFor(id, true),
-    capabilities: { mode },
+    capabilities,
     connection,
     hub: (id: string): StatusFeedHubHandle | undefined => handleFor(id, false),
     state: store,
@@ -262,6 +263,12 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
 
   assert.equal(classifyStatusError(new AccessAuthError("Bad credentials.")), "auth-invalid");
   assert.equal(classifyStatusError(new AccessAuthorizationError("Not an administrator.")), "auth-invalid");
+
+  // A refusal the controller answers as a result code inside a successful response reads as the refused status it stands for, whether it refuses the identity or
+  // a privilege, and a result code that refuses neither is a failure like any other.
+  assert.equal(classifyStatusError(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), "auth-invalid");
+  assert.equal(classifyStatusError(new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" })), "auth-invalid");
+  assert.equal(classifyStatusError(new AccessApiError("The controller reported a system error.", { code: "CODE_SYSTEM_ERROR" })), "unreachable");
   assert.equal(classifyStatusError(new AccessTimeoutError("The request timed out.", { elapsedMs: 5000 })), "timeout");
   assert.equal(classifyStatusError(new AccessStallError("The channel went silent.", { silentForMs: 5000 })), "timeout");
   assert.equal(classifyStatusError(new AccessCertificateError({ cause: new Error("unable to verify"), host: "hubble:12445", identity: "token" })),
@@ -436,12 +443,13 @@ test("the row policy answers a reader its access methods row alone and the API a
 
   // The controller arm before any controller document answers the API row followed by the uptime row's honest absence, and the order is asserted rather than
   // incidental: the API row leads the controller's row set.
-  assert.deepEqual(idValues(composeStatusRows({ kind: "controller", mode: "dual", state })), [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
+  assert.deepEqual(idValues(composeStatusRows({ capabilities: { mode: "dual", official: true }, kind: "controller", state })),
+    [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
 
   // ...and a fetched document answers the rendered uptime.
   store.applyRefreshDocuments({ controller: { host: { uptime: CONTROLLER_UPTIME } } as unknown as AccessControllerConfig,
     topology: doorsTopology([{ devices: [record], id: "door1" }]) });
-  assert.deepEqual(idValues(composeStatusRows({ kind: "controller", mode: "dual", state: store.snapshot() })),
+  assert.deepEqual(idValues(composeStatusRows({ capabilities: { mode: "dual", official: true }, kind: "controller", state: store.snapshot() })),
     [ [ "api", "Credentials + API token" ], [ "uptime", "127.6 day" ] ]);
 });
 
@@ -550,27 +558,32 @@ test("a hub that is also a reader carries its access methods beneath its door ro
     [ [ "lock", "Locked" ], [ "door", "Closed" ], [ "methods", "[x] PIN" ] ]);
 });
 
-test("the API row renders every mode the library reports and reserves the widest of them", () => {
+test("the API row renders every capability shape the library reports and reserves the widest of them", () => {
 
   const store = createStateStore({});
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
 
   const state = store.snapshot();
-  const modes = [ "credential", "dual", "token" ] as const;
-  const rowsFor = (mode: AccessApiMode): string[][] => idValues(composeStatusRows({ kind: "controller", mode, state }));
+  const shapes = [ { mode: "credential", official: false }, { mode: "dual", official: false }, { mode: "dual", official: true },
+    { mode: "token", official: true } ] as const;
+  const rowsFor = (capabilities: Pick<AccessCapabilities, "mode" | "official">): string[][] => idValues(composeStatusRows({ capabilities, kind: "controller", state }));
 
-  // Each mode reads as the surfaces its connect proved: both identity legs, credentials alone, or the token alone. Every arm is reachable from the panel, since
-  // every controller answers the device picker with a row of its own and so has a controller view to render, whichever way it was reached.
-  assert.deepEqual(rowsFor("dual"), [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
-  assert.deepEqual(rowsFor("credential"), [ [ "api", "Credentials" ], [ "uptime", "" ] ]);
-  assert.deepEqual(rowsFor("token"), [ [ "api", "API token" ], [ "uptime", "" ] ]);
+  /* Each shape reads as the surfaces its connect proved: both identity legs, credentials alone, or the token alone. A client holding both identities whose token
+   * the controller refused runs on its credentials, and its row says the token was not accepted, while a client that never held a token carries the same closed
+   * official path and reads as plain credentials, so the row tells the two apart by the mode rather than by the official path alone. Every arm is reachable from
+   * the panel, since every controller answers the device picker with a row of its own and so has a controller view to render, whichever way it was reached.
+   */
+  assert.deepEqual(rowsFor({ mode: "dual", official: true }), [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
+  assert.deepEqual(rowsFor({ mode: "dual", official: false }), [ [ "api", "Credentials (API token not accepted)" ], [ "uptime", "" ] ]);
+  assert.deepEqual(rowsFor({ mode: "credential", official: false }), [ [ "api", "Credentials" ], [ "uptime", "" ] ]);
+  assert.deepEqual(rowsFor({ mode: "token", official: true }), [ [ "api", "API token" ], [ "uptime", "" ] ]);
 
   // The row's width reservation covers every value it can render, which is what keeps the column from resizing when a controller connects with different legs than
   // the one the panel sized against.
-  for(const mode of modes) {
+  for(const capabilities of shapes) {
 
-    const row = composeStatusRows({ kind: "controller", mode, state })[0];
+    const row = composeStatusRows({ capabilities, kind: "controller", state })[0];
 
     assert.ok(row);
     assert.equal(row.id, "api");
@@ -1145,7 +1158,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
 
   // The serving client reports a credential-only connect, which is deliberately NOT the value a hard-coded row would most plausibly carry: the API row's rendered
   // value has to come off this client's capabilities to match below.
-  const { client } = makeClient(store, [{ doorId: "door1", record }], "credential");
+  const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "credential", official: false });
   const frames: StatusEvent[] = [];
   const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
 
@@ -1160,9 +1173,36 @@ test("a controller-as-device view resolves only through the controllerSerial rou
 
   assert.deepEqual(answer.map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
 
-  // The pushed snapshot is where the whole path is observed at once: the call site reads the mode off the serving client, the derivation renders it, and the row
-  // reaches the panel ahead of the uptime row. A call site that composed a controller view without the mode cannot produce this frame.
+  // The pushed snapshot is where the whole path is observed at once: the call site reads the capabilities off the serving client, the derivation renders them, and
+  // the row reaches the panel ahead of the uptime row. A call site that composed a controller view without the client's mode cannot produce this frame.
   assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "Credentials" ], [ "uptime", "127.6 day" ] ]);
+});
+
+test("a controller-as-device view renders a token the controller refused from the serving client's own capability map", async () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: { host: { uptime: CONTROLLER_UPTIME } } as unknown as AccessControllerConfig,
+    topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
+
+  const record = store.snapshot().devices.get("device1");
+
+  // The serving client holds both identities and connected with its official path closed, so the row reads the refusal only when the call site hands the
+  // derivation the client's own official member rather than a value of its own.
+  const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "dual", official: false });
+  const frames: StatusEvent[] = [];
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+
+  feed.context(contextRequest([SERIAL_ONE], { controllerSerial: "AABBCC000099" }));
+
+  await feed.view("AABBCC000099");
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  const answer = forSerial(frames, "AABBCC000099");
+
+  assert.deepEqual(answer.map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+  assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "api", "Credentials (API token not accepted)" ], [ "uptime", "127.6 day" ] ],
+    "the snapshot the panel receives names the credentials the connection runs on and says the token was not accepted");
 });
 
 test("a controller identity in either form resolves its own view, because both boundaries fold the registry key the same way", async () => {
@@ -1179,7 +1219,7 @@ test("a controller identity in either form resolves its own view, because both b
     store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
 
     const record = store.snapshot().devices.get("device1");
-    const { client } = makeClient(store, [{ doorId: "door1", record }], "token");
+    const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "token", official: true });
     const frames: StatusEvent[] = [];
     const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
 

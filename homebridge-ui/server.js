@@ -155,6 +155,10 @@ class PluginUiServer extends HomebridgePluginUiServer {
      * official API's adopted inventory and answers those devices with no console identity to lead with, since the topology and the controller document both live
      * behind the Access application's own endpoints, which a token never reaches. A failure answers its reason. Tagging the outcome is what lets the browser explain
      * that door-level accessories still need credentials without ever presenting a working controller as broken.
+     *
+     * Every success also says whether the controller refused an API token supplied beside the credentials, read from the capability map the library established at
+     * connect: a client holding both identities connects on the credentials alone when the controller will not honor the token, and the settings panel is where the
+     * user learns that. A token-only connect answers false, because a client holding a token alone has nothing else to connect on.
      */
     this.onRequest("/getDevices", async (controller) => {
 
@@ -231,7 +235,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
             /* eslint-enable camelcase */
 
             // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
-            return { devices: [ controllerRecord, ...officialDevices(await client.official.devices.fetchAll(), users) ], kind: "token-only" };
+            return { devices: [ controllerRecord, ...officialDevices(await client.official.devices.fetchAll(), users) ], kind: "token-only", tokenRefused: false };
           }
 
           const host = controllerInfo.host;
@@ -271,7 +275,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
             hubSensors: hubSensorChoices(device), logEvents: logEventChoices(device), serialNumber: deviceSerial(device) }));
 
           // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
-          return { devices: [ controllerRecord, ...devices ], kind: "connected" };
+          return { devices: [ controllerRecord, ...devices ], kind: "connected", tokenRefused: (client.capabilities.mode === "dual") && !client.capabilities.official };
         } finally {
 
           // Release the client and its realtime connection on every exit path... the raw-JavaScript equivalent of an `await using` declaration's scope-bound disposal.

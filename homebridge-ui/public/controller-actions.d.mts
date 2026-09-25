@@ -55,6 +55,9 @@ export interface ControllerActions {
   saveController: (save: { card: ControllerCard; originalAddress?: unknown }) => Promise<unknown>;
 }
 
+/** The warning a save speaks, and the first-run submit with it, when the controller refused the API token supplied beside the credentials. */
+export declare const TOKEN_REFUSED_WARNING: string;
+
 /**
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
  * framework, and the UI-server bridge.

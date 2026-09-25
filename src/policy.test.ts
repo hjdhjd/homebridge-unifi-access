@@ -6,7 +6,7 @@
  * behavior the plugin actually gets rather than a test's idea of it.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DOORBELL_REASON_CODES, AccessAuthError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
+import { ACCESS_DOORBELL_REASON_CODES, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -335,6 +335,23 @@ test("the connect retry policy budgets authentication faults and forgives everyt
   assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
   assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true, "a non-auth fault must reset the consecutive auth count");
+
+  // A refused identity the controller answers as a result code inside a successful response spends the same budget a refused status does. The spellings are
+  // interleaved, so a policy that counted only one of them could not reach the limit here.
+  const coded = createConnectRetryPolicy({ limit: 3 });
+
+  assert.equal(coded.shouldRetry(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), true);
+  assert.equal(coded.shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.equal(coded.shouldRetry(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), false,
+    "a result-code identity refusal must spend the budget exactly as a refused status does");
+
+  // A privilege refusal is a different fault from a refused identity, so it resets the budget as every other fault does. This holds that rule fixed, so a change
+  // to it is a deliberate edit here rather than a side effect.
+  const privileged = createConnectRetryPolicy({ limit: 2 });
+
+  assert.equal(privileged.shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.equal(privileged.shouldRetry(new AccessAuthorizationError("Not an administrator.")), true);
+  assert.equal(privileged.shouldRetry(new AccessAuthError("Bad credentials.")), true, "a privilege refusal must reset the consecutive identity-refusal count");
 });
 
 test("the connect retry policy reports a run's first failure, and a repeat of the same reason stays silent", () => {

@@ -17,8 +17,8 @@
  */
 import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions, ConnectionEvents,
   ConnectionState, StateStore } from "unifi-access";
-import { AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader,
-  isTamperCapable, selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
+import { AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isIdentityRefusal, isPrivilegeRefusal, isReader, isTamperCapable,
+  selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
   dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
@@ -177,10 +177,10 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
 }
 
 /**
- * Classify a connect failure into the wire contract's error vocabulary. The typed error classes are the library's own: an authentication or authorization fault
- * answers `auth-invalid`, a timeout or a stalled bootstrap answers `timeout`, and a certificate that does not verify answers `misconfigured`. Everything else -
- * the library's remaining network and throttle classes among them - answers `unreachable`, the honest default: the panel's unreachable copy names connectivity,
- * which is what an unclassified throw is to a user.
+ * Classify a connect failure into the wire contract's error vocabulary. The readings are the library's own: a refused identity or a refused privilege, in every
+ * spelling {@link isIdentityRefusal} and {@link isPrivilegeRefusal} read, answers `auth-invalid`, a timeout or a stalled bootstrap answers `timeout`, and a
+ * certificate that does not verify answers `misconfigured`. Everything else - the library's remaining network and throttle classes among them - answers
+ * `unreachable`, the honest default: the panel's unreachable copy names connectivity, which is what an unclassified throw is to a user.
  *
  * The identity-composition rejection deliberately does not route through here: it is a refusal to attempt, not a thrown failure, so the view path answers it with
  * `auth-missing` directly.
@@ -191,7 +191,7 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
  */
 export function classifyStatusError(error: unknown): StatusErrorReason {
 
-  if((error instanceof AccessAuthError) || (error instanceof AccessAuthorizationError)) {
+  if(isIdentityRefusal(error) || isPrivilegeRefusal(error)) {
 
     return "auth-invalid";
   }
@@ -242,7 +242,7 @@ const STATUS_ROW_LABELS: Record<AccessStatusRowId, string> = {
  */
 const STATUS_ROW_SIZERS: Record<AccessTextRowId, string> = {
 
-  api: "Credentials + API token",
+  api: "Credentials (API token not accepted)",
   door: "Closed",
   lock: "Unlocked",
   sidedoor: "Closed",
@@ -273,7 +273,8 @@ function sameChoice(choice: StatusChoice, previous: StatusChoice): boolean {
 }
 
 /* Map the connection's API mode onto the row vocabulary. The mode a connected client reports is verified fact rather than a configuration echo: the library proves
- * every identity leg it was handed at connect, and a leg that fails there fails the connect, so the row states which surfaces this connection actually reached.
+ * every identity leg it was handed at connect, and a leg that fails there fails the connect unless it is a token beside working credentials, which the connect
+ * sets aside and the function below reports, so the row states which surfaces this connection actually reached.
  *
  * The token arm is reachable from the settings panel exactly as every other arm is: a token-only connect answers the device picker with a controller row keyed by
  * the controller's address identity - homebridge-ui/server.js, the token-only arm - so that controller has a node to select and a controller view to render. The
@@ -286,6 +287,15 @@ const API_ROW_VALUES: Record<AccessApiMode, string> = {
   dual: "Credentials + API token",
   token: "API token"
 };
+
+/* The API row's value for the capabilities a connect established. The mode table above stays exhaustive because its vocabulary is the library's, and the case the
+ * mode alone cannot state is folded here beside it: a client holding both identities whose token the controller will not honor runs on its credentials with the
+ * official path closed, and the row says so rather than naming a token the connection does not use.
+ */
+function apiRowValue(capabilities: Pick<AccessCapabilities, "mode" | "official">): string {
+
+  return ((capabilities.mode === "dual") && !capabilities.official) ? "Credentials (API token not accepted)" : API_ROW_VALUES[capabilities.mode];
+}
 
 // Map a door state entry's lock member onto the row vocabulary. The value set is deliberately open: an unfamiliar value reads as locked, the same safe reading the
 // hub's own projection takes, while an absent member is "not established" and renders the placeholder dash through the empty string.
@@ -386,30 +396,30 @@ export interface ResolvedDoorEntries {
 }
 
 /**
- * The row policy's pure derivation: the row set for one view, composed from what the view's kind gives it - a controller view's API mode, or a device view's record
- * and role-labeled resolved door entries - beside the state both arms project. The caller owns the lookups - the resolution layer resolves the door identities at
- * view establishment and the loops look their entries up against the live state - so this function is honestly a pure state projection.
+ * The row policy's pure derivation: the row set for one view, composed from what the view's kind gives it - a controller view's capability map, or a device view's
+ * record and role-labeled resolved door entries - beside the state both arms project. The caller owns the lookups - the resolution layer resolves the door
+ * identities at view establishment and the loops look their entries up against the live state - so this function is honestly a pure state projection.
  *
- * The `kind` member splits the options rather than merely selecting an arm: a controller-as-device view carries the connection's API mode and no door entries, a
- * device view carries its record and entries and no mode, and neither arm can be spelled with the other's members. The tag is explicit because a token-only device
- * view carries no record either - overloading absence would put the controller's rows on a device.
+ * The `kind` member splits the options rather than merely selecting an arm: a controller-as-device view carries the connection's capability map and no door
+ * entries, a device view carries its record and entries and no capabilities, and neither arm can be spelled with the other's members. The tag is explicit because
+ * a token-only device view carries no record either - overloading absence would put the controller's rows on a device.
  *
  * The rows report the DEVICE's truth, never the HomeKit projection: hardware eligibility gates the door row through the shared eligibility statement, and no user
  * preference is consulted - a user who disabled a HomeKit sensor still sees the door's real position in this admin surface. An empty value is the
  * degrade-by-absence rule: the row renders the placeholder dash, matching the library's absent-member semantics.
  *
- * @param options - The view kind and what that kind carries: the connection's API mode for a controller view, or the viewed device's record (absent for a
- * token-only view or a removal window) and the resolved entries for a device view, beside the state either arm projects.
+ * @param options - The view kind and what that kind carries: the connection's capability map for a controller view, or the viewed device's record (absent for
+ * a token-only view or a removal window) and the resolved entries for a device view, beside the state either arm projects.
  *
  * @returns The composed row set.
  */
-export function composeStatusRows(options: { kind: "controller"; mode: AccessApiMode; state: AccessState } |
+export function composeStatusRows(options: { capabilities: Pick<AccessCapabilities, "mode" | "official">; kind: "controller"; state: AccessState } |
   { device: AccessStateDevice | undefined; entries: ResolvedDoorEntries; kind: "device"; state: AccessState }): StatusRow[] {
 
   // The controller arm: the console's own view states which API surfaces its connection reached, then its uptime, advancing on the library's refresh cadence.
   if(options.kind === "controller") {
 
-    return [ statusRow("api", API_ROW_VALUES[options.mode]), statusRow("uptime", uptimeRowValue(selectControllerUptime(options.state))) ];
+    return [ statusRow("api", apiRowValue(options.capabilities)), statusRow("uptime", uptimeRowValue(selectControllerUptime(options.state))) ];
   }
 
   const { device, entries } = options;
@@ -484,15 +494,15 @@ export interface StatusFeedHubHandle {
 }
 
 /**
- * The client surface the feed consumes - the state store, the connection monitor, the connect-established capabilities the controller row reads its API mode from,
+ * The client surface the feed consumes - the state store, the connection monitor, the connect-established capabilities the controller row reads its API row from,
  * the two handle lookups the resolution layer reads a record's identity through (a hub's own handle, and one door-serving port of an Enterprise hub by the port's
- * own identity), and disposal. The capabilities member is narrowed to the one fact the row policy renders, so the port stays a statement of what the feed actually
+ * own identity), and disposal. The capabilities member is narrowed to the facts the row policy renders, so the port stays a statement of what the feed actually
  * consumes. The real client satisfies it as-is; a test supplies a stub wrapped around a real state store.
  */
 export interface StatusFeedClient {
 
   accessPoint(id: string): StatusFeedHubHandle | undefined;
-  readonly capabilities: Pick<AccessCapabilities, "mode">;
+  readonly capabilities: Pick<AccessCapabilities, "mode" | "official">;
   readonly connection: StatusFeedConnection;
   hub(id: string): StatusFeedHubHandle | undefined;
   readonly state: StateStore;
@@ -1073,11 +1083,11 @@ export class AccessStatusFeed {
 
     const state = client.state.snapshot();
 
-    // The controller arm reads the API mode off the client that serves the view, which is the connection's own verified account of the legs it holds. No door
-    // resolution applies to a controller view, so none of the entry lookups below run for it.
+    // The controller arm reads the capability map off the client that serves the view, which is the connection's own verified account of the legs it holds and
+    // whether its official path opened. No door resolution applies to a controller view, so none of the entry lookups below run for it.
     if(subject.kind === "controller") {
 
-      return composeStatusRows({ kind: "controller", mode: client.capabilities.mode, state });
+      return composeStatusRows({ capabilities: client.capabilities, kind: "controller", state });
     }
 
     const doorStates = selectDoorStates(state);

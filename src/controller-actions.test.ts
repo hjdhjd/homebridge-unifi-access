@@ -56,6 +56,8 @@ const REMOVE_PATCH = { controllers: [] };
 const SAVED_CONNECTED = "This controller has been saved.";
 const SAVED_TOKEN_ONLY = "This controller has been saved. Its API token is valid. Its doors and devices appear in HomeKit; adding a local user's username and " +
   "password lets the plugin read the controller's own document as well.";
+const SAVED_TOKEN_REFUSED = "This controller has been saved, but it did not accept the API token. The plugin will use the local user's username and password " +
+  "alone; webhooks and the doorbell trigger need an API token the controller accepts.";
 const SAVED_STAGED = "This controller has been saved, but Homebridge could not write the configuration file. Save the plugin's settings to keep the change.";
 const REMOVED_STAGED = "This controller has been removed, but Homebridge could not write the configuration file. Save the plugin's settings to keep the change.";
 const SAVE_FAILURE_LINE = "Unable to save this controller.";
@@ -131,13 +133,14 @@ function device(serial: string): Record<string, unknown> {
 
 /* The answer this save's own validation receives.
  *
- * @param kind - Whether the controller answered with credentials or with an API token alone.
+ * @param kind         - Whether the controller answered with credentials or with an API token alone.
+ * @param tokenRefused - Whether the controller refused the API token beside the credentials.
  *
  * @returns The probe's answer.
  */
-function probeAnswer(kind: "connected" | "token-only"): AccessProbeSuccess {
+function probeAnswer(kind: "connected" | "token-only", tokenRefused = false): AccessProbeSuccess {
 
-  return { devices: [device(PROBE_SERIAL)], kind, message: PROBE_MESSAGE };
+  return { devices: [device(PROBE_SERIAL)], kind, message: PROBE_MESSAGE, tokenRefused };
 }
 
 /* The answer this session was already holding for an address, deliberately unlike anything a probe here returns.
@@ -148,7 +151,7 @@ function probeAnswer(kind: "connected" | "token-only"): AccessProbeSuccess {
  */
 function priorAt(address: string): AccessProbeSuccess {
 
-  return { devices: [device(PRIOR_SERIALS[address] ?? address)], kind: "connected", message: PRIOR_MESSAGE };
+  return { devices: [device(PRIOR_SERIALS[address] ?? address)], kind: "connected", message: PRIOR_MESSAGE, tokenRefused: false };
 }
 
 /* A controller that could not be reached, which is the one answer the keep rule refuses outright.
@@ -341,12 +344,20 @@ test("s2: a committed save of a connected controller speaks its plain sentence, 
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });
 
-test("s3: a committed save of a token-only controller speaks the sentence that says what credentials would add", async () => {
+test("s3a: a committed save of a token-only controller speaks the sentence that says what credentials would add", async () => {
 
   const stood = stand({ probe: probeAnswer("token-only"), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_TOKEN_ONLY }] });
+});
+
+test("s3b: a committed save of a controller that refused its API token warns that the plugin runs on the credentials alone", async () => {
+
+  const stood = stand({ probe: probeAnswer("connected", true), write: { kind: "committed" } });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
+  assertSpoke({ sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_TOKEN_REFUSED }] });
 });
 
 test("s4: an address edit drops the original address before the write and re-selects the new address after the send", async () => {

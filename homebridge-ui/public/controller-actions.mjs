@@ -15,6 +15,11 @@
  * front of a gate rather than in front of a user.
  */
 
+// What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
+// once, here beside the save that speaks it.
+export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did not accept the API token. The plugin will use the local user's username and " +
+  "password alone; webhooks and the doorbell trigger need an API token the controller accepts.";
+
 /**
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
  * framework, and the UI-server bridge.
@@ -196,10 +201,26 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
 
       case "committed": {
 
-        // A token-only connection is a successful save with a consequence worth saying out loud, since the controller's own facts stay out of reach until
-        // credentials arrive.
-        toast.success((validation.kind === "token-only") ? "This controller has been saved. Its API token is valid. Its doors and devices appear in " +
-          "HomeKit; adding a local user's username and password lets the plugin read the controller's own document as well." : "This controller has been saved.");
+        /* A token-only connection is a successful save with a consequence worth saying out loud, since the controller's own facts stay out of reach until
+         * credentials arrive. A connection whose token the controller refused is a successful save as well, and it warns, since the plugin runs on the credentials
+         * alone and what only an accepted token reaches stays off until the configuration carries one.
+         */
+        if(validation.kind === "token-only") {
+
+          toast.success("This controller has been saved. Its API token is valid. Its doors and devices appear in HomeKit; adding a local user's username and " +
+            "password lets the plugin read the controller's own document as well.");
+
+          break;
+        }
+
+        if(validation.tokenRefused) {
+
+          toast.warning(TOKEN_REFUSED_WARNING);
+
+          break;
+        }
+
+        toast.success("This controller has been saved.");
 
         break;
       }

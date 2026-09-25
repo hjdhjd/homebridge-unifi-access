@@ -6,11 +6,11 @@
 
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
+import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
 import { classifyProbeResponse, controllers, deviceListResult, hasValidIdentity, makeAccessConfig, primaryController, staleSelectionVerdict,
   withPrimaryIdentity } from "./access-config.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
-import { makeControllerActions } from "./controller-actions.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 
@@ -207,6 +207,15 @@ const firstRunOnSubmit = async ({ commit, config }) => {
     // Persist the validated identity through the session's single write hook. We own the shape of the write - the identity lives on the primary controller, which
     // withPrimaryIdentity encodes while preserving any additional controllers - and the session owns persistence and the preservation of sibling platform entries.
     await commit(withPrimaryIdentity(config, identity));
+
+    /* A controller that refused the API token beside the credentials is still a valid setup, and the user hears it here whether or not they pressed the validate
+     * control, in the sentence a card's Save speaks and through the host's toast it speaks through. It follows the write rather than preceding it, because the
+     * sentence says the controller has been saved, and a write that rejects answers on the card instead.
+     */
+    if(probe.tokenRefused) {
+
+      homebridge.toast.warning(TOKEN_REFUSED_WARNING);
+    }
 
     return true;
   } catch(err) {
@@ -1087,6 +1096,27 @@ const ui = new webUi(webUiParams);
  */
 void ui.registerTheming();
 
+/* The verdict a validation that connected paints, by what the connection reached. A token-only connection is valid, and saying only that would leave the user
+ * wondering what the credential fields beside the token are still for. A connection whose token the controller refused is valid as well, because the credentials
+ * carry it, but saying only that would leave the user believing the token is in use, so the line warns and names what only an accepted token reaches.
+ */
+const successVerdict = (probe) => {
+
+  if(probe.kind === "token-only") {
+
+    return { lines: [ "Your UniFi Access API token is valid.", "Add a local user's username and password to let the plugin read this controller's own document " +
+      "as well; its doors and devices appear in HomeKit either way." ], tone: "text-success" };
+  }
+
+  if(probe.tokenRefused) {
+
+    return { lines: [ "Your UniFi Access controller sign-in is valid, but the controller did not accept the API token.", "The plugin will use the local user's " +
+      "username and password alone. Webhooks and the doorbell trigger need an API token the controller accepts." ], tone: "text-warning" };
+  }
+
+  return { lines: ["Your UniFi Access controller sign-in is valid."], tone: "text-success" };
+};
+
 /* Validate a card's controller connection on demand. It is early feedback and nothing else: every path that commits anything - the first-run submit, a card's own
  * Save - validates through this same helper first, so a user who never presses the control is no worse off, and one who does learns whether their sign-in works
  * before committing a configuration.
@@ -1106,11 +1136,7 @@ const onValidateLogin = async ({ button, card }) => {
       return;
     }
 
-    // A token-only connection is valid, and saying only that would leave the user wondering what the credential fields beside the token are still for.
-    card.verdict.render({ lines: (probe.kind === "token-only") ?
-      [ "Your UniFi Access API token is valid.", "Add a local user's username and password to let the plugin read this controller's own document as well; its " +
-        "doors and devices appear in HomeKit either way." ] :
-      ["Your UniFi Access controller sign-in is valid."], tone: "text-success" });
+    card.verdict.render(successVerdict(probe));
   } finally {
 
     // The re-enable is unconditional, superseded copy or not: the invocation that disabled the control is the only thing that can balance its own disable.

@@ -9,11 +9,11 @@
  * its client: a decision separated from the effect it drives is independently testable, and the test is the proof the separation is real. AccessController
  * transitively imports the entire device and accessory graph; a five-line set diff should never have to stand that up to be exercised.
  *
- * What this module is allowed to import is deliberately narrow, so it loads and tests in isolation: the library predicates and error type it branches on, the
- * shared constants it reads, pure builtins - the address classifier and the WHATWG URL parser, which the endpoint composition and the path match branch on - and
- * the library's own published vocabulary, which is read through rather than restated anywhere here.
+ * What this module is allowed to import is deliberately narrow, so it loads and tests in isolation: the library predicates it branches on, the shared constants
+ * it reads, pure builtins - the address classifier and the WHATWG URL parser, which the endpoint composition and the path match branch on - and the library's own
+ * published vocabulary, which is read through rather than restated anywhere here.
  */
-import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, AccessAuthError, isEnterpriseHubRecord, isHub, isReader, normalizeActorType,
+import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, isEnterpriseHubRecord, isHub, isIdentityRefusal, isReader, normalizeActorType,
   normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
 import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
@@ -124,9 +124,11 @@ export function canTransition(options: { from: AccessControllerPhase; to: Access
 }
 
 /**
- * The startup-resilient connect retry policy, as a pure stateful predicate factory. Authentication faults get a small consecutive budget so a controller still
- * sorting out its own auth state recovers, but genuinely-wrong credentials fail fast rather than looping forever. Any non-auth fault - network, transient - resets
- * the budget, so a slow-to-appear controller is retried without bound. A pure factory, so the budget logic is testable without standing up a client.
+ * The startup-resilient connect retry policy, as a pure stateful predicate factory. Identity refusals get a small consecutive budget so a controller still sorting
+ * out its own auth state recovers, but genuinely-wrong credentials fail fast rather than looping forever. A refusal the controller answers as a result code inside a
+ * successful response counts the same as one it answers as a status, because {@link isIdentityRefusal}, the library's statement of every spelling, is what reads
+ * it. Any other fault - network, transient - resets the budget, so a slow-to-appear controller is retried without bound. A pure factory, so the budget logic is
+ * testable without standing up a client.
  *
  * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A failed attempt the policy retries hands its reason to
  * `onFailure` when the run's first failure arrives and again whenever the reason changes, so a caller hears why the connect is failing and when that changes rather
@@ -147,8 +149,9 @@ export function createConnectRetryPolicy({ limit = ACCESS_CONTROLLER_AUTH_FAILUR
 
     shouldRetry: (error: unknown): boolean => {
 
-      // A non-auth fault resets the budget. An auth fault that spends the last of it ends the run, and the caller's terminal line reports why.
-      if(!(error instanceof AccessAuthError)) {
+      // A fault that is not an identity refusal resets the budget. An identity refusal that spends the last of it ends the run, and the caller's terminal line
+      // reports why.
+      if(!isIdentityRefusal(error)) {
 
         consecutiveAuth = 0;
       } else if(++consecutiveAuth >= limit) {
