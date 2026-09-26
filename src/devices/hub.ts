@@ -13,7 +13,8 @@ import type { CharacteristicValue, Service } from "homebridge";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic, validService } from "homebridge-plugin-utils";
+import { capabilityGate, findService, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic,
+  validService } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessConsumedWebhookDelivery } from "./device.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -1245,7 +1246,9 @@ export class AccessHub extends AccessDevice {
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
   private configureLock({ initialized }: ConfigurePass): void {
 
-    // First, remove any previous service types that are no longer selected.
+    /* First, remove the presentation that is not selected. The lookup is exact, so it removes the main door's own service of that type and never a subtyped
+     * sibling of it...a UA Gate presenting its door as an opener carries its side door's lock beside the opener, and that lock stays where it is.
+     */
     const serviceTypes = [ this.hap.Service.LockMechanism, this.hap.Service.GarageDoorOpener ];
     const selectedService = this.doorServiceType === "GarageDoorOpener" ? this.hap.Service.GarageDoorOpener : this.hap.Service.LockMechanism;
 
@@ -1253,12 +1256,7 @@ export class AccessHub extends AccessDevice {
 
       if(serviceType !== selectedService) {
 
-        const oldService = this.accessory.getService(serviceType);
-
-        if(oldService) {
-
-          this.accessory.removeService(oldService);
-        }
+        validService({ accessory: this.accessory, name: this.accessoryName, serviceType, validate: false });
       }
     }
 
@@ -2546,7 +2544,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    const service = this.accessory.getService(this.hap.Service.GarageDoorOpener);
+    const service = findService({ accessory: this.accessory, serviceType: this.hap.Service.GarageDoorOpener });
 
     if(!service) {
 
@@ -2586,7 +2584,7 @@ export class AccessHub extends AccessDevice {
 
       // The primary door has no subtype. The side door (UA Gate only) uses a subtype to distinguish it.
       const service = isSideDoor ? this.accessory.getServiceById(this.hap.Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE) :
-        this.accessory.getService(this.hap.Service.LockMechanism);
+        findService({ accessory: this.accessory, serviceType: this.hap.Service.LockMechanism });
 
       if(service) {
 
@@ -3013,7 +3011,7 @@ export class AccessHub extends AccessDevice {
     this.doorbellRingRequestId = event.payload.request_id;
 
     // Trigger the doorbell event in HomeKit.
-    this.accessory.getService(this.hap.Service.Doorbell)?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
+    findService({ accessory: this.accessory, serviceType: this.hap.Service.Doorbell })?.getCharacteristic(this.hap.Characteristic.ProgrammableSwitchEvent)
       ?.sendEventNotification(this.hap.Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS);
 
     // Update our doorbell trigger, if needed.

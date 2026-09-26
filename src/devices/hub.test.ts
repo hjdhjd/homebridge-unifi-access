@@ -100,8 +100,10 @@ function carried<T extends Service>(serviceType: new (displayName?: string, subt
   return new serviceType("Test Hub " + subtype, subtype);
 }
 
-/* A HomeKit accessory over real HAP services: the lookups the plugin performs, backed by a plain list. The services are the genuine classes, so what the shared
- * service helpers do to them here is what they do in the field.
+/* A HomeKit accessory over real HAP services: the lookups and the service mutations the plugin performs, backed by a plain list. The services are the genuine classes,
+ * so what the shared service helpers do to them here is what they do in the field, and each member answers by HAP's own rule for it, so a lookup or an add that HAP
+ * would answer differently fails here as it would there. A type lookup answers the first service of the type whatever its subtype, an identity lookup matches the
+ * type and the subtype exactly, an add is refused with HAP's own message where HAP refuses it, and a removal takes out exactly the service it names.
  */
 function makeAccessory(services: Service[]): AccessAccessory {
 
@@ -110,18 +112,46 @@ function makeAccessory(services: Service[]): AccessAccessory {
     UUID: "uuid-" + HUB_ID,
     addService: (service: Service): Service => {
 
+      // HAP admits a second service of a type only when the new one carries a subtype that no service of the type already carries.
+      for(const existing of services) {
+
+        if(existing.UUID !== service.UUID) {
+
+          continue;
+        }
+
+        if(!service.subtype) {
+
+          throw new Error("Cannot add a Service with the same UUID '" + existing.UUID +
+            "' as another Service in this Accessory without also defining a unique 'subtype' property.");
+        }
+
+        if(service.subtype === existing.subtype) {
+
+          throw new Error("Cannot add a Service with the same UUID '" + existing.UUID + "' and subtype '" + existing.subtype + "' as another Service in this Accessory.");
+        }
+      }
+
       services.push(service);
 
       return service;
     },
     context: {},
     displayName: "Test Hub",
-    getService: (target: { UUID: string }): Service | undefined => services.find(service => (service.UUID === target.UUID) && !service.subtype),
-    getServiceById: (target: { UUID: string }, subtype: string): Service | undefined => {
+    getService: (target: { UUID: string }): Service | undefined => services.find(service => service.UUID === target.UUID),
+    getServiceById: (target: { UUID: string }, subtype?: string): Service | undefined => {
 
       return services.find(service => (service.UUID === target.UUID) && (service.subtype === subtype));
     },
-    removeService: (service: Service): void => void services.splice(services.indexOf(service), 1),
+    removeService: (service: Service): void => {
+
+      const index = services.indexOf(service);
+
+      if(index >= 0) {
+
+        services.splice(index, 1);
+      }
+    },
     services,
 
     /* Homebridge's own display-name setter, transcribed rather than inherited: the homebridge package exposes PlatformAccessory as a type alone, so the class cannot
@@ -3065,7 +3095,8 @@ test("a command the controller refuses leaves the machine standing and puts the 
 
 test("the opener reports no obstruction, and a door is presented as one accessory or the other", async () => {
 
-  const opener = makeOpener();
+  // The accessory arrives carrying the lock a previous run presented the door as, which is what gives the opener's acquisition a lock to replace.
+  const opener = makeOpener({ existing: [new Service.LockMechanism("Test Hub")] });
 
   assert.equal(await openerService(opener).getCharacteristic(Characteristic.ObstructionDetected).handleGetRequest(), false);
   assert.equal(opener.services.filter(entry => entry.UUID === Service.LockMechanism.UUID).length, 0, "acquiring the opener removes the lock it replaces");
@@ -3173,6 +3204,102 @@ test("the door service choice resolves end to end: an explicit service, the auto
 
   assert.ok(carries(hub, Service.LockMechanism));
   assert.ok(!carries(hub, Service.GarageDoorOpener));
+});
+
+/* A UA Gate on its default opener presentation carries its side door's lock beside the opener, and every device update re-gates the gate's services. The pass
+ * removes the presentation that is not selected, which is a lock with no subtype, so the side door's lock, which has one, has to come through it untouched: a pass
+ * that removed it would re-create it, handing HomeKit a new service and the log a second announcement on every update.
+ */
+test("a UA Gate presenting its door as an opener keeps its side door lock through a device update rather than removing and re-creating it", () => {
+
+  const gate = makeGate({ keepAdoptionLines: true });
+  const sideLock = lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE);
+  const announced = lineCount(gate, "Configuring side door lock.");
+
+  assert.equal(announced, 1, "adoption creates the side door lock and announces it once");
+
+  restateRecord(gate, {});
+
+  assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), sideLock, "the device update finds the side door lock adoption created");
+  assert.equal(gate.services.filter(service => service.UUID === Service.LockMechanism.UUID).length, 1, "and it stays the only lock the accessory carries");
+  assert.equal(lineCount(gate, "Configuring side door lock."), announced, "and nothing announces the side door lock a second time");
+});
+
+/* HAP refuses a service with no subtype beside any other service of its type. A UA Gate switched from the opener to the lock presentation arrives carrying the
+ * opener it is leaving and its side door's lock, with no main door lock yet. The acquisition makes room for the main door's lock, and the side door's lock comes
+ * through as the same service rather than a re-created one.
+ */
+test("a UA Gate switched to the lock presentation beside the side door lock it carries creates its main door lock rather than being refused", () => {
+
+  const sideDoorLock = carried(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE);
+  const existing = [ sideDoorLock, new Service.GarageDoorOpener("Test Hub") ];
+  let gate: HubHarness | undefined;
+
+  assert.doesNotThrow(() => {
+
+    gate = makeGate({ existing, options: ["Enable.Hub.Door.Service=Lock"] });
+  }, "the gate stands up as a lock beside its side door lock");
+
+  assert.ok(gate);
+  assert.equal(gate.services.filter(service => service.UUID === Service.GarageDoorOpener.UUID).length, 0, "the opener it is leaving is removed");
+  assert.equal(gate.services.filter(service => service.UUID === Service.LockMechanism.UUID).length, 2, "and it carries exactly two locks");
+  assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), sideDoorLock, "one of them the side door's, the same service it arrived with");
+  assert.ok(lockService(gate).isPrimaryService, "and the other the main door's, with no subtype, as the primary service");
+});
+
+/* An accessory restored from the cache can carry the side door's lock ahead of the main door's. A lookup by type alone answers whichever lock comes first, so the
+ * main door's reading reaches the main door's lock only through the exact lookup.
+ */
+test("a UA Gate presented as a lock writes its main door's state to the main door's lock even where the side door's lock comes first", () => {
+
+  const gate = makeGate({ existing: [ carried(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE), new Service.LockMechanism("Test Hub") ],
+    options: ["Enable.Hub.Door.Service=Lock"] });
+  const mainLock = lockService(gate);
+  const sideLock = lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE);
+
+  assert.ok(gate.services.indexOf(sideLock) < gate.services.indexOf(mainLock), "the side door's lock comes first on the accessory");
+
+  /* The writes are read rather than the values they leave behind, because a lock nothing has written reads unsecured by HAP's own default, which is the reading
+   * the delivery below carries.
+   */
+  const mainWrites = recordWrites(mainLock);
+  const sideWrites = recordWrites(sideLock);
+  const lockStates = (writes: { characteristic: string; value: unknown }[]): unknown[] => {
+
+    return writes.filter(write => write.characteristic === Characteristic.LockCurrentState.UUID).map(write => write.value);
+  };
+
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
+
+  assert.deepEqual(lockStates(mainWrites), [Characteristic.LockCurrentState.UNSECURED], "the main door's unlock is written to the main door's lock");
+  assert.deepEqual(lockStates(sideWrites), [], "and nothing is written to the side door's");
+  assert.equal(sideLock.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED, "which still reads secured");
+});
+
+/* The presentation line and the trigger lines each announce a creation, so a gate says each of them once at adoption, and a device update that finds every one
+ * of those services standing says none of them again. Both presentations are stood up, because the presentation line names the one the door took.
+ */
+test("a UA Gate announces its door presentation and its lock triggers once at adoption and never again on a device update, under either presentation", () => {
+
+  for(const { noun, presentation } of [ { noun: "garage door opener", presentation: "GarageDoorOpener" }, { noun: "lock", presentation: "Lock" } ]) {
+
+    const gate = makeGate({ keepAdoptionLines: true,
+      options: [ "Enable.Hub.Door.Service=" + presentation, "Enable.Hub.Lock.Trigger", "Enable.Hub.SideDoor.Lock.Trigger" ] });
+    const announcements = [ "Presenting the door in HomeKit as a " + noun + ".", "Enabling the lock automation trigger.",
+      "Enabling the side door lock automation trigger." ];
+
+    for(const sentence of announcements) {
+
+      assert.equal(lineCount(gate, sentence), 1, "adoption announces this once: " + sentence);
+    }
+
+    restateRecord(gate, {});
+
+    for(const sentence of announcements) {
+
+      assert.equal(lineCount(gate, sentence), 1, "and a device update does not announce it again: " + sentence);
+    }
+  }
 });
 
 test("a reader with no access method selected creates no switch and retires one the accessory carried", () => {
