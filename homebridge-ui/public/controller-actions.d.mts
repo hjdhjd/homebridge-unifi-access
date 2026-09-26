@@ -9,7 +9,7 @@ import type { AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, Acces
  * module rather than as a type any of its declaration files exports, so there is nothing to import and the union is restated here to be read against. The two
  * outcomes that carry the failure explaining them carry it as `unknown`, because a rejected write answers with whatever the host threw.
  */
-export type ControllerWriteResult = { kind: "committed" } | { error: unknown; kind: "staged" } | { error: unknown; kind: "failed" } | { kind: "superseded" };
+export type ControllerWriteResult = { kind: "committed" } | { error: unknown; kind: "staged" } | { error: unknown; kind: "failed" };
 
 /**
  * The verdict line of the card an action acts for, exactly as the page's connection-card mount builds it: the retirement that blanks the line and answers the

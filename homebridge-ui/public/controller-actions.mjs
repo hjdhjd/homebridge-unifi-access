@@ -242,11 +242,7 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
         return null;
       }
 
-      /* A retired copy owns nothing on screen and its map has no reader, since a reopened panel is a fresh module copy with a map of its own, so the seed is left
-       * where it is and nothing is rendered. The default shares this arm rather than standing alone: an outcome this page does not recognize is one it cannot claim
-       * as a success, and refusing to render is the only honest answer to it.
-       */
-      case "superseded":
+      // An outcome this page does not recognize is one it cannot claim as a success, so the seed is left where it is and refusing to render is the only honest answer.
       default: {
 
         return null;
@@ -270,8 +266,7 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
   /* Remove a controller from the configuration, with the settings sweep the user chose.
    *
    * The write is handed to the feature-options page as a composer for the same reason Save's is: the page's store holds the options array the user loaded, and the
-   * sweep's deletions written behind it are ones the next option edit writes back over. The page owns the session, answers a retired copy on its own terms, and
-   * re-establishes itself on what was written.
+   * sweep's deletions written behind it are ones the next option edit writes back over. The page owns the session and re-establishes itself on what was written.
    *
    * Where the page comes to rest is the framework's own reconciliation rather than a click of ours: a selection naming a controller the refreshed list no longer
    * holds falls back to the global scope, and a removal that leaves no controller at all re-enters the page through a fresh show() cycle whose boot owns the
@@ -322,10 +317,7 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
         return;
       }
 
-      /* A retired copy renders nothing, and the default shares its arm for the same reason the save's does: an outcome this page does not recognize is one it
-       * cannot treat as a removal, so the cache below is left holding what it holds.
-       */
-      case "superseded":
+      // An outcome this page does not recognize is one it cannot treat as a removal, so nothing renders and the cache below is left holding what it holds.
       default: {
 
         return;

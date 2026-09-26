@@ -444,9 +444,8 @@ test("s7b: a coordinated write that throws restores the map and paints the failu
   assertSpoke({ renders: [{ detail: "the write threw", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
 });
 
-test("s8: a superseded write and one this page does not recognize each answer null, keep the seed, and say nothing", async () => {
+test("s8: a write this page does not recognize answers null, keeps the seed, and says nothing", async () => {
 
-  // Both outcomes take exactly this path, so the arm states it once and drives it for each.
   const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
 
     const label = write.kind + ": ";
@@ -457,10 +456,8 @@ test("s8: a superseded write and one this page does not recognize each answer nu
     assertSpoke({ label, sends: 0, stood });
   };
 
-  await assertIgnored({ kind: "superseded" });
-
-  // The second kind sits outside the declared union, which is what the default arm exists for: the cast is this arm's statement that it is reaching a case the
-  // type system says cannot arrive.
+  // The kind sits outside the declared union, which is what the default arm exists for: the cast is this arm's statement that it is reaching a case the type
+  // system says cannot arrive.
   await assertIgnored({ kind: "a-kind-this-page-does-not-know" } as unknown as ControllerWriteResult);
 });
 
@@ -624,9 +621,8 @@ test("r4: a removal whose write throws paints the failure and keeps the answer",
   assertSpoke({ renders: [{ detail: "the write threw", lines: [REMOVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
 });
 
-test("r5: a superseded removal and one this page does not recognize each say nothing and keep the answer", async () => {
+test("r5: a removal this page does not recognize says nothing and keeps the answer", async () => {
 
-  // Both outcomes take exactly this path, so the arm states it once and drives it for each.
   const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
 
     const label = write.kind + ": ";
@@ -641,9 +637,7 @@ test("r5: a superseded removal and one this page does not recognize each say not
     assertSpoke({ label, sends: 0, stood });
   };
 
-  await assertIgnored({ kind: "superseded" });
-
-  // The second kind sits outside the declared union, on the same terms the save's own arm states.
+  // The kind sits outside the declared union, on the same terms the save's own arm states.
   await assertIgnored({ kind: "a-kind-this-page-does-not-know" } as unknown as ControllerWriteResult);
 });
 

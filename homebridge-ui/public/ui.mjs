@@ -70,8 +70,8 @@ const firstRunIsRequired = ({ config }) => {
 };
 
 // Initialize our first run screen with any information from our existing configuration. The injected config is the primary platform entry; we pre-populate the form
-// from its primary controller, if one is already configured. Populating also blanks the card's verdict line, which is what a verdict a prior module copy painted
-// wants: the frame and its elements outlive any single copy, so the line opens blank.
+// from its primary controller, if one is already configured. Populating also blanks the card's verdict line, because show() cycles repeat within one page - the menu
+// re-enters the launch after a failure - and the card outlives every cycle, so a verdict painted in an earlier cycle never stands beside the next one's form.
 const firstRunOnStart = ({ config }) => {
 
   const controller = primaryController(config);
@@ -154,9 +154,8 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
 
     const probe = classifyProbeResponse(await homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }));
 
-    // A reopened panel mints a successor copy of this module, and an edit or a newer request retires this one within it - either way, a retired request must not
-    // paint over what the copy or the request the user is looking at is showing.
-    if(ui.epochSignal.aborted || !verdict.isCurrent(generation)) {
+    // An edit or a newer request on this card retires this one, and a retired request must not paint over what the newer input or request is showing.
+    if(!verdict.isCurrent(generation)) {
 
       return null;
     }
@@ -175,8 +174,8 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
     return probe;
   } catch(err) {
 
-    // A retired request's failure is nobody's news - the epoch and generation rules above govern this paint too.
-    if(ui.epochSignal.aborted || !verdict.isCurrent(generation)) {
+    // A retired request's failure is nobody's news - the generation rule above governs this paint too.
+    if(!verdict.isCurrent(generation)) {
 
       return null;
     }
@@ -681,43 +680,43 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   // Each masked secret's reveal, bound from the markup itself: a toggle declares the field it serves, so the card grows a reveal without this wiring changing.
   for(const toggle of card.querySelectorAll("[data-reveal]")) {
 
-    ui.on(toggle, "click", () => toggleReveal({ input: fields[toggle.dataset.reveal], toggle }), { signal: cardSignal });
+    toggle.addEventListener("click", () => toggleReveal({ input: fields[toggle.dataset.reveal], toggle }), { signal: cardSignal });
   }
 
   // An edit to any field retires the verdict standing beside it, so the line never describes anything but the current input. A checkbox announces its own edits on
   // "change" rather than "input", so each field is bound on the event its kind actually fires.
   for(const field of Object.values(fields)) {
 
-    ui.on(field, isCheckbox(field) ? "change" : "input", () => verdict.invalidate(), { signal: cardSignal });
+    field.addEventListener(isCheckbox(field) ? "change" : "input", () => verdict.invalidate(), { signal: cardSignal });
   }
 
-  ui.on(control("validate"), "click", () => void onValidateLogin({ button: control("validate"), card: surface }), { signal: cardSignal });
+  control("validate").addEventListener("click", () => void onValidateLogin({ button: control("validate"), card: surface }), { signal: cardSignal });
 
   if(onCancel) {
 
     control("cancel").classList.remove("d-none");
-    ui.on(control("cancel"), "click", onCancel, { signal: cardSignal });
+    control("cancel").addEventListener("click", onCancel, { signal: cardSignal });
   }
 
   if(onSave) {
 
     control("save").classList.remove("d-none");
-    ui.on(control("save"), "click", () => void onSave(), { signal: cardSignal });
+    control("save").addEventListener("click", () => void onSave(), { signal: cardSignal });
   }
 
   if(onRemove) {
 
     control("remove").classList.remove("d-none");
-    ui.on(control("remove"), "click", armRemoval, { signal: cardSignal });
-    ui.on(control("removeCancel"), "click", disarmRemoval, { signal: cardSignal });
+    control("remove").addEventListener("click", armRemoval, { signal: cardSignal });
+    control("removeCancel").addEventListener("click", disarmRemoval, { signal: cardSignal });
 
-    ui.on(control("removeConfirmed"), "click", () => {
+    control("removeConfirmed").addEventListener("click", () => {
 
       disarmRemoval();
       void onRemove({ macs: [] });
     }, { signal: cardSignal });
 
-    ui.on(control("removeSwept"), "click", () => {
+    control("removeSwept").addEventListener("click", () => {
 
       disarmRemoval();
       void onRemove({ macs: removalMacs });
@@ -1089,10 +1088,9 @@ const webUiParams = {
 const ui = new webUi(webUiParams);
 
 /* Adopt the framework's theming for this page - the design tokens, the themed canvas, the dark-mode corrections, the page-kit classes, and the host's own accent -
- * with one call that holds for as long as this module copy owns the window. Theming is a page concern rather than a view one, so the first-run page, the
- * feature-options view, and the support tab all wear it from here. The promise is voided rather than awaited because the framework owns its rejection posture: a
- * failed initial lighting-mode read still leaves the sheets adopted and the host's theme signals followed, so the next announcement the host makes brings the page
- * into step.
+ * with one call that holds for the life of the page. Theming is a page concern rather than a view one, so the first-run page, the feature-options view, and the
+ * support tab all wear it from here. The promise is voided rather than awaited because the framework owns its rejection posture: a failed initial lighting-mode read
+ * still leaves the sheets adopted and the host's theme signals followed, so the next announcement the host makes brings the page into step.
  */
 void ui.registerTheming();
 
@@ -1129,9 +1127,8 @@ const onValidateLogin = async ({ button, card }) => {
 
     const probe = await requestControllerProbe({ ...card.values(), verdict: card.verdict });
 
-    // The epoch signal is read after the await: a reopened panel mints a successor copy of this module, and a retired copy must not paint over what the copy the
-    // user is looking at is showing. The helper paints every failure itself, so only the success verdict is ours to say.
-    if(ui.epochSignal.aborted || !probe) {
+    // The helper paints every failure itself, so only the success verdict is ours to say.
+    if(!probe) {
 
       return;
     }
@@ -1139,7 +1136,7 @@ const onValidateLogin = async ({ button, card }) => {
     card.verdict.render(successVerdict(probe));
   } finally {
 
-    // The re-enable is unconditional, superseded copy or not: the invocation that disabled the control is the only thing that can balance its own disable.
+    // The re-enable is unconditional: the invocation that disabled the control is the only thing that can balance its own disable.
     button.disabled = false;
   }
 };
@@ -1218,18 +1215,14 @@ const openControllerEditor = () => {
   region.style.display = "";
 };
 
-/* Wire the plugin's own page controls. Every binding registers through the facade, so a superseded module copy's handlers die when a newer copy claims the window.
- *
- * The lookups hand their result straight to the facade: a nullish target declares that surface absent, so registering against a control this page's markup omits
- * is the facade's own documented no-op and costs that control's wiring alone.
- */
-ui.on(document.getElementById("hbuaAddController"), "click", () => openControllerEditor());
+// Wire the plugin's own page controls. The controls are part of this page's markup and live as long as the page does, so their listeners carry no signal.
+document.getElementById("hbuaAddController").addEventListener("click", () => openControllerEditor());
 
 /* A sidebar navigation click closes the Add Controller card, so choosing somewhere else to be takes effect at once rather than at the next rebuild. The rebuild
  * paths close it too, at the controller hook they all pass through; this is for the immediacy the rebuild cannot give, since navigating within an already-rendered
  * view rebuilds nothing. The binding is delegated from the plugin's own column, so it survives every repaint the framework makes to the sidebar inside it.
  */
-ui.on(document.getElementById("hbuaSidebarColumn"), "click", (event) => {
+document.getElementById("hbuaSidebarColumn").addEventListener("click", (event) => {
 
   if(event.target.closest(".nav-link[data-navigation]")) {
 
@@ -1238,14 +1231,9 @@ ui.on(document.getElementById("hbuaSidebarColumn"), "click", (event) => {
 });
 
 // The load-time wiring's own lifecycle. Aborting it is how an envelope that failed or expired tells a continuation still running underneath it that it must not stage
-// anything after the fact.
+// anything after the fact, and its signal is the one every cancellation point below reads.
 const wiringController = new AbortController();
-
-/* The signal the wiring's cancellation points read: the envelope's own controller, bounded by this module copy's claim on the window. The epoch half matters because
- * a reopened settings panel mints a successor copy and retires this one, so whichever of the two aborts first cancels a superseded copy's wiring at the same
- * chokepoints the deadline uses, rather than letting a retired copy write configuration underneath the copy the user is looking at.
- */
-const wiringSignal = ui.epochBounded(wiringController.signal);
+const wiringSignal = wiringController.signal;
 
 /* Run the legacy-settings migration, once, at load.
  *
@@ -1265,7 +1253,7 @@ const wiringSignal = ui.epochBounded(wiringController.signal);
  * whatever the earlier pass migrated is still sitting in the configuration the later one read, and the next open migrates it again.
  *
  * One further bound, stated plainly: the check before the commit is the last cancellation point. A commit whose bridge round trip is already in flight cannot be
- * recalled, because the session takes no signal and the deadline bounds only the await, so composing the epoch into the signal narrows the stale-write window to
+ * recalled, because the session takes no signal and the deadline bounds only the await, so the check narrows the window in which an expired envelope still writes to
  * that in-flight instant rather than closing it.
  *
  * When the envelope fails, nothing has been written and the page loads exactly as it otherwise would. No read this webUI performs consults the consolidated
@@ -1312,8 +1300,7 @@ const wireAccessConfig = async () => {
 
   const patch = migrate(session.platform, macByAddress);
 
-  // The signal is read immediately before the write, so an envelope that expired while the probes were still running - or a copy the window has retired - cannot
-  // stage a patch after the fact.
+  // The signal is read immediately before the write, so an envelope that expired while the probes were still running cannot stage a patch after the fact.
   if(patch && !wiringSignal.aborted) {
 
     await session.commit(patch);
@@ -1329,7 +1316,7 @@ const wireAccessConfig = async () => {
 
 try {
 
-  await withDeadline({ promise: wireAccessConfig(), seconds: WIRING_DEADLINE, signal: wiringSignal });
+  await withDeadline({ promise: wireAccessConfig(), seconds: WIRING_DEADLINE });
 } catch(error) {
 
   wiringController.abort(error);
