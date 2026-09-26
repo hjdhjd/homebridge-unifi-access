@@ -3,13 +3,14 @@
  * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
+import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore,
+  selectAccessPoints } from "unifi-access";
+import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore, selectAccessPoints } from "unifi-access";
 import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
 import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
-import { HbpuAbortError, defaultRetryBackoff, membershipDelta, retry } from "homebridge-plugin-utils";
+import { HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
 import { ROOT_ID, buildingTopology, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
@@ -30,9 +31,6 @@ const CONTROLLER_MAC = "11:22:33:44:55:66";
 
 // The removal delay every departure below serves, in milliseconds: the Controller.DelayDeviceRemoval default of sixty seconds, which the user-facing sentence names.
 const DEVICE_REMOVAL_DELAY_MS = 60000;
-
-// What a connect spends in backoff before the authentication budget stops it: the default retry ladder's first two waits, asserted against that ladder below.
-const AUTH_BUDGET_BACKOFF_MS = 3000;
 
 /* How many macrotask boundaries an arm crosses before reading what a dispatched chain did. The chains drained through it are the connection observer's walk
  * over one transition, the webhook configuration a login sets in motion, and the MQTT publish chokepoint. Each is fire-and-forget by design, so an arm waits on
@@ -1165,22 +1163,33 @@ test("login reports the identity outcome its exit took", async (t) => {
   assert.deepEqual(disabled.unregistered, ["uuid-AABBCCDDEE01"], "and it still takes the accessories it answered for with it");
 });
 
-test("a login whose connect exhausts its authentication budget reports no identity", async (t) => {
+test("a login whose connect is refused on every attempt keeps retrying on the library's refusal schedule until shutdown ends it", async (t) => {
 
   const clock = new TestClock();
+  const errors: string[] = [];
   const shutdown = new AbortController();
+  const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
+  // Every staged delay, then more than one wait at the floor, so the run is seen settling onto the floor and carrying on there rather than stopping.
+  const waits = [ ...backoff, steady, steady, steady ];
 
   let attempts = 0;
 
-  const platform = makePlatformDouble({ clock, signal: shutdown.signal });
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
 
-  /* Credentials the controller refuses on every attempt. Auth faults get a small consecutive budget so a controller still sorting out its own auth state
-   * recovers, and this spends the whole of it...the waits between attempts are armed on the platform's clock, so the drain below walks the ladder on virtual time
-   * and the arm reads what the policy waited rather than waiting it out.
+  /* Credentials the controller refuses on every attempt, until the last attempt the fixture scripts aborts the shutdown signal. That abort is the only thing that
+   * ends this run: the retry's own abort check stops it and the drain below finds nothing pending, rather than walking into its step limit. The waits between
+   * attempts are armed on the platform's clock, so the drain walks the schedule on virtual time and the arm reads what the policy waited rather than waiting it
+   * out...the token in the identity is what registers this controller's teardown against the plugin's lifetime, so the abort reaches it.
    */
-  const controller = new AccessController(platform, { address: "1.2.3.4" }, async (): Promise<AccessClient> => {
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
 
     attempts++;
+
+    if(attempts === waits.length) {
+
+      shutdown.abort();
+    }
 
     throw new AccessAuthError("Bad credentials.");
   });
@@ -1192,11 +1201,12 @@ test("a login whose connect exhausts its authentication budget reports no identi
   const steps = await drainClock(clock);
 
   assert.equal(await login, "unavailable", "a connect that never succeeded leaves this controller's identity unknown");
-  assert.equal(attempts, ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, "and the budget is what stopped it, rather than a retry without end");
-  assert.equal(steps, ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT - 1, "one wait between each pair of attempts, and none after the attempt that spent the budget");
-  assert.equal(clock.now(), AUTH_BUDGET_BACKOFF_MS, "and the whole of what it waited is the two waits that ladder prescribes");
-  assert.equal(AUTH_BUDGET_BACKOFF_MS, defaultRetryBackoff(2) + defaultRetryBackoff(3),
-    "so a change to the library's ladder reddens this arm rather than drifting past it");
+  assert.equal(attempts, waits.length, "the run carries on through every refusal, and the scripted shutdown is what ends it");
+  assert.deepEqual(clock.requested, waits, "every wait follows the refusal schedule onto its floor, the one the shutdown cut short included");
+  assert.equal(steps, waits.length - 1, "one wait came due between each pair of attempts, and the one after the shutdown never did");
+  assert.equal(clock.now(), waits.slice(0, -1).reduce((total, wait) => total + wait, 0), "and the platform clock moved by exactly the waits that came due");
+  assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Bad credentials."],
+    "the refusal is reported once, and the shutdown that ends the run adds no line");
 });
 
 test("a connect that keeps failing says why once per reason, and a shutdown landing mid-attempt says nothing", async (t) => {
@@ -1210,10 +1220,10 @@ test("a connect that keeps failing says why once per reason, and a shutdown land
   const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
     info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
 
-  /* A controller that answers every attempt with a fault the retry never gives up on: the same reducer fault thrown afresh on each early attempt, then a timeout
-   * on the ones after, then a shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a reason no attempt before it
-   * gave, so a controller that reported it would add a line here...the token in the identity is what registers this controller's teardown against the plugin's
-   * lifetime, so the abort below reaches it.
+  /* A controller that answers every attempt with a fault: the same reducer fault thrown afresh on each early attempt, then a timeout on the ones after, then a
+   * shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a reason no attempt before it gave, so a controller that
+   * reported it would add a line here...the token in the identity is what registers this controller's teardown against the plugin's lifetime, so the abort below
+   * reaches it.
    */
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
 

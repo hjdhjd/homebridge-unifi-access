@@ -6,7 +6,8 @@
  * behavior the plugin actually gets rather than a test's idea of it.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DOORBELL_REASON_CODES, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
+import { ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, AccessApiError,
+  AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -321,37 +322,108 @@ test("officialDeviceModel answers an unmapped type with the type itself", () => 
   assert.equal(officialDeviceModel(""), "", "an empty type answers empty rather than inventing a placeholder");
 });
 
-test("the connect retry policy budgets authentication faults and forgives everything else", () => {
+/* Walk a fresh connect retry policy through a run of failures the way the retry helper consults it: the decision on each failure first, then the wait before the
+ * attempt about to run, numbered one past the attempt that failed. Answers the waits in order, so an arm compares a whole run against the library's schedules.
+ */
+function retryWaits(failures: readonly unknown[]): number[] {
 
-  const { shouldRetry } = createConnectRetryPolicy({ limit: 3 });
+  const { backoff, shouldRetry } = createConnectRetryPolicy();
+  const waits: number[] = [];
 
-  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), false, "the auth budget must be exhausted at the limit");
+  for(const [ index, failure ] of failures.entries()) {
 
-  // A non-auth fault resets the budget, so a controller that is merely slow to appear is retried without bound.
-  const policy = createConnectRetryPolicy({ limit: 2 });
+    assert.equal(shouldRetry(failure), true, "the retry helper asks for a wait only after the decision retries the failure");
+    waits.push(backoff(index + 2));
+  }
 
-  assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
-  assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true, "a non-auth fault must reset the consecutive auth count");
+  return waits;
+}
 
-  // A refused identity the controller answers as a result code inside a successful response spends the same budget a refused status does. The spellings are
-  // interleaved, so a policy that counted only one of them could not reach the limit here.
-  const coded = createConnectRetryPolicy({ limit: 3 });
+// Every spelling of a refusal: an identity and a privilege refusal, each as the transport's classification of a refused status and as the controller's own result
+// code answered inside a successful response.
+const REFUSAL_SPELLINGS = [ new AccessAuthError("Bad credentials."),
+  new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" }), new AccessAuthorizationError("Not an administrator."),
+  new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) ];
 
-  assert.equal(coded.shouldRetry(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), true);
-  assert.equal(coded.shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(coded.shouldRetry(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), false,
-    "a result-code identity refusal must spend the budget exactly as a refused status does");
+test("the connect retry policy waits out an ordinary fault on the library's recovery schedule, then holds at its steady floor", () => {
 
-  // A privilege refusal is a different fault from a refused identity, so it resets the budget as every other fault does. This holds that rule fixed, so a change
-  // to it is a deliberate edit here rather than a side effect.
-  const privileged = createConnectRetryPolicy({ limit: 2 });
+  // More than one failure past the last staged delay, so the floor is shown to hold rather than to be one more rung.
+  const failures = Array.from({ length: ACCESS_RECOVERY_BACKOFF_MS.length + 2 }, () => new Error("Network unreachable."));
 
-  assert.equal(privileged.shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(privileged.shouldRetry(new AccessAuthorizationError("Not an administrator.")), true);
-  assert.equal(privileged.shouldRetry(new AccessAuthError("Bad credentials.")), true, "a privilege refusal must reset the consecutive identity-refusal count");
+  assert.deepEqual(retryWaits(failures), [ ...ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS ]);
+});
+
+test("the connect retry policy waits out a refused identity or privilege, in every spelling, on the library's refusal schedule, then holds at its floor", () => {
+
+  const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
+  const expected = [ ...backoff, steady, steady ];
+
+  // Each spelling walks the whole schedule on its own, so a spelling the policy misread as an ordinary fault would open on the recovery schedule's first rung.
+  for(const refusal of REFUSAL_SPELLINGS) {
+
+    assert.deepEqual(retryWaits(Array.from({ length: expected.length }, () => refusal)), expected, refusal.message);
+  }
+
+  // A refused identity and a refused privilege are one class, so a run that moves between them in either spelling walks one schedule rather than restarting it.
+  const interleaved = Array.from({ length: expected.length }, (_, index) => REFUSAL_SPELLINGS[index % REFUSAL_SPELLINGS.length]);
+
+  assert.deepEqual(retryWaits(interleaved), expected);
+});
+
+test("the connect retry policy reads a refusal a bootstrap error carries as its cause as a refusal, and any other wrapped fault as an ordinary one", () => {
+
+  const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
+  const refusalWaits = [ ...backoff, steady, steady ];
+  const refusals = [ new AccessAuthorizationError("Not an administrator."),
+    new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) ];
+
+  /* The credential path's bootstrap wraps a refused document read, whether the controller refused it by status or by result code, as the cause of a fetch-stage
+   * bootstrap error. That is a controller that accepted the account and refused it a privilege, so the wrapper waits exactly as the bare refusal does.
+   */
+  for(const refusal of refusals) {
+
+    const wrapped = new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause: refusal, stage: "fetch" });
+
+    assert.deepEqual(retryWaits(Array.from({ length: refusalWaits.length }, () => wrapped)), refusalWaits, refusal.message);
+  }
+
+  // A document that arrived and could not be read carries no refusal, so its wrapper walks the recovery schedule like any other fault.
+  const unreadable = new AccessBootstrapError("Unable to parse the UniFi Access controller configuration.",
+    { cause: new TypeError("The topology endpoint answered with no document."), stage: "parse" });
+
+  assert.deepEqual(retryWaits(Array.from({ length: ACCESS_RECOVERY_BACKOFF_MS.length + 2 }, () => unreadable)),
+    [ ...ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS ]);
+});
+
+test("the connect retry policy starts the new class's schedule at its first rung whenever the class of fault changes, in both directions", () => {
+
+  const refusal = new AccessAuthError("Bad credentials.");
+  const unreachable = new Error("Network unreachable.");
+  const [ firstRecovery, secondRecovery, thirdRecovery ] = ACCESS_RECOVERY_BACKOFF_MS;
+  const [ firstRefusal, secondRefusal ] = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS.backoff;
+
+  /* A run of ordinary faults, then refusals, then ordinary faults again. The walk hands each wait the retry helper's own attempt number, which counts the whole run,
+   * so a wait that read it would land each change partway down the new schedule rather than on its first rung.
+   */
+  assert.deepEqual(retryWaits([ unreachable, unreachable, unreachable, refusal, refusal, unreachable, unreachable ]),
+    [ firstRecovery, secondRecovery, thirdRecovery, firstRefusal, secondRefusal, firstRecovery, secondRecovery ]);
+});
+
+test("the connect retry policy retries every class of fault at every rung of its schedule, its steady floor included", () => {
+
+  const failures = [ new Error("Network unreachable."), new TypeError("Cannot read properties of undefined (reading 'doors')"), ...REFUSAL_SPELLINGS ];
+  // More than one failure past the longer schedule's last staged delay, so every class is asked about on its floor as well as on each of its rungs.
+  const run = Math.max(ACCESS_RECOVERY_BACKOFF_MS.length, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS.backoff.length) + 2;
+
+  for(const failure of failures) {
+
+    const { shouldRetry } = createConnectRetryPolicy();
+
+    for(let attempt = 1; attempt <= run; attempt++) {
+
+      assert.equal(shouldRetry(failure), true, "nothing gives up, so every failure of every class is retried");
+    }
+  }
 });
 
 test("the connect retry policy reports a run's first failure, and a repeat of the same reason stays silent", () => {
@@ -393,25 +465,26 @@ test("the connect retry policy reports again whenever the reason changes, includ
   assert.deepEqual(reports, [ "Request timed out", "Unexpected reducer fault", "Request timed out" ]);
 });
 
-test("the connect retry policy reports auth faults on the same terms while they still spend the budget", () => {
+test("the connect retry policy reports refusals on the same terms as any other fault", () => {
 
   const reports: string[] = [];
-  const { shouldRetry } = createConnectRetryPolicy({ limit: 3, onFailure: (reason: string): void => void reports.push(reason) });
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
 
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
-  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), false, "reporting must leave the auth budget exhausted at the limit");
-  assert.deepEqual(reports, ["Bad credentials"], "a run of the same auth fault reports once, like any other");
+  assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.deepEqual(reports, ["Bad credentials"], "a run of the same refusal reports once, like any other fault");
 
-  /* The attempt that spends the budget carries a reason no attempt before it did, so a policy that reported before deciding would announce a retry that never
-   * comes. The attempt the policy refuses belongs to the caller's terminal line, and nothing is reported for it here.
+  /* A changed reason is reported whether or not it changes the schedule. An unreachable controller that starts refusing the identity changes both, while a refused
+   * identity giving way to a refused privilege stays on the one refusal schedule and still reads to a user as a different reason.
    */
-  const refused: string[] = [];
-  const policy = createConnectRetryPolicy({ limit: 1, onFailure: (reason: string): void => void refused.push(reason) });
+  const changes: string[] = [];
+  const policy = createConnectRetryPolicy({ onFailure: (reason: string): void => void changes.push(reason) });
 
   assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
-  assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), false);
-  assert.deepEqual(refused, ["Network unreachable"]);
+  assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true);
+  assert.equal(policy.shouldRetry(new AccessAuthorizationError("Not an administrator.")), true);
+  assert.deepEqual(changes, [ "Network unreachable", "Bad credentials", "Not an administrator" ]);
 });
 
 test("canTransition refuses same-phase and terminal moves while permitting every legitimate one", () => {

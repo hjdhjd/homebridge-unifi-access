@@ -8,8 +8,8 @@
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
 /* eslint-disable camelcase */
-import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessCertificateError, AccessClient, AccessNetworkError, AccessStallError,
-  AccessThrottledError, AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
+import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessNetworkError,
+  AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
 import type { AccessCapabilities, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -278,6 +278,17 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
 
   // The default arm: an unclassified throw is connectivity to a user, so it answers the same honest reason.
   assert.equal(classifyStatusError(new Error("Anything else.")), "unreachable");
+});
+
+test("classifyStatusError reads a refusal a bootstrap error carries as its cause as a refused sign-in, and any other wrapped fault as unreachable", () => {
+
+  // The credential path's bootstrap wraps a refused document read as the cause of a fetch-stage bootstrap error, and the panel reads the refusal it carries.
+  assert.equal(classifyStatusError(new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.",
+    { cause: new AccessAuthorizationError("Not an administrator."), stage: "fetch" })), "auth-invalid");
+
+  // A document that arrived and could not be read carries no refusal, so its wrapper answers the default.
+  assert.equal(classifyStatusError(new AccessBootstrapError("Unable to parse the UniFi Access controller configuration.",
+    { cause: new TypeError("The topology endpoint answered with no document."), stage: "parse" })), "unreachable");
 });
 
 test("the row policy answers a wired hub's rows from the entry the store established", () => {

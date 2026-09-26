@@ -17,8 +17,8 @@
  */
 import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions, ConnectionEvents,
   ConnectionState, StateStore } from "unifi-access";
-import { AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isIdentityRefusal, isPrivilegeRefusal, isReader, isTamperCapable,
-  selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
+import { AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, isSignInRefusal, isTamperCapable, selectController,
+  selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
   dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
@@ -178,9 +178,9 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
 
 /**
  * Classify a connect failure into the wire contract's error vocabulary. The readings are the library's own: a refused identity or a refused privilege, in every
- * spelling {@link isIdentityRefusal} and {@link isPrivilegeRefusal} read, answers `auth-invalid`, a timeout or a stalled bootstrap answers `timeout`, and a
- * certificate that does not verify answers `misconfigured`. Everything else - the library's remaining network and throttle classes among them - answers
- * `unreachable`, the honest default: the panel's unreachable copy names connectivity, which is what an unclassified throw is to a user.
+ * spelling {@link isSignInRefusal} reads, the one a refused bootstrap document read carries as its cause included, answers `auth-invalid`, a timeout or a stalled
+ * bootstrap answers `timeout`, and a certificate that does not verify answers `misconfigured`. Everything else - the library's remaining network and throttle
+ * classes among them - answers `unreachable`, the honest default: the panel's unreachable copy names connectivity, which is what an unclassified throw is to a user.
  *
  * The identity-composition rejection deliberately does not route through here: it is a refusal to attempt, not a thrown failure, so the view path answers it with
  * `auth-missing` directly.
@@ -191,7 +191,7 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
  */
 export function classifyStatusError(error: unknown): StatusErrorReason {
 
-  if(isIdentityRefusal(error) || isPrivilegeRefusal(error)) {
+  if(isSignInRefusal(error)) {
 
     return "auth-invalid";
   }

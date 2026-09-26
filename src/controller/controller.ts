@@ -29,8 +29,8 @@ import type { AccessPlatform } from "../platform.ts";
  * controller transitively owns the whole accessory graph, its observe loops, and its webhook lifecycle, and none of that can be exercised at all if the one call
  * that establishes a client cannot be answered.
  *
- * The port only decides WHAT connect is called. Everything around it - the startup-resilient retry, the auth budget, the shutdown checks - is the controller's own
- * and is unaffected by which implementation answers.
+ * The port only decides WHAT connect is called. Everything around it - the startup-resilient retry, the schedule it chooses for each failure, the shutdown checks -
+ * is the controller's own and is unaffected by which implementation answers.
  */
 export type AccessControllerConnect = (options: ConnectOptions) => Promise<AccessClient>;
 
@@ -318,8 +318,9 @@ export class AccessController {
 
   /* Establish a connection to the Access controller. AccessClient.connect() is atomic - it authenticates, fetches what the identity can reach, seeds the state
    * model, and brings the realtime channel up as one ready-or-throws operation, owning recovery and the periodic refresh failsafe internally. We wrap it in a
-   * startup-resilient retry: authentication faults get a small consecutive budget so a controller still sorting out its own auth recovers, while genuinely-wrong
-   * credentials fail fast rather than looping forever, and any non-auth fault resets the budget and retries unbounded until the controller appears or we shut down.
+   * startup-resilient retry that waits by the library's own recovery schedules: its slower refusal schedule while the controller refuses the identity or its
+   * privilege, and its recovery schedule for every other fault. The retry never gives up...it runs until the controller accepts us or we shut down, so a password or
+   * role corrected on the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
    *
    * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
    * serving it out in real seconds.
@@ -330,7 +331,7 @@ export class AccessController {
    */
   async #connect(): Promise<boolean> {
 
-    const { shouldRetry } = createConnectRetryPolicy({
+    const { backoff, shouldRetry } = createConnectRetryPolicy({
 
       onFailure: (reason: string): void => {
 
@@ -346,17 +347,11 @@ export class AccessController {
     try {
 
       this.client = await retry((signal) => this.#connectClient({ host: this.config.address, log: this.#clientLog, signal,
-        verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, clock: this.platform.clock, shouldRetry, signal: this.signal });
-    } catch(error) {
+        verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, backoff, clock: this.platform.clock, shouldRetry, signal: this.signal });
+    } catch {
 
-      // The shutdown signal aborting the retry is an orderly teardown, not a failure to report. An exhausted auth budget surfaces here.
-      if(this.#isShuttingDown()) {
-
-        return false;
-      }
-
-      this.log.error("Unable to connect to the UniFi Access controller: %s.", formatErrorMessage(error));
-
+      // The retry rejects only on the shutdown abort, because the policy never vetoes an attempt and the attempts are unbounded. That is an orderly teardown, not a
+      // failure to report.
       return false;
     }
 

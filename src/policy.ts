@@ -13,14 +13,14 @@
  * it reads, pure builtins - the address classifier and the WHATWG URL parser, which the endpoint composition and the path match branch on - and the library's own
  * published vocabulary, which is read through rather than restated anywhere here.
  */
-import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, isEnterpriseHubRecord, isHub, isIdentityRefusal, isReader, normalizeActorType,
-  normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
-import { ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
+import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS,
+  isEnterpriseHubRecord, isHub, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
+import { ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
 import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
-import type { FeatureOptionChoice, Nullable } from "homebridge-plugin-utils";
+import type { FeatureOptionChoice, Nullable, RetryBackoff } from "homebridge-plugin-utils";
 import { formatErrorMessage, sameEntries, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import { AccessReservedNames } from "./types.ts";
@@ -123,41 +123,68 @@ export function canTransition(options: { from: AccessControllerPhase; to: Access
   return (from !== to) && (from !== "shuttingDown");
 }
 
-/**
- * The startup-resilient connect retry policy, as a pure stateful predicate factory. Identity refusals get a small consecutive budget so a controller still sorting
- * out its own auth state recovers, but genuinely-wrong credentials fail fast rather than looping forever. A refusal the controller answers as a result code inside a
- * successful response counts the same as one it answers as a status, because {@link isIdentityRefusal}, the library's statement of every spelling, is what reads
- * it. Any other fault - network, transient - resets the budget, so a slow-to-appear controller is retried without bound. A pure factory, so the budget logic is
- * testable without standing up a client.
- *
- * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A failed attempt the policy retries hands its reason to
- * `onFailure` when the run's first failure arrives and again whenever the reason changes, so a caller hears why the connect is failing and when that changes rather
- * than hearing every attempt. The comparison is on the formatted reason, the text a user reads, so two faults that read identically are one reason and a timeout
- * giving way to a different fault is two. An attempt the policy refuses to retry is never reported here...the caller's own terminal line owns that outcome.
- *
- * @param options - The consecutive-auth-failure ceiling, and the callback that receives each newly-arrived reason, each optional.
- *
- * @returns A `shouldRetry` predicate suitable for the retry options; it closes over the running consecutive-auth count and the last reason reported.
- */
-export function createConnectRetryPolicy({ limit = ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT, onFailure }: { limit?: number;
-  onFailure?: (reason: string) => void; } = {}): { shouldRetry: (error: unknown) => boolean } {
+// The library's recovery schedule, its staged delays and its steady floor composed into the shape its refusal schedule is published in, so the connect retry holds
+// either schedule the same way. This mirrors how the library composes the same pair for its own recovery loop, and it reads the library's numbers rather than
+// restating them.
+const RECOVERY_SCHEDULE_MS = { backoff: ACCESS_RECOVERY_BACKOFF_MS, steady: ACCESS_RECOVERY_STEADY_INTERVAL_MS } as const;
 
-  let consecutiveAuth = 0;
+/**
+ * The startup-resilient connect retry policy, as a pure stateful factory: the decision the retry consults after each failed attempt, and the wait it asks for before
+ * the next one. The waits are the library's own recovery schedules, read through rather than restated, so a controller that fails at startup is retried on the
+ * cadence the library's recovery loop keeps for one that fails mid-session. A pure factory, so the schedule logic is testable without standing up a client.
+ *
+ * A refused identity or a refused privilege waits by the library's refusal schedule, and every other fault by its recovery schedule. A refusal is a fact about the
+ * identity rather than the network - the controller answered, and asking again moments later cannot change its answer - and UniFi OS locks an account after
+ * repeated failed sign-ins, so a refusal backs off slowly while a controller that is merely slow to appear is probed at once and then at a quicker pace. What
+ * counts as a refusal is the library's one reading of a refused sign-in, {@link isSignInRefusal}: every spelling of a refused identity or privilege, the one a
+ * refused bootstrap document read carries as its cause included, which is the same reading that chooses the library's own recovery schedule. Each schedule is
+ * walked from its first rung when its class of fault begins, so a change of class restarts the new schedule rather than landing partway down it...a refusal that
+ * follows a stretch of unreachability backs off from its own first refusal, and a controller that stops refusing and becomes unreachable is probed at once. Each
+ * schedule settles onto a steady floor it holds for as long as the run lasts, so nothing here gives up: the decision always answers true, and the caller's
+ * shutdown is the only end of a run that never connects.
+ *
+ * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A failed attempt hands its reason to `onFailure` when the
+ * run's first failure arrives and again whenever the reason changes, so a caller hears why the connect is failing and when that changes rather than hearing every
+ * attempt. The comparison is on the formatted reason, the text a user reads, so two faults that read identically are one reason and a timeout giving way to a
+ * different fault is two.
+ *
+ * @param options - The callback that receives each newly-arrived reason, optional.
+ *
+ * @returns The `backoff` and `shouldRetry` pair for the retry options. They close over whether the last failure was a refusal, the run's rung on that class's
+ * schedule, and the last reason reported.
+ */
+export function createConnectRetryPolicy({ onFailure }: { onFailure?: (reason: string) => void } = {}): { backoff: RetryBackoff;
+  shouldRetry: (error: unknown) => boolean; } {
+
+  let refused = false;
   let reported: string | undefined;
+  let rung = 0;
 
   return {
 
+    /* The wait before the next attempt: the current class's rung on its schedule, or that schedule's steady floor once the rungs are spent. The retry hands this the
+     * number of the attempt about to run, and it is ignored, because that number counts every attempt in the run while the rung is counted per class...reading it
+     * would land a change of class partway down the new schedule. The retry asks for a wait only after the decision below has recorded the failure it follows.
+     */
+    backoff: (): number => {
+
+      const schedule = refused ? ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS : RECOVERY_SCHEDULE_MS;
+
+      return schedule.backoff[rung - 1] ?? schedule.steady;
+    },
+
     shouldRetry: (error: unknown): boolean => {
 
-      // A fault that is not an identity refusal resets the budget. An identity refusal that spends the last of it ends the run, and the caller's terminal line
-      // reports why.
-      if(!isIdentityRefusal(error)) {
+      const refusal = isSignInRefusal(error);
 
-        consecutiveAuth = 0;
-      } else if(++consecutiveAuth >= limit) {
+      // A change of class restarts the rung count, so the wait that follows walks the new class's schedule from its first rung.
+      if(refusal !== refused) {
 
-        return false;
+        refused = refusal;
+        rung = 0;
       }
+
+      rung++;
 
       const reason = formatErrorMessage(error);
 

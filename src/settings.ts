@@ -10,10 +10,6 @@ export const PLUGIN_NAME = "homebridge-unifi-access";
 // The platform the plugin creates.
 export const PLATFORM_NAME = "UniFi Access";
 
-// How many consecutive authentication failures a connect attempt is given before we stop retrying. A controller still sorting out its own auth state after a restart
-// deserves a few attempts, but credentials that are simply wrong should say so rather than looping in silence.
-export const ACCESS_CONTROLLER_AUTH_FAILURE_LIMIT = 3;
-
 // Default delay, in seconds, before removing Access devices that no longer exist.
 export const ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL = 60;
 
