@@ -8,16 +8,10 @@
  */
 import type { AccessAccessoryContext } from "./types.ts";
 import type { AccessPlatform } from "./platform.ts";
+import type { Equal } from "homebridge-plugin-utils/testing";
 import type { PlatformAccessory } from "homebridge";
 import assert from "node:assert/strict";
 import test from "node:test";
-
-/* Strict type equality, rather than bare assignability. The deferred conditional makes the checker compare the two types structurally in both directions, which is
- * what refuses a member widened to any - an assignability check accepts such a member happily and would let the context contract rot unnoticed. The type parameter
- * appears once in each signature by construction, which is the whole mechanism, so the arity rule is disabled rather than satisfied.
- */
-// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 
 // The platform's accessory list is threaded with our own context type rather than homebridge's unknown-context default.
 const accessoryIsThreaded: Equal<AccessPlatform["accessories"][number], PlatformAccessory<AccessAccessoryContext>> = true;

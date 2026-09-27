@@ -344,7 +344,7 @@ test("a publish through makeControllerDouble reaches the broker it was given and
 
   controller.mqttPublish("t", "p");
 
-  assert.deepEqual(mqtt.published, [{ payload: "p", topic: "t" }], "the publish chokepoint hands the broker exactly what it was called with");
+  assert.deepEqual(mqtt.published, [{ payload: "p", retain: false, topic: "t" }], "the publish chokepoint hands the broker exactly what it was called with");
 
   // A double standing up without a broker publishes into nothing rather than throwing, which is what lets every arm that never mentions MQTT build one bare.
   makeControllerDouble().mqttPublish("t", "p");

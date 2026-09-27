@@ -59,8 +59,8 @@
   "main": "dist/index.js",
   "dependencies": {
     "@homebridge/plugin-ui-utils": "2.2.6",
-    "homebridge-plugin-utils": "2.4.0",
-    "unifi-access": "2.0.1"
+    "homebridge-plugin-utils": "file:../homebridge-plugin-utils",
+    "unifi-access": "file:../unifi-access"
   },
   "devDependencies": {
     "@stylistic/eslint-plugin": "5.10.0",

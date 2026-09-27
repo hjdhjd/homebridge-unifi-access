@@ -5,17 +5,15 @@
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
+import { freePort, settle } from "homebridge-plugin-utils/testing";
 import { mock, test } from "node:test";
 import { APIEvent } from "homebridge-plugin-utils";
 import type { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
 import { format } from "node:util";
 import { makeControllerDouble } from "./testing.helpers.ts";
-import { once } from "node:events";
 import { serialForm } from "./policy.ts";
-import { settle } from "homebridge-plugin-utils/testing";
 
 interface Harness {
 
@@ -79,32 +77,6 @@ function makeHarness(): Harness {
 
   return { events, handlers, lines, make: (config: AccessPlatformConfig): AccessPlatform => new AccessPlatform(log as unknown as Logging, config,
     api as unknown as API), registered, unregistered, updated };
-}
-
-/* A port nothing on this machine is holding: asked of the kernel exactly the way an ephemeral bind asks for one, then released, so the arm below binds a real socket
- * on a port it can state rather than contending for a fixed one anything else might already hold.
- *
- * @returns The port the kernel chose and then let go of.
- */
-async function freePort(): Promise<number> {
-
-  const server = createServer();
-
-  server.listen(0);
-
-  await once(server, "listening");
-
-  const address = server.address();
-
-  assert.ok(address && (typeof address === "object"), "a listening socket reports its address as an object, which is what carries the port the kernel chose");
-
-  const port = address.port;
-
-  server.close();
-
-  await once(server, "close");
-
-  return port;
 }
 
 /* The platform's own plumbing as the arms below drive it: the controllers it constructed, the launch that starts them, and the reclaim that consumes their

@@ -2090,7 +2090,7 @@ test("the publish chokepoint forwards the caller's own per-publish options to th
   await settle(DISPATCH_SETTLE_TURNS);
 
   // A publish with no options lands; one carrying an already-aborted signal is refused on that signal, which proves the options reached the client.
-  assert.deepEqual(mqtt.published, [{ payload: "true", topic: "AABBCCDDEEFF/lock" }]);
+  assert.deepEqual(mqtt.published, [{ payload: "true", retain: false, topic: "AABBCCDDEEFF/lock" }]);
   assert.deepEqual(debugs, ["MQTT publish aborted: AABBCCDDEEFF/lock."]);
 });
 

@@ -8,13 +8,12 @@ import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
   AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts, OfficialApi } from "unifi-access";
 import type { AccessMethodKey, DoorServiceType, HubSensorName, LogEventName } from "../policy.ts";
+import type { AcquireServiceResult, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import type { CharacteristicValue, Service } from "homebridge";
-import type { MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { acquireService, capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic,
-  validService } from "homebridge-plugin-utils";
+import { capabilityGate, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic, validService } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessConsumedWebhookDelivery } from "./device.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -83,8 +82,8 @@ const SIDE_DOOR_DPS_LABEL = "Side Door Position Sensor";
 /* Which pass a configure path is running as. At adoption, the services the accessory arrived carrying - restored from Homebridge's accessory cache with the values
  * they last held and none of their handlers - have been dressed by nobody, so every service the pass acquires is dressed: its handlers, its primary marking, and its
  * starting values. On every later pass, the re-gate a device update or a door-state delivery runs, those services were dressed at adoption, so only a service the
- * pass creates is. The pass states the one fact the library cannot know: its creation callback tells a created service from a found one, and only the caller knows
- * whether a found service was dressed already.
+ * pass creates is. The pass states the one fact the library cannot know: the transition a service helper answers tells a created service from a found one, and only
+ * the caller knows whether a found service was dressed already.
  */
 interface ConfigurePass {
 
@@ -567,28 +566,24 @@ export class AccessHub extends AccessDevice {
     // The methods the user selected switches for, read afresh on every pass so a changed selection is what the next pass materializes or retires, and read
     // against the catalog's own spellings so a hand-written entry selects a method in whatever case it named it.
     const selected = this.getFeatureValueList("AccessMethod.Switches", accessMethodChoices().map(choice => choice.value));
+    const { initialized } = this.#switchPass;
 
     for(const accessMethod of accessMethods) {
 
       // Validate whether we should have this service enabled.
-      if(!validService(this.accessory, this.hap.Service.Switch,
-        isReader(this.uda) && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice), accessMethod.subtype)) {
+      const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + accessMethod.name,
+        serviceType: this.hap.Service.Switch, subtype: accessMethod.subtype,
+        validate: isReader(this.uda) && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice) });
+
+      if(!service) {
 
         continue;
       }
 
-      let initialized = this.#switchPass.initialized;
-
-      const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " " + accessMethod.name, accessMethod.subtype, () => {
-
-        // A switch created on this pass was dressed by nobody, whichever pass this is.
-        initialized = false;
-      });
-
       /* The handlers are registered the first time this hub holds the switch: they read the model live and are closures over this instance, so a repeat pass
-       * registers nothing on a switch already standing.
+       * registers nothing on a switch already standing. A switch this pass attached was dressed by nobody, whichever pass this is.
        */
-      if(!initialized) {
+      if(!initialized || (transition === "attached")) {
 
         // Retrieve the state when requested, through the device's Not Responding rule like every reader.
         service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.#accessMethodEnabled(accessMethod.key)));
@@ -1017,7 +1012,10 @@ export class AccessHub extends AccessDevice {
   private configureDoorbell({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Doorbell, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell"))) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName, serviceType: this.hap.Service.Doorbell,
+      validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell") });
+
+    if(!service) {
 
       // The topic follows the service out, so nothing answers on it once the doorbell is gone.
       this.#doorbellTopic?.abort();
@@ -1026,13 +1024,12 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.Doorbell, this.accessoryName, undefined, () => {
+    if(transition === "attached") {
 
-      initialized = false;
       this.log.info("Enabling the doorbell.");
-    });
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }
@@ -1079,42 +1076,49 @@ export class AccessHub extends AccessDevice {
       const reservedId = AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames];
       const gate = capabilityGate({ capability: facts.wired === true, toggle: selected.includes(member) });
 
-      // Validate whether we should have this service enabled.
-      if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
+      // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
+      const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + label, serviceType: this.hap.Service.ContactSensor,
+        subtype: reservedId, validate: (hasService: boolean) => {
 
-        const isValid = gate(hasService);
+          const isValid = gate(hasService);
 
-        if(!isValid && hasService) {
+          if(!isValid && hasService) {
 
-          this.log.info("Disabling the " + label.toLowerCase() + ".");
-        }
+            this.log.info("Disabling the " + label.toLowerCase() + ".");
+          }
 
-        return isValid;
-      }, reservedId)) {
+          return isValid;
+        } });
+
+      if(!service) {
 
         continue;
       }
 
-      // Acquire the sensor, dressed with the input's own reading the first time this hub holds it.
-      this.#acquireSensor({ initialized, label, reading: this.#contactReading(facts), subtype: reservedId });
+      // Dress the sensor with the input's own reading the first time this hub holds it.
+      this.#acquireSensor({ initialized, label, reading: this.#contactReading(facts), service, transition });
     }
   }
 
-  /* Acquire a contact sensor under its reserved subtype and dress it the first time this hub holds it. The library's callback tells a created sensor from one
-   * found on the accessory, and the pass tells whether a found sensor is one an earlier pass dressed: restored from the accessory cache, it carries the values it
-   * last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting values, with the
-   * tamper attach below the one exception; every change after it reaches the sensor through the sweeps alone.
+  /* Complete the acquisition of a contact sensor its gate answered, dressing it the first time this hub holds it. The transition the gate answers tells a created
+   * sensor from one found on the accessory, and the pass tells whether a found sensor is one an earlier pass dressed: restored from the accessory cache, it carries
+   * the values it last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting
+   * values, with the tamper attach below the one exception; every change after it reaches the sensor through the sweeps alone.
    *
-   * @param options - The pass this acquire runs as, the sensor's label, the reading it is dressed with, and the reserved subtype it is acquired under.
+   * The gate's own answer is what this reads rather than a second lookup, because a lookup after the gate would find the sensor the gate just created and answer
+   * it as kept, and a sensor created on a device update would go undressed.
+   *
+   * @param options - The pass this acquisition runs as, the sensor's label, the reading it is dressed with, and the sensor and transition its gate answered.
    */
-  #acquireSensor({ initialized, label, reading, subtype }: ConfigurePass & { label: string; reading: CharacteristicValue; subtype: AccessReservedNames }): void {
+  #acquireSensor({ initialized, label, reading, service, transition }: ConfigurePass & AcquireServiceResult & { label: string; reading: CharacteristicValue }): void {
 
-    const service = acquireService(this.accessory, this.hap.Service.ContactSensor, this.accessoryName + " " + label, subtype, () => {
+    // A sensor this pass attached was dressed by nobody, whichever pass this is.
+    const dressing = !initialized || (transition === "attached");
 
-      // A sensor created on this pass was dressed by nobody, whichever pass this is.
-      initialized = false;
+    if(transition === "attached") {
+
       this.log.info("Enabling the " + label.toLowerCase() + ".");
-    });
+    }
 
     /* The tamper characteristic's presence follows the capability in both directions on every pass: the library attaches it where the hardware reports tampering and
      * removes it where the hardware stopped, so a sensor dressed before the capability arrived gains the characteristic and one carried from a cache the hardware
@@ -1122,7 +1126,7 @@ export class AccessHub extends AccessDevice {
      */
     const tamper = validCharacteristic({ characteristic: this.hap.Characteristic.StatusTampered, service, validate: isTamperCapable(this.uda) });
 
-    if(!initialized) {
+    if(dressing) {
 
       this.#dressSensor(service, reading);
     }
@@ -1131,7 +1135,7 @@ export class AccessHub extends AccessDevice {
      * being dressed and the characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose
      * characteristic stood already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
      */
-    if((tamper === "attached") || (!initialized && (tamper === "kept"))) {
+    if((tamper === "attached") || (dressing && (tamper === "kept"))) {
 
       service.updateCharacteristic(this.hap.Characteristic.StatusTampered, this.#tamperRendering(this.tamperVerdict));
       service.getCharacteristic(this.hap.Characteristic.StatusTampered).onGet(this.answering(() => this.#tamperRendering(this.tamperVerdict)));
@@ -1184,24 +1188,27 @@ export class AccessHub extends AccessDevice {
     const capability = (this.uda.device_type === "UGT") || this.dpsEvidence;
     const gate = capabilityGate({ capability, toggle: this.#selectedSensors().includes("DPS") });
 
-    // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
+    // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + DPS_LABEL, serviceType: this.hap.Service.ContactSensor,
+      subtype: AccessReservedNames.CONTACT_DPS, validate: (hasService: boolean) => {
 
-      const isValid = gate(hasService);
+        const isValid = gate(hasService);
 
-      if(!isValid && hasService) {
+        if(!isValid && hasService) {
 
-        this.log.info("Disabling the " + DPS_LABEL.toLowerCase() + ".");
-      }
+          this.log.info("Disabling the " + DPS_LABEL.toLowerCase() + ".");
+        }
 
-      return isValid;
-    }, AccessReservedNames.CONTACT_DPS)) {
+        return isValid;
+      } });
+
+    if(!service) {
 
       return;
     }
 
     // The reading is the projection the delivery path maintains, so a dressing writes what we already hold rather than a fresh read of the record.
-    this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, subtype: AccessReservedNames.CONTACT_DPS });
+    this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, service, transition });
   }
 
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
@@ -1213,22 +1220,26 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // Validate whether we should have this service enabled. We check the hasSideDoorDps hint, which already incorporates the feature option check.
-    if(!validService(this.accessory, this.hap.Service.ContactSensor, (hasService: boolean) => {
+    // Validate whether we should have this service enabled. We check the hasSideDoorDps hint, which already incorporates the feature option check, and a true
+    // verdict acquires the sensor, creating it where the accessory carries none.
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + SIDE_DOOR_DPS_LABEL,
+      serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE, validate: (hasService: boolean) => {
 
-      if(!this.hints.hasSideDoorDps && hasService) {
+        if(!this.hints.hasSideDoorDps && hasService) {
 
-        this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
-      }
+          this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
+        }
 
-      return this.hints.hasSideDoorDps;
-    }, AccessReservedNames.CONTACT_DPS_SIDE)) {
+        return this.hints.hasSideDoorDps;
+      } });
+
+    if(!service) {
 
       return;
     }
 
     // The reading is the projection the side door's delivery maintains, for the same reason the main door's is.
-    this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, subtype: AccessReservedNames.CONTACT_DPS_SIDE });
+    this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, service, transition });
   }
 
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
@@ -1252,18 +1263,19 @@ export class AccessHub extends AccessDevice {
     }
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, selectedService, isHub(this.uda))) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName, serviceType: selectedService, validate: isHub(this.uda) });
+
+    if(!service) {
 
       return;
     }
 
-    const service = acquireService(this.accessory, selectedService, this.accessoryName, undefined, () => {
+    if(transition === "attached") {
 
-      initialized = false;
       this.log.info("Presenting the door in HomeKit as a %s.", (this.doorServiceType === "GarageDoorOpener") ? "garage door opener" : "lock");
-    });
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }
@@ -1423,20 +1435,20 @@ export class AccessHub extends AccessDevice {
   private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger"),
-      AccessReservedNames.SWITCH_DOORBELL_TRIGGER)) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Doorbell Trigger", serviceType: this.hap.Service.Switch,
+      subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER, validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
+
+    if(!service) {
 
       return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Doorbell Trigger",
-      AccessReservedNames.SWITCH_DOORBELL_TRIGGER, () => {
+    if(transition === "attached") {
 
-        initialized = false;
-        this.log.info("Enabling the doorbell automation trigger.");
-      });
+      this.log.info("Enabling the doorbell automation trigger.");
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }
@@ -1519,20 +1531,20 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger"),
-      AccessReservedNames.SWITCH_LOCK_TRIGGER)) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Lock Trigger", serviceType: this.hap.Service.Switch,
+      subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER, validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
+
+    if(!service) {
 
       return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_TRIGGER, () => {
+    if(transition === "attached") {
 
-        initialized = false;
-        this.log.info("Enabling the lock automation trigger.");
-      });
+      this.log.info("Enabling the lock automation trigger.");
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }
@@ -1561,18 +1573,20 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.LockMechanism, this.hints.hasSideDoor, AccessReservedNames.LOCK_DOOR_SIDE)) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Side Door", serviceType: this.hap.Service.LockMechanism,
+      subtype: AccessReservedNames.LOCK_DOOR_SIDE, validate: this.hints.hasSideDoor });
+
+    if(!service) {
 
       return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.LockMechanism, this.accessoryName + " Side Door", AccessReservedNames.LOCK_DOOR_SIDE, () => {
+    if(transition === "attached") {
 
-      initialized = false;
       this.log.info("Configuring side door lock.");
-    });
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }
@@ -1592,20 +1606,20 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    if(!validService(this.accessory, this.hap.Service.Switch, this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger"),
-      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER)) {
+    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Side Door Lock Trigger", serviceType: this.hap.Service.Switch,
+      subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
+
+    if(!service) {
 
       return;
     }
 
-    const service = acquireService(this.accessory, this.hap.Service.Switch, this.accessoryName + " Side Door Lock Trigger",
-      AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, () => {
+    if(transition === "attached") {
 
-        initialized = false;
-        this.log.info("Enabling the side door lock automation trigger.");
-      });
+      this.log.info("Enabling the side door lock automation trigger.");
+    }
 
-    if(initialized) {
+    if(initialized && (transition !== "attached")) {
 
       return;
     }

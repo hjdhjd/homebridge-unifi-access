@@ -1748,7 +1748,7 @@ test("every publish carries the device's own lifetime signal, and one issued aft
   await settle();
 
   // Before the removal the publish is admitted, and it carries this device's own signal rather than the controller's.
-  assert.deepEqual(harness.mqtt.published, [{ payload: "true", topic: HUB_SERIAL + "/lock" }]);
+  assert.deepEqual(harness.mqtt.published, [{ payload: "true", retain: false, topic: HUB_SERIAL + "/lock" }]);
   assert.equal(harness.publishes[0]?.init?.signal, harness.hub.signal, "a publish must carry the device's own lifetime signal");
 
   harness.hub.cleanup();
@@ -1757,7 +1757,7 @@ test("every publish carries the device's own lifetime signal, and one issued aft
   await settle();
 
   // After it, the client refuses the publish on the signal it carries and says so at debug; nothing reaches the broker and nothing is an error.
-  assert.deepEqual(harness.mqtt.published, [{ payload: "true", topic: HUB_SERIAL + "/lock" }], "a publish after removal must never reach the broker");
+  assert.deepEqual(harness.mqtt.published, [{ payload: "true", retain: false, topic: HUB_SERIAL + "/lock" }], "a publish after removal must never reach the broker");
   assert.equal(harness.publishes[1]?.init?.signal?.aborted, true);
   assert.deepEqual(harness.debugs, ["MQTT publish aborted: " + HUB_SERIAL + "/lock."]);
   assert.deepEqual(harness.errors, []);
@@ -3138,7 +3138,8 @@ test("the door guard filter reads the selected guards at device scope and admits
   filtered.emit("access.remote_view", ringPacket(["guard-b"]));
   filtered.emit("access.remote_view", ringPacket(["guard-c"]));
 
-  assert.deepEqual(filtered.mqtt.published.filter(entry => entry.topic === HUB_SERIAL + "/doorbell"), [{ payload: "true", topic: HUB_SERIAL + "/doorbell" }]);
+  assert.deepEqual(filtered.mqtt.published.filter(entry => entry.topic === HUB_SERIAL + "/doorbell"),
+    [{ payload: "true", retain: false, topic: HUB_SERIAL + "/doorbell" }]);
   assert.equal(lineCount(filtered, "Doorbell ring detected."), 1);
   assert.deepEqual(filtered.debugs.filter(line => line.startsWith(LOG_PREFIX + "Doorbell ring ignored")),
     [LOG_PREFIX + "Doorbell ring ignored: no door guard matched the configured filter."]);
