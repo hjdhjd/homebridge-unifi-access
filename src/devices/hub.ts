@@ -2,7 +2,7 @@
  *
  * hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, tamperState, terminalInput } from "unifi-access";
+import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, portBindings, tamperState, terminalInput } from "unifi-access";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT } from "../controller/events.ts";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
@@ -319,7 +319,8 @@ export class AccessHub extends AccessDevice {
    * reading. The registry's clear does nothing to an unarmed key, so the construction pass retires nothing.
    *
    * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction is silent: its previous enumeration is the empty seed,
-   * so every door it resolves counts as moved, and an adoption is not a transition anyone observed.
+   * so every door it resolves counts as moved, and an adoption is not a transition anyone observed. A pass that moved a role, adoption included, also says at debug
+   * level what the bindings were and what they resolved to, so a field report carries its own evidence.
    *
    * @param options - The pass this discovery is running as.
    *
@@ -356,6 +357,7 @@ export class AccessHub extends AccessDevice {
     this.#gateDoors = next;
 
     const moved: DrivenDoor[] = [];
+    let changed = false;
 
     for(const isSideDoor of [ false, true ]) {
 
@@ -367,6 +369,7 @@ export class AccessHub extends AccessDevice {
         continue;
       }
 
+      changed = true;
       this.timers.clear(this.#relockTimerKey(isSideDoor));
 
       const role = isSideDoor ? "side door" : "main door";
@@ -388,6 +391,19 @@ export class AccessHub extends AccessDevice {
         // A published binding can name a door ahead of the topology, so a door the snapshot carries nothing for is announced by the identity it was named under.
         this.log.info("The gate's " + role + " is now " + (doors.find(door => door.unique_id === arriving.locationId)?.name ?? arriving.locationId) + ".");
       }
+    }
+
+    /* The bindings are read here rather than handed back by the policy, which answers with the door identities alone, and only on a pass that moved a role. Each
+     * binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or port said as such.
+     */
+    if(changed) {
+
+      const bindings = portBindings(this.uda).map(binding => (binding.name ?? "unnamed") + " on " + (binding.port ?? "an unnamed port") + " bound to " + binding.doorId);
+      const mainDoor = next.find(door => !door.isSideDoor)?.locationId ?? "none";
+      const sideDoor = next.find(door => door.isSideDoor)?.locationId ?? "none";
+
+      this.log.debug("Gate doors resolved from the port bindings (%s) to main door %s and side door %s.", bindings.length ? bindings.join(", ") : "none",
+        mainDoor, sideDoor);
     }
 
     return moved;

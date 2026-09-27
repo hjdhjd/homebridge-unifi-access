@@ -2519,6 +2519,83 @@ test("a gate carrying a third binding beside its side door's takes the side door
   assert.equal(gate.lines.length, 1, "and the main door stays where it stood, silently");
 });
 
+/* The sentence a gate writes at debug level for one resolution of its doors, as the debug sink carries it: the bindings it resolved from and the door each role
+ * landed on. The bindings the harness builds carry a name and no port, so each one's port reads as unnamed.
+ *
+ * @param bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ * @param mainDoor - The door the main role landed on, or none.
+ * @param sideDoor - The door the side role landed on, or none.
+ *
+ * @returns The line as the debug sink carries it.
+ */
+function resolution(bindings: [ string, string ][], mainDoor: string, sideDoor: string): string {
+
+  const rendered = bindings.map(([ name, doorId ]) => name + " on an unnamed port bound to " + doorId);
+
+  return LOG_PREFIX + "Gate doors resolved from the port bindings (" + (bindings.length ? rendered.join(", ") : "none") + ") to main door " + mainDoor +
+    " and side door " + sideDoor + ".";
+}
+
+/* Every resolution a gate has written at debug level, oldest first, which is how a pass that said one is told from a pass that said none.
+ *
+ * @param harness - The gate to read.
+ *
+ * @returns The resolution lines in the debug sink.
+ */
+function resolutionLines(harness: HubHarness): string[] {
+
+  return harness.debugs.filter(line => line.startsWith(LOG_PREFIX + "Gate doors resolved"));
+}
+
+test("a gate says at debug level what its bindings resolved to on every pass that moved a role, adoption included, and nothing on a pass that moved none", () => {
+
+  const gate = makeGate({ keepAdoptionLines: true, options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
+  const adoption = resolution([], MAIN_DOOR, SIDE_DOOR);
+
+  // Adoption moves every role off the empty seed, so a fresh start carries its own evidence. A line held back for a pass that follows would leave this empty.
+  assert.deepEqual(resolutionLines(gate), [adoption], "adoption says what the record resolved to");
+
+  // A device update that moves nothing says nothing, so a debug-enabled log does not repeat the resolution on every restatement.
+  restateRecord(gate, {});
+
+  assert.deepEqual(resolutionLines(gate), [adoption], "a pass that moved no role adds no line");
+
+  const rebind = resolution([ [ "oper2", NEW_SIDE ], [ "oper1", NEW_MAIN ] ], NEW_MAIN, NEW_SIDE);
+
+  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+
+  assert.deepEqual(resolutionLines(gate), [ adoption, rebind ], "a rebind that moved both roles says what each binding named and where each role landed");
+
+  // The main door alone moves back while the side door stays, so a pass counts as moved when any role moved rather than when the last role it read did.
+  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", MAIN_DOOR) ] });
+
+  assert.deepEqual(resolutionLines(gate), [ adoption, rebind, resolution([ [ "oper2", NEW_SIDE ], [ "oper1", MAIN_DOOR ] ], MAIN_DOOR, NEW_SIDE) ],
+    "a pass that moved one role says so as well");
+});
+
+test("a gate says at debug level what its bindings resolved to when a role is withdrawn, which moves no door into it", () => {
+
+  // A topology of one door, so the side arm's name and two-door fallbacks answer nothing and the side door is the binding's to name or to withhold.
+  const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], keepAdoptionLines: true,
+    options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
+  const adoption = resolution([], MAIN_DOOR, "none");
+
+  assert.deepEqual(resolutionLines(gate), [adoption], "adoption says the side role holds no door");
+
+  const arrival = resolution([ [ "oper1", MAIN_DOOR ], [ "oper2", NEW_SIDE ] ], MAIN_DOOR, NEW_SIDE);
+
+  restateRecord(gate, { extensions: [ portBinding("oper1", MAIN_DOOR), portBinding("oper2", NEW_SIDE) ] });
+
+  assert.deepEqual(resolutionLines(gate), [ adoption, arrival ], "the side door alone arrives");
+
+  /* The side door's binding goes while the main door stays, so no door moves into any role. The withdrawal still changed a role, which is what earns the line...a
+   * line keyed to the doors that moved in would stay silent here.
+   */
+  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+
+  assert.deepEqual(resolutionLines(gate), [ adoption, arrival, resolution([[ "oper1", MAIN_DOOR ]], MAIN_DOOR, "none") ], "and its withdrawal is said as well");
+});
+
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {
 
   const gate = makeGate();
