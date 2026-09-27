@@ -1157,9 +1157,30 @@ test("discoverDoorLocations ranks a port binding above every fallback, whichever
   assert.deepEqual(discoverDoorLocations({ device: bound([binding("oper2", "doorB")]), doors, sideDoorEligible: true }),
     { mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
 
-  // A binding naming no port is still a binding, and it is the main door's: the side door then falls to the names, which is where it always fell.
+  // A binding naming no port identifies no side door, and the main door's binding is trusted only beside one, so the main door is the embedded member's and the
+  // side door falls to the names.
   assert.deepEqual(discoverDoorLocations({ device: bound([{ extension_name: "port_setting", target_value: "doorA" }]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "doorA", sideDoorLocationId: "door2" });
+    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+
+  /* Two bindings, neither of them the side door's, identify no role, so both delivery orders answer the embedded member and the names. A rule taking the main door
+   * from the first binding that is not the side door's would answer doorA in one order and doorB in the other.
+   */
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper3", "doorB") ]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper3", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+
+  /* A third binding beside the side door's leaves the main door to the embedded member, because the main door's binding is trusted only as the one other binding
+   * there, while the side door keeps its own port's binding. A rule trusting any binding beside the side door's would answer doorA, the first one delivered.
+   */
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB"), binding("oper3", "doorC") ]), doors,
+    sideDoorEligible: true }), { mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
+
+  // The same pair with no side door in scope answers the embedded member in both orders, where a rule reading delivery order would answer doorA or doorB.
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper3", "doorB") ]), doors, sideDoorEligible: false }),
+    { mainDoorLocationId: "door1" });
+  assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper3", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: false }),
+    { mainDoorLocationId: "door1" });
 });
 
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {

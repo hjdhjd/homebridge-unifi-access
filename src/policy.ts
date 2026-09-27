@@ -738,8 +738,8 @@ const SIDE_DOOR_PORT = "oper2";
  * side-door preference, while an evidence-only consumer asks on the hardware class alone.
  *
  * The port binding the controller publishes for a port outranks everything else here, because it is the same binding the library's own single-door resolution
- * reads. The side door's port is the one the controller names `oper2`, and the main door is whichever binding is not that one, in whatever order the controller
- * delivered them...so a record carrying a single binding named `oper2` names its side door alone and lets the main door fall through to the arms below. The
+ * reads. The side door's port is the one the controller names `oper2`, and the main door is the one other binding beside it when exactly one stands there...so a
+ * record carrying no binding named `oper2`, a lone `oper2` binding, or three or more bindings leaves the main door to the arms below. The
  * embedded door member and the location the record names fall behind the bindings as topology snapshots - the first of which the official surface never carries -
  * while both still outrank a name that merely looks like a main gate.
  *
@@ -756,10 +756,11 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
 
   const discovered: { mainDoorLocationId?: string; sideDoorLocationId?: string } = {};
 
-  // The doors this record's own ports are bound to, told apart by the port each one names.
+  // The doors this record's own ports are bound to. The side door's binding names its own port, and the main door's is trusted only as the one other binding
+  // beside it, so delivery order never decides a role.
   const bindings = portBindings(device);
   const sideBinding = bindings.find(binding => binding.name === SIDE_DOOR_PORT);
-  const mainBinding = bindings.find(binding => binding !== sideBinding);
+  const mainBinding = (sideBinding && (bindings.length === 2)) ? bindings.find(binding => binding !== sideBinding) : undefined;
 
   const primaryDoorId = device.door?.unique_id;
 

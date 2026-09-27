@@ -2478,6 +2478,47 @@ test("a rebind retires the relock window opened for the door that left the role"
   assert.equal(lineCount(gate, "Gate locked."), 1);
 });
 
+test("a gate whose bindings name no side door keeps each door in its role, whichever order the controller delivers the bindings in", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  /* Neither binding names the side door's port, so neither identifies a role: the main door stays the one the record's location names and the side door the one
+   * the topology names like a side door, in both delivery orders. A rule taking the main door from the first binding delivered would announce NEW_MAIN on the
+   * first restatement and NEW_SIDE on the second.
+   */
+  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper3", NEW_SIDE) ] });
+
+  assert.equal(gate.lines.length, 0, "bindings that identify no role move no door");
+
+  restateRecord(gate, { extensions: [ portBinding("oper3", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+
+  assert.equal(gate.lines.length, 0, "and the same bindings delivered in the other order move none either");
+
+  // The main door is still the one the location names, so readings delivered under it reach the gate's lock in both directions.
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
+
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED,
+    "the main door never left the door the location names");
+});
+
+test("a gate carrying a third binding beside its side door's takes the side door from its port and leaves the main door where it stood", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+
+  /* The side door's port names its binding, so the side door moves to it. The main door's binding is trusted only as the one other binding beside the side door's,
+   * so with two others there the main door stays the one the location names. A rule trusting any binding beside the side door's would move the main door to
+   * NEW_MAIN and announce it as well.
+   */
+  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper2", NEW_SIDE), portBinding("oper3", SIDE_DOOR) ] });
+
+  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1, "the side door follows the port that names it");
+  assert.equal(gate.lines.length, 1, "and the main door stays where it stood, silently");
+});
+
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {
 
   const gate = makeGate();
