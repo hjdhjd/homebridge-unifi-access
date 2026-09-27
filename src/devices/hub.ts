@@ -285,6 +285,30 @@ export class AccessHub extends AccessDevice {
     return resolveDoorService({ choice: this.getFeatureValue("Hub.Door.Service"), deviceType: this.uda.device_type });
   }
 
+  // The doorbell trigger switch's name, stated once for every lookup and dressing that names the switch.
+  get #doorbellTriggerName(): string {
+
+    return this.accessoryName + " Doorbell Trigger";
+  }
+
+  // The lock trigger switch's name, stated once for every lookup and dressing that names the switch.
+  get #lockTriggerName(): string {
+
+    return this.accessoryName + " Lock Trigger";
+  }
+
+  // The side door lock's name, stated once for every lookup and dressing that names the lock.
+  get #sideDoorLockName(): string {
+
+    return this.accessoryName + " Side Door";
+  }
+
+  // The side door lock trigger switch's name, taken from the lock it drives and stated once for every lookup and dressing that names the switch.
+  get #sideDoorLockTriggerName(): string {
+
+    return this.#sideDoorLockName + " Lock Trigger";
+  }
+
   // Convert lock string value to HomeKit LockCurrentState. The parameter is a plain string because the door state map's own vocabulary is deliberately open, and this
   // is already total over anything it can carry: a value we don't recognize falls through to secured, which is the safe reading of an unknown lock.
   private toLockState(lockValue: string): CharacteristicValue {
@@ -1064,7 +1088,7 @@ export class AccessHub extends AccessDevice {
    * created on positive evidence and one already present survives a window in which the hardware reports none. Turning the option off always removes it.
    *
    * Re-running this is how a wiring change reaches HomeKit mid-run, so it is written to be silent on repeat: validService speaks only when a present service is
-   * being removed, the acquire helper only when one is created, and a sensor is dressed only the first time this hub holds it - at adoption, or at its creation on
+   * being removed, the settling helper only when one is created, and a sensor is dressed only the first time this hub holds it - at adoption, or at its creation on
    * a later pass.
    */
   private configureTerminalInputs({ initialized }: ConfigurePass): void {
@@ -1113,21 +1137,22 @@ export class AccessHub extends AccessDevice {
       }
 
       // Dress the sensor with the input's own reading the first time this hub holds it.
-      this.#acquireSensor({ initialized, label, reading: this.#contactReading(facts), service, transition });
+      this.#settleSensor({ initialized, label, reading: this.#contactReading(facts), service, transition });
     }
   }
 
-  /* Complete the acquisition of a contact sensor its gate answered, dressing it the first time this hub holds it. The transition the gate answers tells a created
-   * sensor from one found on the accessory, and the pass tells whether a found sensor is one an earlier pass dressed: restored from the accessory cache, it carries
-   * the values it last held and none of its handlers, so adoption dresses it exactly as a creation does. The dressing is the only writer of a sensor's starting
-   * values, with the tamper attach below the one exception; every change after it reaches the sensor through the sweeps alone.
+  /* Settle a contact sensor its gate answered: announce one this pass attached, reconcile its tamper characteristic, and dress it the first time this hub holds it.
+   * The transition the gate answers tells a created sensor from one found on the accessory, and the pass tells whether a found sensor is one an earlier pass
+   * dressed: restored from the accessory cache, it carries the values it last held and none of its handlers, so adoption dresses it exactly as a creation does. The
+   * dressing is the only writer of a sensor's starting values, with the tamper attach below the one exception; every change after it reaches the sensor through the
+   * sweeps alone.
    *
    * The gate's own answer is what this reads rather than a second lookup, because a lookup after the gate would find the sensor the gate just created and answer
    * it as kept, and a sensor created on a device update would go undressed.
    *
-   * @param options - The pass this acquisition runs as, the sensor's label, the reading it is dressed with, and the sensor and transition its gate answered.
+   * @param options - The pass this settling runs as, the sensor's label, the reading it is dressed with, and the sensor and transition its gate answered.
    */
-  #acquireSensor({ initialized, label, reading, service, transition }: ConfigurePass & AcquireServiceResult & { label: string; reading: CharacteristicValue }): void {
+  #settleSensor({ initialized, label, reading, service, transition }: ConfigurePass & AcquireServiceResult & { label: string; reading: CharacteristicValue }): void {
 
     // A sensor this pass attached was dressed by nobody, whichever pass this is.
     const dressing = !initialized || (transition === "attached");
@@ -1164,8 +1189,8 @@ export class AccessHub extends AccessDevice {
    * hub keeping a roster. The availability handler answers every later read from the live composition through the device's Not Responding rule, so a read while
    * the device can be reached shows where it stands even when nothing has pushed since the composition last moved, and a read while it cannot is refused rather
    * than answered from the last push. The reading's handler answers the stored reading through that same rule, so a sensor that cannot be reached refuses its
-   * reading rather than showing the last one. The tamper status is written by the acquire above, where the presence reconcile left the characteristic standing,
-   * which is what lets the tamper sweep reach every sensor for the same reason.
+   * reading rather than showing the last one. The tamper status is written by the settling helper above, where the presence reconcile left the characteristic
+   * standing, which is what lets the tamper sweep reach every sensor for the same reason.
    */
   #dressSensor(service: Service, reading: CharacteristicValue): void {
 
@@ -1177,8 +1202,8 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(this.answering(() => this.isReachable));
   }
 
-  /* How a tamper verdict renders in HomeKit - the one statement of it, read by the acquire's own write and by the projection's sweep. Nothing established renders
-   * normal, because HomeKit has no third value and a status restored from the accessory cache with no reading behind it is not one this plugin can assert.
+  /* How a tamper verdict renders in HomeKit - the one statement of it, read by the settling helper's own write and by the projection's sweep. Nothing established
+   * renders normal, because HomeKit has no third value and a status restored from the accessory cache with no reading behind it is not one this plugin can assert.
    *
    * @param verdict - The tracked verdict to render.
    *
@@ -1225,7 +1250,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The reading is the projection the delivery path maintains, so a dressing writes what we already hold rather than a fresh read of the record.
-    this.#acquireSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, service, transition });
+    this.#settleSensor({ initialized, label: DPS_LABEL, reading: this._hkDpsState, service, transition });
   }
 
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
@@ -1256,7 +1281,7 @@ export class AccessHub extends AccessDevice {
     }
 
     // The reading is the projection the side door's delivery maintains, for the same reason the main door's is.
-    this.#acquireSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, service, transition });
+    this.#settleSensor({ initialized, label: SIDE_DOOR_DPS_LABEL, reading: this._hkSideDoorDpsState, service, transition });
   }
 
   // Configure the door for HomeKit. Supports Lock and GarageDoorOpener service types.
@@ -1449,7 +1474,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Doorbell Trigger", serviceType: this.hap.Service.Switch,
+    const { service, transition } = validService({ accessory: this.accessory, name: this.#doorbellTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER, validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
 
     if(!service) {
@@ -1535,7 +1560,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.accessoryName + " Doorbell Trigger");
+    setServiceName(service, this.#doorbellTriggerName);
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1545,7 +1570,7 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Lock Trigger", serviceType: this.hap.Service.Switch,
+    const { service, transition } = validService({ accessory: this.accessory, name: this.#lockTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER, validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
 
     if(!service) {
@@ -1578,7 +1603,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.accessoryName + " Lock Trigger");
+    setServiceName(service, this.#lockTriggerName);
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1587,7 +1612,7 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Side Door", serviceType: this.hap.Service.LockMechanism,
+    const { service, transition } = validService({ accessory: this.accessory, name: this.#sideDoorLockName, serviceType: this.hap.Service.LockMechanism,
       subtype: AccessReservedNames.LOCK_DOOR_SIDE, validate: this.hints.hasSideDoor });
 
     if(!service) {
@@ -1610,7 +1635,7 @@ export class AccessHub extends AccessDevice {
 
     // Initialize the lock.
     this._hkSideDoorLockState = -1;
-    setServiceName(service, this.accessoryName + " Side Door");
+    setServiceName(service, this.#sideDoorLockName);
     this.hkSideDoorLockState = this.hubSideDoorLockState;
   }
 
@@ -1620,7 +1645,7 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " Side Door Lock Trigger", serviceType: this.hap.Service.Switch,
+    const { service, transition } = validService({ accessory: this.accessory, name: this.#sideDoorLockTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
 
     if(!service) {
@@ -1653,7 +1678,7 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.accessoryName + " Side Door Lock Trigger");
+    setServiceName(service, this.#sideDoorLockTriggerName);
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
