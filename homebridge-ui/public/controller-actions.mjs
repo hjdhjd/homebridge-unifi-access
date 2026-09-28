@@ -57,9 +57,10 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
    * fetch captures this value before it calls the bridge and compares it after, writing only when the two still agree.
    *
    * The bridge offers no cancellation, so a fetch issued before an invalidation cannot be recalled and would otherwise be free to land its pre-invalidation answer
-   * afterwards - the same supersession problem a card's login verdict solves the same way. A retired fill costs one extra fetch at the next selection, where a
-   * stale serve would cost the rest of the session. One counter covers every address deliberately: its only failure mode is that extra fetch, and a counter nobody
-   * can misindex beats a map of counters somebody can.
+   * afterwards - the same supersession problem a card's login verdict meets. A card answers it with a latest-action-wins guard, because each of its validations
+   * replaces the last; fetches for different controllers run side by side and none of them may retire another, so here only an invalidation moves the counter. A
+   * retired fill costs one extra fetch at the next selection, where a stale serve would cost the rest of the session. One counter covers every address
+   * deliberately: its only failure mode is that extra fetch, and a counter nobody can misindex beats a map of counters somebody can.
    */
   let generation = 0;
 

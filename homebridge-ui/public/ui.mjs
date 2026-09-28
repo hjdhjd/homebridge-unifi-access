@@ -9,10 +9,10 @@ import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerat
 import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
 import { classifyProbeResponse, controllers, deviceListResult, hasValidIdentity, makeAccessConfig, primaryController, staleSelectionVerdict,
   withPrimaryIdentity } from "./access-config.mjs";
+import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
-import { withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
  * then fetches the controller's information and topology documents, so a genuinely worst-case first connection runs past it. PROBE_DEADLINE admits the healthy
@@ -130,10 +130,10 @@ const renderVerdict = ({ detail = "", lines = [], row, tone = "" }) => {
  */
 const requestControllerProbe = async ({ address, password, tokens, username, verdict, verifyTls }) => {
 
-  // This request is the newest the moment it starts: the bump retires any response still in flight, and the value it answers is what this request's own resolution
-  // checks against below. Whatever the last validation said is stale now too, so the line is blanked before the call rather than after it - a call that never
+  // This request is the newest the moment it starts: starting it retires any response still in flight, and the signal it answers is what this request's own
+  // resolution reads below. Whatever the last validation said is stale now too, so the line is blanked before the call rather than after it - a call that never
   // resolves must not leave an older verdict standing beside newer input.
-  const generation = verdict.invalidate();
+  const signal = verdict.start();
 
   if(!address?.length) {
 
@@ -154,8 +154,9 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
 
     const probe = classifyProbeResponse(await homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }));
 
-    // An edit or a newer request on this card retires this one, and a retired request must not paint over what the newer input or request is showing.
-    if(!verdict.isCurrent(generation)) {
+    // An edit or a newer request on this card retires this one, and so does the card closing. A retired request must not paint over what the newer input or
+    // request is showing, or into a card that is gone.
+    if(signal.aborted) {
 
       return null;
     }
@@ -174,8 +175,8 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
     return probe;
   } catch(err) {
 
-    // A retired request's failure is nobody's news - the generation rule above governs this paint too.
-    if(!verdict.isCurrent(generation)) {
+    // A retired request's failure is nobody's news - the retirement rule above governs this paint too.
+    if(signal.aborted) {
 
       return null;
     }
@@ -581,30 +582,36 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   const teardown = new AbortController();
   const cardSignal = signal ? AbortSignal.any([ signal, teardown.signal ]) : teardown.signal;
 
-  /* The generation of this card's newest connection validation. It belongs to the card rather than to the module so two mounted cards cannot invalidate each other's
-   * verdicts: each request captures the value as it starts and checks it after resolving, so only the newest request ON THIS CARD can paint - an older response
-   * that loses the race discards itself rather than painting over what newer input or a newer request has put on screen. An edit bumps the generation too, which
-   * is what keeps a slow verdict from landing beside input it no longer describes. The UI-server bridge carries no abort surface, so supersession is enforced at
-   * the paint rather than on the wire.
+  /* This card's latest-action-wins guard, so only the newest validation ON THIS CARD can paint. It belongs to the card rather than to the module so two mounted
+   * cards cannot retire each other's validation; an edit retires the validation in flight, so a slow answer never lands beside input it no longer describes; and
+   * its parent is the card's own lifetime, so closing the card retires it too. The UI-server bridge carries no abort surface, so a retired validation is dropped at
+   * the paint rather than cancelled on the wire.
    */
-  let generation = 0;
+  const guard = createActionGuard({ signal: cardSignal });
 
   // The MAC addresses a removal would offer to strip settings for, as the caller's last population named them.
   let removalMacs = [];
 
   const verdict = {
 
-    // Retire any validation still in flight, blank the line, and answer the generation this card is now on.
-    invalidate: () => {
+    render: (options = {}) => renderVerdict({ ...options, row }),
+
+    // Retire any validation still in flight and blank the line. An edit and a re-population both call for this, because the verdict standing there describes input
+    // the card no longer holds.
+    retire: () => {
+
+      guard.cancel();
+      renderVerdict({ row });
+    },
+
+    // Blank the line and begin a validation, answering the signal it carries. The signal aborts the moment this validation stops being the newest one the card
+    // issued, whether a later start, a retirement, or the card closing is what overtook it.
+    start: () => {
 
       renderVerdict({ row });
 
-      return ++generation;
-    },
-
-    // Whether a validation that started at the supplied generation is still the newest one this card issued.
-    isCurrent: (mark) => mark === generation,
-    render: (options = {}) => renderVerdict({ ...options, row })
+      return guard.start();
+    }
   };
 
   // Put the removal confirmation away. Every path that changes what the card is describing takes it back to its unarmed state, so a confirmation can never outlive
@@ -663,7 +670,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       removalMacs = macs;
 
       disarmRemoval();
-      verdict.invalidate();
+      verdict.retire();
     },
 
     /* What the user has entered, in the shape a controllers[] item itself carries, so every validation, every probe body, and every write reads one vocabulary all
@@ -687,7 +694,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   // "change" rather than "input", so each field is bound on the event its kind actually fires.
   for(const field of Object.values(fields)) {
 
-    field.addEventListener(isCheckbox(field) ? "change" : "input", () => verdict.invalidate(), { signal: cardSignal });
+    field.addEventListener(isCheckbox(field) ? "change" : "input", () => verdict.retire(), { signal: cardSignal });
   }
 
   control("validate").addEventListener("click", () => void onValidateLogin({ button: control("validate"), card: surface }), { signal: cardSignal });

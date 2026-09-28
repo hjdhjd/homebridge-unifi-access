@@ -184,20 +184,20 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
   const toasts: Toast[] = [];
   let sends = 0;
 
-  /* The card an action acts for. Only the field read and the verdict paint are ever reached: the probe is a fake here, so the two members it would invalidate and
-   * test against are stubs no arm asserts.
+  /* The card an action acts for. Only the field read and the verdict paint are ever reached: the probe is a fake here, so the members it would start and retire a
+   * validation through are stubs no arm asserts.
    */
   const card: ControllerCard = {
 
     values: () => ({ ...IDENTITY }),
     verdict: {
 
-      invalidate: (): number => 0,
-      isCurrent: (): boolean => true,
       render: (options = {}): void => {
 
         renders.push(options);
-      }
+      },
+      retire: (): void => undefined,
+      start: (): AbortSignal => new AbortController().signal
     }
   };
 

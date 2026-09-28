@@ -12,15 +12,15 @@ import type { AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, Acces
 export type ControllerWriteResult = { kind: "committed" } | { error: unknown; kind: "staged" } | { error: unknown; kind: "failed" };
 
 /**
- * The verdict line of the card an action acts for, exactly as the page's connection-card mount builds it: the retirement that blanks the line and answers the
- * generation the card is on, the test of whether a validation is still the newest one that card issued, and the paint itself. An action hands the whole surface to
- * the probe and paints a failure on it.
+ * The verdict line of the card an action acts for, exactly as the page's connection-card mount builds it: the paint itself, the retirement that drops any
+ * validation still in flight and blanks the line, and the start that blanks the line and answers the signal a new validation carries, which aborts the moment
+ * that validation stops being the newest one the card issued. An action hands the whole surface to the probe and paints a failure on it.
  */
 export interface ControllerVerdict {
 
-  invalidate: () => number;
-  isCurrent: (mark: number) => boolean;
   render: (options?: { detail?: string; lines?: string[]; tone?: string }) => void;
+  retire: () => void;
+  start: () => AbortSignal;
 }
 
 /** The part of a connection card an action reads: what the user has entered, and the verdict line a failure is painted on. */
