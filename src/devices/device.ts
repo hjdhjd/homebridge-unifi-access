@@ -6,7 +6,7 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { DecoratedSerial, LogEventName } from "../policy.ts";
-import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
+import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
   Nullable } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog,
   sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
@@ -243,17 +243,17 @@ export abstract class AccessDevice extends AccessBase {
   public refreshReachability(): void {
 
     updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isReachable);
-    this.#publishAvailability();
+    this.publishAvailability();
   }
 
   /* State this device's availability on its own topic, read from the same composition every StatusActive carrier reads, so what HomeKit is shown and what the broker
    * holds cannot disagree. The statement is retained, so a subscriber attaching mid-session reads the last one without waiting for the next, and it composes with
-   * the plugin-level statement the client makes: a device is available only when both read online.
+   * the plugin-level statement the client makes: a device is available only when both read online. A subclass's broker-session restatement opens with it.
    *
    * It is change-gated because the record loop refreshes reachability on every delivery. The client remembers what it last delivered on the topic and forgets it
    * at every broker session, so a delivery that leaves reachability where it stood publishes nothing, and the first statement after an outage always goes out.
    */
-  #publishAvailability(): void {
+  protected publishAvailability(): void {
 
     const payload: MqttAvailabilityPayload = this.isReachable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
 
@@ -399,6 +399,17 @@ export abstract class AccessDevice extends AccessBase {
   protected mqttSubscribeSet(entry: MqttTopicEntry, setValue: MqttSetHandler): void {
 
     this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, setValue, { signal: this.signal });
+  }
+
+  /* Register a restatement the client runs each time it establishes a broker session, the first one included, bound to this device's lifetime exactly as the
+   * getter above is: the client releases the registration when that lifetime ends, so a device removed mid-run restates nothing on the next session. Nothing is
+   * replayed across an outage, so this is where a device says again what it holds. A registration made while a session is already held runs from the next one.
+   *
+   * @param handler - The restatement to run on each new session.
+   */
+  protected mqttOnConnect(handler: MqttConnectHandler): void {
+
+    this.controller.mqtt?.onConnect(handler, { signal: this.signal });
   }
 
   // Utility function to return a floating point configuration parameter on a device.

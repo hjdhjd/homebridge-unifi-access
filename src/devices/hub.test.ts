@@ -26,6 +26,7 @@ import type { AccessAccessory } from "../types.ts";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
 import type { Mock } from "node:test";
+import type { TestMqttPublish } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
@@ -770,6 +771,53 @@ function lockPayloads(harness: HubHarness, tail = "lock"): string[] {
 function adoptionStatement(harness: HubHarness): HubHarness["publishes"][number] {
 
   return { init: { ifChanged: true, retain: true, signal: harness.hub.signal }, payload: "online", topic: HUB_SERIAL + "/availability" };
+}
+
+/* Drive the broker double through one session and answer every publish that session recorded, in order. The lever's false-to-true edge is a session restored:
+ * the double records the plugin-level statement on the bare availability tail and then runs every connect registration the hub holds.
+ *
+ * @param mqtt - The broker double to drive.
+ *
+ * @returns The publishes the session recorded, oldest first.
+ */
+function restoreSession(mqtt: TestMqttClient): TestMqttPublish[] {
+
+  const before = mqtt.published.length;
+
+  mqtt.connected = false;
+  mqtt.connected = true;
+
+  return mqtt.published.slice(before);
+}
+
+/* The held state topics a session restated, read past the plugin-level and device availability statements that open it, as tail, payload, and retention, sorted
+ * by tail because the order a hub restates in is not part of its contract. A topic restated twice appears twice, so a duplicate cannot hide in the reading.
+ *
+ * @param session - What the session recorded.
+ *
+ * @returns The restated topics.
+ */
+function restatedIn(session: readonly TestMqttPublish[]): [ string, string, boolean ][] {
+
+  return session.slice(2).map((entry): [ string, string, boolean ] => [ entry.topic.slice((HUB_SERIAL + "/").length), entry.payload.toString(), entry.retain ])
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+/* What a hub's get topics answer, read through the gets themselves, in the same tail and payload form a restatement is compared in.
+ *
+ * @param harness  - The hub to ask.
+ * @param restated - The restated topics, each spelled as its tail, an equals sign, and its payload.
+ *
+ * @returns Each of those topics' tail beside what its get answers now.
+ */
+async function getAnswers(harness: HubHarness, restated: readonly string[]): Promise<string[]> {
+
+  return Promise.all(restated.map(async (pair): Promise<string> => {
+
+    const tail = pair.slice(0, pair.indexOf("="));
+
+    return tail + "=" + String(await harness.mqttGet(tail));
+  }));
 }
 
 /* How many times a hub wrote exactly this sentence, which is what tells an announcement that happens once from one that repeated or never came.
@@ -1819,6 +1867,155 @@ test("a hub states its availability once its adoption completes, retained, in wh
 
   assert.deepEqual(reachable.mqtt.published, [{ payload: "online", retain: true, topic: HUB_SERIAL + "/availability" }]);
   assert.deepEqual(unreachable.mqtt.published, [{ payload: "offline", retain: true, topic: HUB_SERIAL + "/availability" }]);
+});
+
+test("a broker session hears the hub's availability right behind the plugin-level statement, retained, ahead of every held state topic", () => {
+
+  const harness = makeHub();
+
+  /* Adoption already delivered online on this topic, and the change gate would answer a second online with nothing sent. The session clears that memory ahead of
+   * the restatement, which is what lets the statement go out again for a subscriber that missed it while the broker was away.
+   */
+  const session = restoreSession(harness.mqtt);
+
+  assert.deepEqual(session.slice(0, 2), [ { payload: "online", retain: true, topic: "availability" },
+    { payload: "online", retain: true, topic: HUB_SERIAL + "/availability" } ]);
+  assert.ok(session.slice(2).length > 0, "and the held state topics follow it");
+
+  // A hub its controller cannot reach says so on the session too, in the other word.
+  harness.health.isHealthy = false;
+
+  assert.deepEqual(restoreSession(harness.mqtt)[1], { payload: "offline", retain: true, topic: HUB_SERIAL + "/availability" });
+});
+
+/* Each family the fixtures cover restates exactly the held state topics its transitions can publish, each with the value it holds. The readings are driven apart
+ * wherever a family carries a pair - a door open while its lock is secured, one terminal input open while its neighbor is closed - so a payload answered from the
+ * wrong source cannot pass unseen.
+ */
+test("a door hub restates its position and its lock, and its position reads unknown where no sensor evidence stands behind it", () => {
+
+  assert.deepEqual(restatedIn(restoreSession(makeHub().mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ] ]);
+
+  const sensed = makeHub({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "lock" } });
+
+  assert.deepEqual(restatedIn(restoreSession(sensed.mqtt)), [ [ "dps", "true", false ], [ "lock", "true", false ] ]);
+});
+
+test("a UA Hub restates each terminal input whose sensor stands with its terminal wired, beside its door", () => {
+
+  const harness = makeHub({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "unlock" },
+    record: testHub({ configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "off", "input_state_ren": "on", "input_state_rex": "off" }) ] }) });
+
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)), [ [ "dps", "false", false ], [ "lock", "false", false ], [ "rel", "true", false ],
+    [ "ren", "false", false ], [ "rex", "true", false ] ]);
+});
+
+test("a UA Gate restates both of its doors, and a gate whose side door is turned off restates its main door alone", () => {
+
+  const gate = makeGate({ doorStates: new Map([ [ MAIN_DOOR, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } ],
+    [ SIDE_DOOR, { dps: "close", location_id: SIDE_DOOR, lock: "lock" } ] ]), record: testHub({ configs: [ ...wiringRows({ "wiring_state_door-dps-neg": "on",
+    "wiring_state_door-dps-pos": "on" }), ...inputRows({ "input_door_dps": "off" }) ], device_type: "UGT" }) });
+
+  assert.deepEqual(restatedIn(restoreSession(gate.mqtt)), [ [ "dps", "true", false ], [ "lock", "false", false ], [ "sidedoor/dps", "false", false ],
+    [ "sidedoor/lock", "true", false ] ]);
+
+  const mainOnly = makeGate({ options: ["Disable.Hub.SideDoor"] });
+
+  assert.deepEqual(restatedIn(restoreSession(mainOnly.mqtt)).map(([tail]) => tail), [ "dps", "lock" ]);
+});
+
+test("a UA Hub Door Mini, a UA Ultra with tamper detection, and an Enterprise hub port each restate the topics their hardware carries", () => {
+
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: doorMiniHub("off") }).mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ],
+    [ "rex", "true", false ] ]);
+
+  // The Ultra's tamper status is restated from the verdict it adopted, which is the raised reading its record arrived with.
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: tamperUltra({ "tamper_event": "true" }) }).mqtt)), [ [ "dps", "unknown", false ],
+    [ "lock", "true", false ], [ "rex", "false", false ], [ "tamper", "true", false ] ]);
+
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: familyRecord("UAH-Ent") }).mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ] ]);
+});
+
+test("a reader restates its availability and no state topic, since none of a hub's topics are its to publish", () => {
+
+  const reader = makeHub({ record: READER_RECORD });
+  const session = restoreSession(reader.mqtt);
+
+  assert.deepEqual(session[1], { payload: "online", retain: true, topic: HUB_SERIAL + "/availability" }, "a reader states its availability like any device");
+  assert.deepEqual(restatedIn(session), []);
+});
+
+test("the restatement follows a terminal input's sensor and its wiring from one session to the next", () => {
+
+  const harness = makeHub();
+
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), [ "dps", "lock" ]);
+
+  // The remote release's wiring reports live mid-run, which creates its sensor, and the next session restates the reading that sensor holds.
+  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
+
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ], [ "rel", "true", false ] ]);
+
+  /* The wiring then goes quiet. The sensor stands through the gap, as a sensor with no fresh evidence against it does, but a transition would not publish its
+   * reading while its terminal reports nothing wired, so no session restates it either.
+   */
+  restateRecord(harness, { configs: [] });
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the sensor outlives the gap in its evidence");
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), [ "dps", "lock" ]);
+});
+
+test("the momentary topics are never restated, even mid-ring and after an attributed unlock", async () => {
+
+  const gate = makeGate();
+
+  gate.emit("access.remote_view", ringPacket([]));
+  gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: MAIN_DOOR, doorName: "Main Gate" }));
+  gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: SIDE_DOOR, doorName: "Pedestrian Gate" }));
+
+  // The ring is still standing when the session begins, which is what makes this the sharpest moment to replay it by mistake.
+  assert.equal(await gate.mqttGet("doorbell"), "true");
+
+  const tails = restatedIn(restoreSession(gate.mqtt)).map(([tail]) => tail);
+
+  for(const momentary of [ "doorbell", "sidedoor/unlock", "telemetry", "unlock" ]) {
+
+    assert.ok(!tails.includes(momentary), "a replayed " + momentary + " is the event happening a second time, so it is never restated");
+  }
+});
+
+test("a removed hub restates nothing on the next session", () => {
+
+  const harness = makeHub();
+
+  harness.hub.cleanup();
+
+  const attempted = harness.publishes.length;
+
+  // The registration was bound to the device's lifetime, so the session records the plugin-level statement alone.
+  assert.deepEqual(restoreSession(harness.mqtt), [{ payload: "online", retain: true, topic: "availability" }]);
+
+  /* And the hub is not asked at all. A registration that outlived the device would still attempt every publish, and the ended lifetime refusing each one would
+   * leave the broker's record looking exactly the same, so the attempts are read where the controller receives them.
+   */
+  assert.equal(harness.publishes.length, attempted, "a removed hub attempts no restatement");
+});
+
+test("every get topic answers exactly what the session restates on it", async () => {
+
+  const gate = makeGate({ doorStates: new Map([ [ MAIN_DOOR, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } ],
+    [ SIDE_DOOR, { dps: "close", location_id: SIDE_DOOR, lock: "lock" } ] ]) });
+  const hub = makeHub();
+  const gateRestated = restatedIn(restoreSession(gate.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
+  const hubRestated = restatedIn(restoreSession(hub.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
+
+  // The gate restates every get topic it carries, its side door position unknown with nothing wired behind it, and the door hub its own, its position unknown too.
+  assert.deepEqual(gateRestated, [ "dps=true", "lock=false", "sidedoor/dps=unknown", "sidedoor/lock=true" ]);
+  assert.deepEqual(hubRestated, [ "dps=unknown", "lock=true" ]);
+
+  // Each get answers what the session restated on its topic. The gets are read after the session, so both answers describe the same held state.
+  assert.deepEqual(await getAnswers(gate, gateRestated), gateRestated, "the gate's gets and its restatement read one derivation");
+  assert.deepEqual(await getAnswers(hub, hubRestated), hubRestated, "and so do the door hub's");
 });
 
 test("a gate unlock overtaken by the device's removal announces nothing", async () => {

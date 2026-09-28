@@ -68,6 +68,17 @@ const terminalInputs = [
   { label: "Request to Exit Sensor", member: "REX", terminal: "rex", topic: mqttTopics.rex }
 ] as const satisfies readonly { label: string; member: HubSensorName & LogEventName; terminal: AccessTerminalInput; topic: MqttTopicEntry }[];
 
+/* The catalog's momentary topics. Each of their publishes is an event happening - a ring and its end, an unlock and who performed it, a raw telemetry frame -
+ * rather than a reading a device holds, so a broker session never restates one: a replayed event is the event happening a second time.
+ */
+type AccessEventTopic = "doorbell" | "sidedoorUnlock" | "telemetry" | "unlock";
+
+/* A catalog key naming a held state topic: every entry but the availability statement, which the device base states for itself, and the momentary topics above.
+ * A topic added to the catalog lands here by default, which is what makes it fail compilation in the hub's payload reader and its restatement until it is given a
+ * payload and a rule, or is classified as momentary instead.
+ */
+type AccessStateTopic = Exclude<keyof typeof mqttTopics & string, "availability" | AccessEventTopic>;
+
 /* The whole sensor member table, as the domain every read of the selection is taken against. It is the WHOLE table and never a per-model narrowing: a retired
  * per-sensor option answered true for a hub of any model, so reading against everything is what keeps an unconfigured hub of a model no table names carrying every
  * sensor its wiring supports and leaves the capability evidence the one thing that decides. The narrowing to a model is the settings page's job alone.
@@ -1689,9 +1700,176 @@ export class AccessHub extends AccessDevice {
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
-  // Configure the MQTT topics this device answers on and listens to for the whole of its run. The doorbell's get topic is not among them: it is registered with the
-  // doorbell service, whose own lifetime it follows.
+  /* The payload each held state topic carries, read from the state this hub holds for it. The get topics answer through here and so does the broker-session
+   * restatement, so what a subscriber hears when a session begins is exactly what a get would answer at that moment. Each arm reads the source its transition
+   * site writes: the lock and position readings the door-state delivery and the gate windows settle, a terminal input's sensor as the device update leaves it,
+   * and the tamper verdict the projection holds. The switch is exhaustive over the held state topics, so a topic added to the catalog fails compilation here until
+   * it has a payload.
+   *
+   * @param key - The held state topic to read.
+   *
+   * @returns The payload that topic carries now.
+   */
+  #statePayload(key: AccessStateTopic): string {
+
+    switch(key) {
+
+      case "dps":
+
+        /* A UA Gate's door position comes from the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence
+         * predicate answers false for that hardware by design, and letting it speak here would report a gate whose position we know as unknown.
+         */
+        if((this.uda.device_type !== "UGT") && !this.dpsEvidence) {
+
+          return "unknown";
+        }
+
+        return this.#contactPayload(this.hkDpsState);
+
+      case "lock":
+
+        return this.#lockPayload(this.hkLockState);
+
+      case "rel":
+      case "ren":
+      case "rex":
+
+        return this.#contactPayload(this.#terminalReading(mqttTopics[key]));
+
+      case "sidedoorDps":
+
+        if(this.#sideDoorFacts.wired !== true) {
+
+          return "unknown";
+        }
+
+        return this.#contactPayload(this._hkSideDoorDpsState);
+
+      case "sidedoorLock":
+
+        return this.#lockPayload(this.hkSideDoorLockState);
+
+      case "tamper":
+
+        return String(this.tamperVerdict ?? "unknown");
+    }
+  }
+
+  // How a contact reading is spelled on its topic: open is true and closed is false, and anything else, no reading at all included, is unknown.
+  #contactPayload(state: CharacteristicValue | undefined): string {
+
+    switch(state) {
+
+      case this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED:
+
+        return "false";
+
+      case this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED:
+
+        return "true";
+
+      default:
+
+        return "unknown";
+    }
+  }
+
+  // How a lock reading is spelled on its topic: locked is true and unlocked is false, and anything else, the value a lock service is reconfigured through
+  // included, is unknown.
+  #lockPayload(state: CharacteristicValue): string {
+
+    switch(state) {
+
+      case this.hap.Characteristic.LockCurrentState.SECURED:
+
+        return "true";
+
+      case this.hap.Characteristic.LockCurrentState.UNSECURED:
+
+        return "false";
+
+      default:
+
+        return "unknown";
+    }
+  }
+
+  /* A terminal input's reading as its sensor holds it, or nothing where this hub has no reading that input's topic could publish: the input's sensor does not
+   * stand, or its terminal does not report wired. Those are the tests the device update makes before it publishes an input's transition, and the sensor's own
+   * value is what that transition wrote, so a restated input says what its last transition said.
+   *
+   * @param entry - The catalog entry of the input's topic.
+   *
+   * @returns The sensor's contact reading, or `undefined` where the input has none to publish.
+   */
+  #terminalReading(entry: MqttTopicEntry): CharacteristicValue | undefined {
+
+    for(const { member, terminal, topic } of terminalInputs) {
+
+      if((topic !== entry) || (terminalInput(this.uda, terminal).wired !== true)) {
+
+        continue;
+      }
+
+      return this.accessory.getServiceById(this.hap.Service.ContactSensor, AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames])
+        ?.getCharacteristic(this.hap.Characteristic.ContactSensorState).value ?? undefined;
+    }
+
+    return undefined;
+  }
+
+  /* Which held state topics this hub restates when a broker session begins: exactly the topics a transition here can publish, under the tests those transition
+   * sites and the get registrations already make. A lock and a door position belong to a hub, and the side door's pair to a UA Gate carrying its side door; a
+   * terminal input's topic belongs to an input whose sensor stands with its terminal wired; the tamper status belongs to hardware that detects tampering. The
+   * record is built afresh at each session rather than once at adoption, because a terminal input's sensor and the tamper capability can each arrive or leave
+   * mid-run. It names every held state topic, so a topic added to the catalog fails compilation here until its restatement is decided.
+   *
+   * @returns Whether each held state topic is restated.
+   */
+  #restatement(): Record<AccessStateTopic, boolean> {
+
+    const hub = isHub(this.uda);
+    const sideDoor = hub && this.hints.hasSideDoor;
+
+    return {
+
+      dps: hub,
+      lock: hub,
+      rel: this.#terminalReading(mqttTopics.rel) !== undefined,
+      ren: this.#terminalReading(mqttTopics.ren) !== undefined,
+      rex: this.#terminalReading(mqttTopics.rex) !== undefined,
+      sidedoorDps: sideDoor,
+      sidedoorLock: sideDoor,
+      tamper: isTamperCapable(this.uda)
+    };
+  }
+
+  /* Configure the MQTT topics this device answers on, listens to, and restates for the whole of its run. The doorbell's get topic is not among them: it is
+   * registered with the doorbell service, whose own lifetime it follows.
+   */
   private configureMqtt(): void {
+
+    /* Restate what this device holds each time the client establishes a broker session: its availability first, then every held state topic the rule above
+     * answers for, each read through the payload reader the get topics answer through. The client publishes nothing across an outage and replays nothing after it,
+     * so this is how a subscriber that missed a statement hears the current one, and the client clears its change-gated memory ahead of every session, which is
+     * what lets an unchanged availability go out again. The momentary topics are never restated, since a replayed event is the event happening a second time.
+     *
+     * The registration comes ahead of the hub-only subscriptions below because every device states its availability, a reader as much as a hub.
+     */
+    this.mqttOnConnect(() => {
+
+      this.publishAvailability();
+
+      const restatement = this.#restatement();
+
+      for(const key of Object.keys(restatement) as AccessStateTopic[]) {
+
+        if(restatement[key]) {
+
+          this.mqttPublish(mqttTopics[key], this.#statePayload(key));
+        }
+      }
+    });
 
     // The MQTT subscriptions below are hub-specific (lock, DPS, side door).
     if(!isHub(this.uda)) {
@@ -1700,50 +1878,10 @@ export class AccessHub extends AccessDevice {
     }
 
     // MQTT DPS status.
-    this.mqttSubscribeGet(mqttTopics.dps, () => {
-
-      /* A UA Gate's door position comes from the location rail rather than a wired sensor, so the state we hold for it is the live answer. The sensor-evidence predicate
-       * answers false for that hardware by design, and letting it speak here would report a gate whose position we know as unknown.
-       */
-      if((this.uda.device_type !== "UGT") && !this.dpsEvidence) {
-
-        return "unknown";
-      }
-
-      switch(this.hkDpsState) {
-
-        case this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED:
-
-          return "false";
-
-        case this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED:
-
-          return "true";
-
-        default:
-
-          return "unknown";
-      }
-    });
+    this.mqttSubscribeGet(mqttTopics.dps, () => this.#statePayload("dps"));
 
     // MQTT lock status.
-    this.mqttSubscribeGet(mqttTopics.lock, () => {
-
-      switch(this.hkLockState) {
-
-        case this.hap.Characteristic.LockCurrentState.SECURED:
-
-          return "true";
-
-        case this.hap.Characteristic.LockCurrentState.UNSECURED:
-
-          return "false";
-
-        default:
-
-          return "unknown";
-      }
-    });
+    this.mqttSubscribeGet(mqttTopics.lock, () => this.#statePayload("lock"));
 
     // MQTT lock status.
     this.mqttSubscribeSet(mqttTopics.lock, (value: string) => {
@@ -1773,23 +1911,7 @@ export class AccessHub extends AccessDevice {
     // MQTT side door lock status (UA Gate only).
     if(this.hints.hasSideDoor) {
 
-      this.mqttSubscribeGet(mqttTopics.sidedoorLock, () => {
-
-        switch(this.hkSideDoorLockState) {
-
-          case this.hap.Characteristic.LockCurrentState.SECURED:
-
-            return "true";
-
-          case this.hap.Characteristic.LockCurrentState.UNSECURED:
-
-            return "false";
-
-          default:
-
-            return "unknown";
-        }
-      });
+      this.mqttSubscribeGet(mqttTopics.sidedoorLock, () => this.#statePayload("sidedoorLock"));
 
       this.mqttSubscribeSet(mqttTopics.sidedoorLock, (value: string) => {
 
@@ -1816,28 +1938,7 @@ export class AccessHub extends AccessDevice {
       });
 
       // MQTT side door DPS status (UA Gate only).
-      this.mqttSubscribeGet(mqttTopics.sidedoorDps, () => {
-
-        if(this.#sideDoorFacts.wired !== true) {
-
-          return "unknown";
-        }
-
-        switch(this._hkSideDoorDpsState) {
-
-          case this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED:
-
-            return "false";
-
-          case this.hap.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED:
-
-            return "true";
-
-          default:
-
-            return "unknown";
-        }
-      });
+      this.mqttSubscribeGet(mqttTopics.sidedoorDps, () => this.#statePayload("sidedoorDps"));
     }
   }
 
