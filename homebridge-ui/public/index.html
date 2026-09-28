@@ -181,19 +181,10 @@
       </aside>
     </div>
     <main class="feature-content">
-      <!-- Where the Add Controller affordance mounts its card, as the whole of the main content while it is open. It is a region of our own rather than one of
-           the framework's, so nothing the framework clears or reveals reaches it.
-
-           The framework's own regions sit inside a wrapper of ours for the same reason. Presenting the card as the main content means hiding what it stands in
-           front of, and hiding our wrapper leaves every display the framework writes on the regions inside it exactly as the framework wrote it - so the two
-           never contend for the same element, and restoring the view is one assignment on something only this plugin owns. -->
-      <div id="hbuaControllerEditor" class="hbua-compact-card" style="display: none;"></div>
-      <div id="hbuaFeatureContent">
-        <div id="deviceStatsContainer"></div>
-        <div id="search" class="mb-3"></div>
-        <div id="optionsContainer" class="options-content alert-info rounded p-3">
-          <div id="configTable"></div>
-        </div>
+      <div id="deviceStatsContainer"></div>
+      <div id="search" class="mb-3"></div>
+      <div id="optionsContainer" class="options-content alert-info rounded p-3">
+        <div id="configTable"></div>
       </div>
     </main>
   </div>

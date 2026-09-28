@@ -415,8 +415,8 @@ const getControllers = ({ config }) => {
 
   /* Close an open Add Controller card here, which is the one place that covers every way the view can be rebuilt underneath it. Every rebuild routes through this
    * hook - a menu round trip's show(), a coordinated write's re-establishment, and the connection-error view's own Retry, which re-enters show() without touching
-   * a menu button - so closing here needs no per-path wiring and can miss none of them. The card's region is outside the framework's own reveal cycle, so its
-   * lifetime is ours to end: a rebuild discards whatever was typed into it, which is what a view rebuilding out from under an unsaved form should do.
+   * a menu button - and the framework leaves a standing takeover in place across a refresh of the controller list, so releasing it here needs no per-path wiring
+   * and can miss none of them. A rebuild discards whatever was typed into the card, which is what a view rebuilding out from under an unsaved form should do.
    */
   closeControllerEditor();
 
@@ -1165,70 +1165,79 @@ const toggleReveal = ({ input, toggle }) => {
  */
 const firstRunCard = mountConnectionCard({ container: document.getElementById("hbuaFirstRunCard") });
 
-/* The card the Add Controller affordance opens, or null when the affordance is closed.
+/* The takeover handle the open Add Controller card holds the page's content area with, or null when the affordance is closed.
  *
- * Its region sits outside the framework's own reveal cycle, so nothing the framework does opens or closes it and its whole lifetime is ours. That is why it closes
- * on every exit path rather than being left standing: an unsaved card that survived a view rebuild would be describing a page that no longer exists behind it.
+ * The card stands in the content area through the framework's takeover, so the framework hides and restores its own regions around the card and ends the takeover
+ * itself when the user moves the selection or the page cycle ends. Whatever ends it, the handle's abort is the one place this reference is cleared and the card torn
+ * down, so no exit path can leave the reference naming a card that is gone.
  */
-let addCard = null;
+let addCardTakeover = null;
 
-// Put the Add Controller card away and give the feature-options view back its main content, discarding whatever was typed into it. Closing an already-closed
-// affordance is nothing at all, which is what lets every exit path call it without first asking whether it is open.
+// Put the Add Controller card away by giving the page's content area back, discarding whatever was typed into it. Closing an already-closed affordance is nothing at
+// all, which is what lets every exit path call it without first asking whether it is open.
 const closeControllerEditor = () => {
 
-  if(!addCard) {
+  if(!addCardTakeover) {
 
     return;
   }
 
-  addCard.close();
-  addCard = null;
-
-  document.getElementById("hbuaControllerEditor").style.display = "none";
-  document.getElementById("hbuaFeatureContent").style.display = "";
+  addCardTakeover.release();
 };
 
 /* Open a blank card as the whole of the feature-options view's main content.
  *
- * The framework's own regions are hidden by hiding the wrapper this plugin put around them, never by writing on the regions themselves: the framework sets their
- * display on its own teardown-and-reveal schedule, and two writers on one element would eventually disagree. Hiding a wrapper of our own leaves everything the
- * framework wrote exactly as it wrote it, so restoring the view is a single assignment and the framework never notices the card was there.
+ * The card is handed to the framework's takeover inside an element of its own, carrying the compact-card class the page's style block keys on, and the framework
+ * hides its own regions while the card holds the area and restores them when the takeover ends. The handle's signal is the card's lifetime, so the card's listeners
+ * leave with the takeover however it ends.
  */
 const openControllerEditor = () => {
-
-  const region = document.getElementById("hbuaControllerEditor");
 
   // A second click while the affordance is already open would otherwise mount a second card over the first and leak the first one's wiring.
   closeControllerEditor();
 
-  addCard = mountConnectionCard({
+  const region = document.createElement("div");
+
+  region.className = "hbua-compact-card";
+
+  const takeover = ui.featureOptions.takeover(region);
+
+  const card = mountConnectionCard({
 
     container: region,
     heading: "Add a UniFi Access controller",
     helper: "Enter the controller's address and either a local user's login or an Access console API token. The sign-in is validated against the controller before " +
       "anything is saved.",
     onCancel: () => closeControllerEditor(),
-    onSave: () => saveController({ card: addCard, originalAddress: undefined })
+    onSave: async () => {
+
+      const saved = await saveController({ card, originalAddress: undefined });
+
+      /* A save that wrote something gives the area back itself, whatever the write did to the page: a write may re-show the page or re-establish it in place, and
+       * the release is safe either way, including on a takeover the rebuild already ended. It releases this card's own handle rather than going through the close
+       * above, because the save resolves after an await and by then the area may belong to a later open.
+       */
+      if(saved !== null) {
+
+        takeover.release();
+      }
+    },
+    signal: takeover.signal
   });
 
-  document.getElementById("hbuaFeatureContent").style.display = "none";
-  region.style.display = "";
+  addCardTakeover = takeover;
+
+  // Every end of the takeover arrives here as one abort - this plugin's own release, a sidebar selection, a later takeover, or the page cycle ending - so the
+  // reference is cleared and the card torn down along a single path whichever of them it was.
+  takeover.signal.addEventListener("abort", () => {
+
+    addCardTakeover = null;
+    card.close();
+  }, { once: true });
 };
 
 // Wire the plugin's own page controls. The controls are part of this page's markup and live as long as the page does, so their listeners carry no signal.
 document.getElementById("hbuaAddController").addEventListener("click", () => openControllerEditor());
-
-/* A sidebar navigation click closes the Add Controller card, so choosing somewhere else to be takes effect at once rather than at the next rebuild. The rebuild
- * paths close it too, at the controller hook they all pass through; this is for the immediacy the rebuild cannot give, since navigating within an already-rendered
- * view rebuilds nothing. The binding is delegated from the plugin's own column, so it survives every repaint the framework makes to the sidebar inside it.
- */
-document.getElementById("hbuaSidebarColumn").addEventListener("click", (event) => {
-
-  if(event.target.closest(".nav-link[data-navigation]")) {
-
-    closeControllerEditor();
-  }
-});
 
 // The load-time wiring's own lifecycle. Aborting it is how an envelope that failed or expired tells a continuation still running underneath it that it must not stage
 // anything after the fact, and its signal is the one every cancellation point below reads.
