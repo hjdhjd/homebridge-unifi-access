@@ -200,10 +200,14 @@ test("the access methods are one selection over a page-registered source, none s
   assert.equal(switches.multiple, true);
   assert.equal(switches.default, true);
   assert.equal(switches.defaultValue, "");
-  assert.deepEqual(switches.meta?.hasCapability, ["is_reader"]);
+
+  const switchesMeta = switches.meta;
+
+  assert.ok(switchesMeta, "the access method selection should carry its metadata");
+  assert.deepEqual(switchesMeta.hasCapability, ["is_reader"]);
 
   // The domain the page offers where no reader is in view is the catalog's own list, so the two can never disagree about a method's spelling.
-  assert.deepEqual(switches.meta?.choiceDomain, accessMethodChoices());
+  assert.deepEqual(switchesMeta.choiceDomain, accessMethodChoices());
 });
 
 test("the hub's sensors and its logging categories are each one all-members selection over a page-registered source", () => {
@@ -214,13 +218,17 @@ test("the hub's sensors and its logging categories are each one all-members sele
   assert.equal(sensors.multiple, true);
   assert.equal(sensors.default, true);
   assert.equal(sensors.defaultValue, ALL_CHOICES, "an unconfigured hub selects every sensor, which is what keeps a 1.x hub carrying the ones it always had");
-  assert.deepEqual(sensors.meta?.choiceDomain, hubSensorChoices(), "the domain offered where no hub is in view is the whole member table");
+
+  const sensorsMeta = sensors.meta;
+
+  assert.ok(sensorsMeta, "the sensor selection should carry its metadata");
+  assert.deepEqual(sensorsMeta.choiceDomain, hubSensorChoices(), "the domain offered where no hub is in view is the whole member table");
 
   /* The row's page visibility follows the table rather than a hand-spelled union, and the union the table answers is the scope this option is published under, so
    * both readings are held: a member added to the table brings its model with it, and the published scope is asserted as the literal a reader sees.
    */
-  assert.deepEqual(sensors.meta?.modelKey, hubSensorModels());
-  assert.deepEqual(sensors.meta?.modelKey, [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ]);
+  assert.deepEqual(sensorsMeta.modelKey, hubSensorModels());
+  assert.deepEqual(sensorsMeta.modelKey, [ "UA Ultra", "UA Hub", "UA Hub Door Mini", "UA Gate" ]);
 
   const events = entryFor("Log", "Events");
 
@@ -228,8 +236,12 @@ test("the hub's sensors and its logging categories are each one all-members sele
   assert.equal(events.multiple, true);
   assert.equal(events.default, true);
   assert.equal(events.defaultValue, ALL_CHOICES, "and every category is logged until a user narrows the list");
-  assert.deepEqual(events.meta?.choiceDomain, logEventChoices());
-  assert.deepEqual(events.meta?.hasCapability, ["is_hub"], "the categories are a hub's own events, so the row is offered on hubs alone");
+
+  const eventsMeta = events.meta;
+
+  assert.ok(eventsMeta, "the logging selection should carry its metadata");
+  assert.deepEqual(eventsMeta.choiceDomain, logEventChoices());
+  assert.deepEqual(eventsMeta.hasCapability, ["is_hub"], "the categories are a hub's own events, so the row is offered on hubs alone");
 });
 
 test("no per-sensor or per-category boolean survives in the catalog", () => {

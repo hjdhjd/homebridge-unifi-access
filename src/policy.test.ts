@@ -601,10 +601,11 @@ test("a Door Mini's position flows from its topology seed and is corrected by a 
 
   const flipped = selectDoorStates(store.snapshot()).get("door1");
 
-  assert.equal(flipped?.dps, "open", "the notification must correct the seeded position");
+  assert.ok(flipped, "the door must still hold a state once the notification is applied");
+  assert.equal(flipped.dps, "open", "the notification must correct the seeded position");
 
   // The lock comes from the same report. Nothing else carries a single-door hub's lock state, so a report that dropped it would strand the lock projection entirely.
-  assert.equal(flipped?.lock, "unlocked");
+  assert.equal(flipped.lock, "unlocked");
 });
 
 test("lockCommandRule maps every configured interval onto the verb that expresses it", () => {

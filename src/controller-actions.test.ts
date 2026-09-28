@@ -15,7 +15,7 @@
  * A re-select records the number of sends that had already been made when it was asked for, which is what makes "the re-select follows the send" a proof rather
  * than an agreement with the order the two happened to be written in.
  */
-import type { AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
+import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
 import type { ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
 import assert from "node:assert/strict";
 import { makeControllerActions } from "../homebridge-ui/public/controller-actions.mjs";
@@ -234,13 +234,13 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
 
       return {
 
-        withControllerRemoved: (config, removal) => {
+        withControllerRemoved: (config, removal): AccessConfigPatch => {
 
           interpreterCalls.push({ config, kind: "removed", payload: removal });
 
           return REMOVE_PATCH;
         },
-        withControllerSaved: (config, controller) => {
+        withControllerSaved: (config, controller): AccessConfigPatch => {
 
           interpreterCalls.push({ config, kind: "saved", payload: controller });
 
@@ -470,8 +470,12 @@ test("s9: the address a save writes is seeded with its own processed answer befo
   await stood.actions.saveController({ card: stood.card, originalAddress: undefined });
 
   assert.equal(stood.seenDuringWrite.length, 1, "the write ran exactly once");
-  assert.equal(stood.seenDuringWrite[0]?.atAddress?.message, PROBE_MESSAGE, "the write saw this save's own answer rather than the one held before it");
-  assert.deepEqual(stood.seenDuringWrite[0]?.atAddress?.devices, [{ processed: PROCESSED, processedAddress: ADDRESS, serialNumber: PROBE_SERIAL }],
+
+  const atAddress = stood.seenDuringWrite[0]?.atAddress;
+
+  assert.ok(atAddress, "the address must already hold an answer by the time the write runs");
+  assert.equal(atAddress.message, PROBE_MESSAGE, "the write saw this save's own answer rather than the one held before it");
+  assert.deepEqual(atAddress.devices, [{ processed: PROCESSED, processedAddress: ADDRESS, serialNumber: PROBE_SERIAL }],
     "and saw it with the page's own decoration already applied");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });

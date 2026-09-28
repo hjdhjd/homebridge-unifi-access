@@ -557,9 +557,11 @@ test("an address change edits that item rather than adding a second one beside i
 
   const moved = withControllerSaved({ controllers: [{ ...CREDENTIALS }] },
     { address: "10.0.0.9", originalAddress: ADDRESS, password: CREDENTIALS.password, username: CREDENTIALS.username });
+  const movedControllers = moved.controllers;
 
-  assert.equal(moved.controllers?.length, 1, "the address the write started from is what finds the item, so a changed address replaces rather than duplicates");
-  assert.deepEqual(moved.controllers?.[0], { ...CREDENTIALS, address: "10.0.0.9" }, "and the item now carries the new address");
+  assert.ok(movedControllers, "the save should have composed a controllers array");
+  assert.equal(movedControllers.length, 1, "the address the write started from is what finds the item, so a changed address replaces rather than duplicates");
+  assert.deepEqual(movedControllers[0], { ...CREDENTIALS, address: "10.0.0.9" }, "and the item now carries the new address");
 
   const added = { address: "10.0.0.9", tokens: TOKENS };
 
@@ -756,7 +758,7 @@ test("the first-run save composes a complete identity as one patch and composes 
   assert.deepEqual(withPrimaryIdentity({}, { address: ADDRESS, tokens: TOKENS })?.controllers, [{ address: ADDRESS, tokens: TOKENS }],
     "a token-only identity is a complete one, and lands on the primary controller of a fresh configuration");
   assert.deepEqual(withPrimaryIdentity({ controllers: [ { ...CREDENTIALS }, { address: "10.0.0.2", tokens: TOKENS } ] },
-    { ...CREDENTIALS, password: "new secret" })?.controllers?.[1], { address: "10.0.0.2", tokens: TOKENS }, "every additional controller is preserved");
+    { ...CREDENTIALS, password: "new secret" })?.controllers[1], { address: "10.0.0.2", tokens: TOKENS }, "every additional controller is preserved");
   assert.equal(withPrimaryIdentity({}, { address: ADDRESS, username: CREDENTIALS.username }), null, "half a credential pair composes nothing at all");
   assert.equal(withPrimaryIdentity({}, { tokens: TOKENS }), null, "and neither does an identity with nowhere to connect to");
   assert.equal(withPrimaryIdentity({}, { address: ADDRESS, tokens: {} }), null, "and an empty tokens object is no identity either, on the predicate's own reading");

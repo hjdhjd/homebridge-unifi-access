@@ -617,7 +617,7 @@ test("a view resolves through the registry, pushes the snapshot and truth frame,
   const record = store.snapshot().devices.get("device1");
   const { client } = makeClient(store, [{ doorId: "door1", record }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
 
@@ -684,7 +684,7 @@ test("a row set that grows mid-view is pushed as a fresh snapshot, where a value
   const record = store.snapshot().devices.get("device1");
   const { client } = makeClient(store, [{ doorId: "door1", record }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
 
@@ -732,7 +732,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
 
   const { client } = makeClient(store);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
 
@@ -786,7 +786,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
 
   const { client } = makeClient(store, [ { doorId: "door1", record }, { doorId: "door2", port: true, record: port } ]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   // Every serial used below is registered, so each view reaches the resolution layer rather than stopping at the registry's not-found gate.
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO + "-PORT1", SERIAL_TWO ]));
@@ -846,7 +846,7 @@ test("the truth frame reports both liveness polarities the moment the snapshot l
   const offlineRig = makeClient(offlineStore, [{ doorId: "door1", record: offlineRecord }]);
   const offlineFrames: StatusEvent[] = [];
   const offlineFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => offlineRig.client, log: noopLog,
-    push: (event) => void offlineFrames.push(event) });
+    push: (event): void => void offlineFrames.push(event) });
 
   offlineFeed.context(contextRequest([SERIAL_ONE]));
   await offlineFeed.view(SERIAL_ONE);
@@ -870,7 +870,7 @@ test("the truth frame reports both liveness polarities the moment the snapshot l
   const onlineRig = makeClient(onlineStore, [{ doorId: "door1", record: onlineRecord }]);
   const onlineFrames: StatusEvent[] = [];
   const onlineFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => onlineRig.client, log: noopLog,
-    push: (event) => void onlineFrames.push(event) });
+    push: (event): void => void onlineFrames.push(event) });
 
   onlineFeed.context(contextRequest([SERIAL_ONE], { verifyTls: false }));
   await onlineFeed.view(SERIAL_ONE);
@@ -903,7 +903,7 @@ test("a superseded establish emits nothing for its session and releases the clie
     await gate.promise;
 
     return client;
-  }, log: noopLog, push: (event) => void frames.push(event) });
+  }, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
 
@@ -926,7 +926,7 @@ test("a superseded establish emits nothing for its session and releases the clie
   const plainFrames: StatusEvent[] = [];
   const plainRig = makeClient(store, [{ doorId: "door1", record }]);
   const plainFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => plainRig.client, log: noopLog,
-    push: (event) => void plainFrames.push(event) });
+    push: (event): void => void plainFrames.push(event) });
 
   plainFeed.context(contextRequest([SERIAL_ONE]));
   await plainFeed.view(SERIAL_ONE);
@@ -957,7 +957,7 @@ test("a within-controller switch reuses the client, re-resolves the doors, and s
     connects++;
 
     return client;
-  }, log: noopLog, push: (event) => void frames.push(event) });
+  }, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
 
@@ -1004,7 +1004,7 @@ test("a view for a serial the registry dropped releases the standing client and 
   const record = store.snapshot().devices.get("device1");
   const { client, disposeCount } = makeClient(store, [{ doorId: "door1", record }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
   await feed.view(SERIAL_ONE);
@@ -1029,7 +1029,7 @@ test("the view contract answers not-found for an unregistered serial and auth-mi
   const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => {
 
     throw new Error("The connect port must never be reached in this arm.");
-  }, log: noopLog, push: (event) => void frames.push(event) });
+  }, log: noopLog, push: (event): void => void frames.push(event) });
 
   // No context at all: the very first view answers not-found.
   await feed.view(SERIAL_ONE);
@@ -1059,7 +1059,7 @@ test("every frame carries the decorated serial whatever spelling the boundary re
   const record = store.snapshot().devices.get("device1");
   const { client } = makeClient(store, [{ doorId: "door1", record }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   // The context boundary re-normalizes: a registry send carrying the colon-bearing MAC spelling still keys the decorated form...
   feed.context(contextRequest([MAC_ONE]));
@@ -1085,7 +1085,7 @@ test("the connection wiring emits only the offline truth on lost and re-pushes s
   const record = store.snapshot().devices.get("device1");
   const { client, connection } = makeClient(store, [{ doorId: "door1", record }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);
@@ -1142,7 +1142,7 @@ test("a lost connection is never reused: the next view connects fresh and releas
     assert.ok(client);
 
     return client;
-  }, log: noopLog, push: (event) => void frames.push(event) });
+  }, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
   await feed.view(SERIAL_ONE);
@@ -1171,7 +1171,7 @@ test("a controller-as-device view resolves only through the controllerSerial rou
   // value has to come off this client's capabilities to match below.
   const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "credential", official: false });
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   // The console's serial is carried ONLY by the controllerSerial member - it is deliberately not in serials - so a feed without the controller routing answers not-found
   // here by construction. The colon-bearing spelling exercises the context boundary's normalization of this member too.
@@ -1202,7 +1202,7 @@ test("a controller-as-device view renders a token the controller refused from th
   // derivation the client's own official member rather than a value of its own.
   const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "dual", official: false });
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE], { controllerSerial: "AABBCC000099" }));
 
@@ -1232,7 +1232,7 @@ test("a controller identity in either form resolves its own view, because both b
     const record = store.snapshot().devices.get("device1");
     const { client } = makeClient(store, [{ doorId: "door1", record }], { mode: "token", official: true });
     const frames: StatusEvent[] = [];
-    const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+    const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
     feed.context(contextRequest([SERIAL_ONE], { controllerSerial: identity }));
 
@@ -1262,7 +1262,7 @@ test("a throwing door resolution degrades the view to absence and starts no door
   // The hub handle's doorId getter throws the removal-window ReferenceError; the resolution absorbs it and resolves no door ids.
   const { client } = makeClient(store, [{ record, throwOnDoorId: true }]);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);
@@ -1300,7 +1300,7 @@ test("a UA Gate view drives the shared discovery through the live client and ass
 
   const { client } = makeClient(store);
   const frames: StatusEvent[] = [];
-  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event) => void frames.push(event) });
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
 
   feed.context(contextRequest([SERIAL_ONE]));
   await feed.view(SERIAL_ONE);

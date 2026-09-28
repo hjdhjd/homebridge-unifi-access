@@ -54,13 +54,16 @@ test("doorsTopology gives each door its own device group rather than one shared 
 test("doorsTopology names a door after its identity by default and carries a supplied name into both names a door has", () => {
 
   const doors = doorsOf(doorsTopology([ { devices: [], id: "door1" }, { devices: [], id: "door2", name: "Side Gate" } ]));
+  const [ first, second ] = doors;
 
-  assert.equal(doors[0]?.name, "Door door1", "a door with no name of its own is named after its identity");
-  assert.equal(doors[0]?.full_name, "Door door1", "and its full name reads the same");
+  assert.ok(first, "the first entry must become a door");
+  assert.equal(first.name, "Door door1", "a door with no name of its own is named after its identity");
+  assert.equal(first.full_name, "Door door1", "and its full name reads the same");
 
   // "Side Gate" is a spelling the default cannot produce, so a builder that ignored the option would read "Door door2" on both members below.
-  assert.equal(doors[1]?.name, "Side Gate", "a supplied name is what the door carries");
-  assert.equal(doors[1]?.full_name, "Side Gate", "and its full name reads the same");
+  assert.ok(second, "the second entry must become a door");
+  assert.equal(second.name, "Side Gate", "a supplied name is what the door carries");
+  assert.equal(second.full_name, "Side Gate", "and its full name reads the same");
 });
 
 test("configRows yields one row per entry, addressed to the default device under the default tag", () => {
