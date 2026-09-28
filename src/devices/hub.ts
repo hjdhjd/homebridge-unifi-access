@@ -585,6 +585,13 @@ export class AccessHub extends AccessDevice {
      * what keeps the rail's second emission under this hub's own identity from being a second delivery.
      */
     this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, (packet) => this.handleRemoteUnlock(packet));
+
+    /* State this device's reachability once adoption is complete. Neither trigger that restates it reaches a device at adoption: the record loop yields on the first
+     * change after it starts rather than on the record it starts from, and the controller's connection observer pushes on a transition alone. The sensors were
+     * dressed with this same reading above, so what this adds is the MQTT statement, which a device adopted mid-session would otherwise withhold until its record
+     * next moved.
+     */
+    this.refreshReachability();
   }
 
   // Configure the access method switches for HomeKit.

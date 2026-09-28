@@ -760,6 +760,18 @@ function lockPayloads(harness: HubHarness, tail = "lock"): string[] {
   return topicPayloads(harness, tail);
 }
 
+/* The availability statement a reachable hub makes once its adoption completes, as the harness records the call. Every hub these arms stand up opens its publish
+ * record with it, so an arm asserting what a later act published names it first rather than reading it as part of that act.
+ *
+ * @param harness - The hub whose statement to spell.
+ *
+ * @returns The recorded publish.
+ */
+function adoptionStatement(harness: HubHarness): HubHarness["publishes"][number] {
+
+  return { init: { ifChanged: true, retain: true, signal: harness.hub.signal }, payload: "online", topic: HUB_SERIAL + "/availability" };
+}
+
 /* How many times a hub wrote exactly this sentence, which is what tells an announcement that happens once from one that repeated or never came.
  *
  * @param harness  - The hub to read.
@@ -870,7 +882,7 @@ test("the hub registers for exactly the deliveries the registration asks a contr
   }
 
   // Neither delivery named this hub, so neither did anything - which is what makes the registration assertion above meaningful rather than incidental.
-  assert.deepEqual(harness.publishes, []);
+  assert.deepEqual(harness.publishes, [adoptionStatement(harness)]);
   assert.deepEqual(harness.lines, []);
 });
 
@@ -881,8 +893,8 @@ test("an unlock on this hub's own door publishes one attribution and says who op
   harness.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery());
 
   // The topic tail is the main door's, and the payload is the attribution rather than the raw delivery.
-  assert.deepEqual(harness.publishes.map(published => published.topic), [HUB_SERIAL + "/unlock"]);
-  assert.deepEqual(JSON.parse(harness.publishes[0]?.payload ?? "null"), {
+  assert.deepEqual(harness.publishes.map(published => published.topic), [ HUB_SERIAL + "/availability", HUB_SERIAL + "/unlock" ]);
+  assert.deepEqual(JSON.parse(harness.publishes[1]?.payload ?? "null"), {
 
     actor: "webhook delivery probe",
     actorType: "open_api",
@@ -906,7 +918,7 @@ test("an unlock on a door this hub does not drive is not its business", () => {
    */
   harness.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: "a-door-down-the-hall" }));
 
-  assert.deepEqual(harness.publishes, []);
+  assert.deepEqual(harness.publishes, [adoptionStatement(harness)]);
   assert.deepEqual(harness.lines, []);
 });
 
@@ -920,13 +932,13 @@ test("a hub inside its removal window answers null rather than throwing out of a
 
   departing.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery());
 
-  assert.deepEqual(departing.publishes, [], "a hub that cannot resolve its own door owns nothing");
+  assert.deepEqual(departing.publishes, [adoptionStatement(departing)], "a hub that cannot resolve its own door owns nothing");
   assert.deepEqual(departing.lines, []);
 
   // The sibling still handles its own delivery, which is the half that fails a handler letting the ReferenceError escape.
   sibling.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery());
 
-  assert.equal(sibling.publishes.length, 1);
+  assert.deepEqual(sibling.publishes.map(published => published.topic), [ HUB_SERIAL + "/availability", HUB_SERIAL + "/unlock" ]);
 });
 
 test("a UA Gate publishes its side door's unlocks under the side door's own topic", () => {
@@ -939,12 +951,12 @@ test("a UA Gate publishes its side door's unlocks under the side door's own topi
 
   gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: SIDE_DOOR, doorName: "Pedestrian Gate" }));
 
-  assert.deepEqual(gate.publishes.map(published => published.topic), [HUB_SERIAL + "/sidedoor/unlock"]);
+  assert.deepEqual(gate.publishes.map(published => published.topic), [ HUB_SERIAL + "/availability", HUB_SERIAL + "/sidedoor/unlock" ]);
 
   // And the main gate still publishes on the main tail, so the two doors of one accessory stay told apart.
   gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: MAIN_DOOR, doorName: "Main Gate" }));
 
-  assert.deepEqual(gate.publishes.map(published => published.topic), [ HUB_SERIAL + "/sidedoor/unlock", HUB_SERIAL + "/unlock" ]);
+  assert.deepEqual(gate.publishes.map(published => published.topic), [ HUB_SERIAL + "/availability", HUB_SERIAL + "/sidedoor/unlock", HUB_SERIAL + "/unlock" ]);
 });
 
 /* A UA Gate whose relay rows report both doors secured, which is the seed every service below is configured from. An arm pairs it with a door state map that
@@ -967,8 +979,8 @@ test("a UA Gate adopts its main door's lock from the door state map rather than 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockTargetState).value, Characteristic.LockTargetState.UNSECURED);
 
-  // Adoption is not a transition anyone observed, so it reaches the characteristics and nothing else.
-  assert.deepEqual(gate.publishes, []);
+  // Adoption is not a transition anyone observed, so it reaches the characteristics and publishes nothing but the device's availability.
+  assert.deepEqual(gate.publishes, [adoptionStatement(gate)]);
   assert.deepEqual(gate.lines, []);
 });
 
@@ -984,7 +996,7 @@ test("a UA Gate adopts its side door's lock and position from the door state map
   assert.equal(contactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_NOT_DETECTED);
 
-  assert.deepEqual(gate.publishes, []);
+  assert.deepEqual(gate.publishes, [adoptionStatement(gate)]);
   assert.deepEqual(gate.lines, []);
 });
 
@@ -1003,7 +1015,7 @@ test("a UA Gate whose door state map agrees with its record adopts silently and 
   assert.equal(contactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_DETECTED);
 
-  assert.deepEqual(gate.publishes, [], "an adoption that told HomeKit nothing new must publish nothing");
+  assert.deepEqual(gate.publishes, [adoptionStatement(gate)], "an adoption that told HomeKit nothing new must publish nothing but its availability");
   assert.deepEqual(gate.lines, []);
 });
 
@@ -1014,8 +1026,8 @@ test("a door hub adopts its own door's reading from the door state map at constr
 
   assert.equal(lockService(hub).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
 
-  // Adoption is not a transition anyone observed, so it reaches the characteristics and nothing else.
-  assert.deepEqual(hub.publishes, []);
+  // Adoption is not a transition anyone observed, so it reaches the characteristics and publishes nothing but the device's availability.
+  assert.deepEqual(hub.publishes, [adoptionStatement(hub)]);
 });
 
 test("a doorbell call that ended on this hub's reader is logged, and one on another hub's is not", () => {
@@ -1026,7 +1038,7 @@ test("a doorbell call that ended on this hub's reader is logged, and one on anot
 
   // The outcome is the library's own gloss for the code, and nothing is published - a call ending is a fact about the call rather than about the door.
   assert.deepEqual(harness.lines, [LOG_PREFIX + "Doorbell call ended: the call timed out."]);
-  assert.deepEqual(harness.publishes, []);
+  assert.deepEqual(harness.publishes, [adoptionStatement(harness)]);
 
   /* The delivery names its hub only through the ringing reader's own record - the live capture's host member reads empty - so a reader hanging off another hub is
    * how a sibling's call arrives here, and it must stay silent.
@@ -1778,19 +1790,35 @@ test("every publish carries the device's own lifetime signal, and one issued aft
   await settle();
 
   // Before the removal the publish is admitted, and it carries this device's own signal rather than the controller's.
-  assert.deepEqual(harness.mqtt.published, [{ payload: "true", retain: false, topic: HUB_SERIAL + "/lock" }]);
-  assert.equal(harness.publishes[0]?.init?.signal, harness.hub.signal, "a publish must carry the device's own lifetime signal");
+  assert.deepEqual(harness.mqtt.published, [ { payload: "online", retain: true, topic: HUB_SERIAL + "/availability" },
+    { payload: "true", retain: false, topic: HUB_SERIAL + "/lock" } ]);
+  assert.equal(harness.publishes[1]?.init?.signal, harness.hub.signal, "a publish must carry the device's own lifetime signal");
 
   harness.hub.cleanup();
   harness.publish(mqttTopics.lock, "false");
 
   await settle();
 
-  // After it, the client refuses the publish on the signal it carries and says so at debug; nothing reaches the broker and nothing is an error.
-  assert.deepEqual(harness.mqtt.published, [{ payload: "true", retain: false, topic: HUB_SERIAL + "/lock" }], "a publish after removal must never reach the broker");
-  assert.equal(harness.publishes[1]?.init?.signal?.aborted, true);
+  // After it, the client refuses the publish on the signal it carries and says so at debug: the removal's own offline statement is the last thing to reach the
+  // broker, and nothing is an error.
+  assert.deepEqual(harness.mqtt.published, [ { payload: "online", retain: true, topic: HUB_SERIAL + "/availability" },
+    { payload: "true", retain: false, topic: HUB_SERIAL + "/lock" }, { payload: "offline", retain: true, topic: HUB_SERIAL + "/availability" } ],
+  "a publish after removal must never reach the broker");
+  assert.equal(harness.publishes[3]?.init?.signal?.aborted, true);
   assert.deepEqual(harness.debugs, ["MQTT publish aborted: " + HUB_SERIAL + "/lock."]);
   assert.deepEqual(harness.errors, []);
+});
+
+test("a hub states its availability once its adoption completes, retained, in whichever word its reachability reads", () => {
+
+  /* Neither trigger that restates reachability reaches a device at adoption - the record loop waits for a change and the controller's observer for a transition -
+   * so the statement comes from adoption itself, which is what spares a hub adopted mid-session from saying nothing until its record next moves.
+   */
+  const reachable = makeHub();
+  const unreachable = makeHub({ record: testHub({ is_online: false }) });
+
+  assert.deepEqual(reachable.mqtt.published, [{ payload: "online", retain: true, topic: HUB_SERIAL + "/availability" }]);
+  assert.deepEqual(unreachable.mqtt.published, [{ payload: "offline", retain: true, topic: HUB_SERIAL + "/availability" }]);
 });
 
 test("a gate unlock overtaken by the device's removal announces nothing", async () => {
@@ -2723,7 +2751,7 @@ test("a hub inside its removal window refreshes nothing and throws nothing at th
   departing.setDoorState({ dps: "open", location_id: MAIN_DOOR, lock: "unlocked" });
 
   assert.doesNotThrow(() => departing.hub.refreshDoorState());
-  assert.deepEqual(departing.publishes, []);
+  assert.deepEqual(departing.publishes, [adoptionStatement(departing)]);
   assert.deepEqual(departing.lines, []);
   assert.equal(lockService(departing).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED);
 });

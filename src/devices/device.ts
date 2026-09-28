@@ -6,9 +6,10 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { DecoratedSerial, LogEventName } from "../policy.ts";
-import type { HomebridgePluginLogging, MqttGetHandler, MqttSetHandler, MqttTopicEntry, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog, sanitizeName, setAccessoryName,
-  updateServices } from "homebridge-plugin-utils";
+import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
+  Nullable } from "homebridge-plugin-utils";
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog,
+  sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -16,6 +17,7 @@ import type { AccessController } from "../controller/controller.ts";
 import type { AccessListener } from "../controller/events.ts";
 import type { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
+import { mqttTopics } from "../mqtt.ts";
 
 /* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
  * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
@@ -231,15 +233,31 @@ export abstract class AccessDevice extends AccessBase {
     });
   }
 
-  /* Restate this device's availability to every service that carries the characteristic. The controller's connection observer pushes it whenever controller-level
-   * reachability may have moved, and this device's own record loop calls it on every delivery, so the two scopes the composition spans reach HomeKit through one
-   * statement rather than through a writer each.
+  /* Restate this device's availability to every service that carries the characteristic, and on this device's own MQTT availability topic. The controller's
+   * connection observer pushes it whenever controller-level reachability may have moved, and this device's own record loop calls it on every delivery, so the two
+   * scopes the composition spans reach HomeKit and the broker through one statement rather than through a writer each.
    *
-   * The characteristic's own value is the single source of what HomeKit was last shown, so nothing here shadows it with a flag that could drift from it.
+   * The characteristic's own value is the single source of what HomeKit was last shown, so nothing here shadows it with a flag that could drift from it. The MQTT
+   * statement keeps no copy either: the client's change gate is what remembers the last statement it delivered.
    */
   public refreshReachability(): void {
 
     updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isReachable);
+    this.#publishAvailability();
+  }
+
+  /* State this device's availability on its own topic, read from the same composition every StatusActive carrier reads, so what HomeKit is shown and what the broker
+   * holds cannot disagree. The statement is retained, so a subscriber attaching mid-session reads the last one without waiting for the next, and it composes with
+   * the plugin-level statement the client makes: a device is available only when both read online.
+   *
+   * It is change-gated because the record loop refreshes reachability on every delivery. The client remembers what it last delivered on the topic and forgets it
+   * at every broker session, so a delivery that leaves reachability where it stood publishes nothing, and the first statement after an outage always goes out.
+   */
+  #publishAvailability(): void {
+
+    const payload: MqttAvailabilityPayload = this.isReachable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
+
+    this.mqttPublish(mqttTopics.availability, payload, { ifChanged: true, retain: true });
   }
 
   /* Refresh whatever per-device state a broken notification stream may have left stale. The controller's connection observer calls this on every completed recovery,
@@ -298,6 +316,15 @@ export abstract class AccessDevice extends AccessBase {
     }
 
     this.listeners.clear();
+
+    /* State offline as this device's last word on its availability topic, before its lifetime ends. The statement is retained, so without it the broker would go on
+     * answering online for a device that is gone. It goes through the controller's chokepoint rather than this device's own publish, because a publish bound to a
+     * lifetime about to abort is withdrawn with it...the client's own lifetime still governs it, so a plugin shutting down cancels it all the same.
+     *
+     * It is change-gated like every other availability statement, because only a change-gated publish writes the client's memory of the topic: an ungated offline
+     * would leave online remembered there, and the online a device re-adopted under this identity states would find it unchanged and never be sent.
+     */
+    this.controller.mqttPublish(mqttTopic(this.id, mqttTopics.availability.topic), MQTT_AVAILABILITY_OFFLINE, { ifChanged: true, retain: true });
     this.#deviceController.abort();
   }
 
@@ -334,12 +361,15 @@ export abstract class AccessDevice extends AccessBase {
    * rather than delivered, and one issued after the removal is refused before it reaches the broker, each at debug, because a removed device has nothing left
    * to announce. The controller's chokepoint is what states whether MQTT is configured at all.
    *
+   * A caller's own options - retention and the change gate - travel with the publish, and the lifetime is never one of them: it is this device's, always.
+   *
    * @param entry   - The catalog entry naming the topic tail.
    * @param payload - The payload to publish.
+   * @param init    - The client's per-publish options other than the signal, which this device supplies.
    */
-  protected mqttPublish(entry: MqttTopicEntry, payload: string): void {
+  protected mqttPublish(entry: MqttTopicEntry, payload: string, init: Omit<MqttPublishInit, "signal"> = {}): void {
 
-    this.controller.mqttPublish(mqttTopic(this.id, entry.topic), payload, { signal: this.signal });
+    this.controller.mqttPublish(mqttTopic(this.id, entry.topic), payload, { ...init, signal: this.signal });
   }
 
   /* Register a getter on one of this device's own topics. The topic is composed exactly as mqttPublish composes it, and the registration is bound to this

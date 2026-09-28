@@ -2,9 +2,10 @@
  *
  * mqtt.ts: The MQTT topic catalog for UniFi Access.
  */
-import { mqttTopicCatalog } from "homebridge-plugin-utils";
+import { mqttAvailabilityEntry, mqttTopicCatalog } from "homebridge-plugin-utils";
 
 // The headings the document groups the plugin's topics under, named once here because every entry below cites one and the renderer prints them as subheadings.
+const AVAILABILITY_GROUP = "Availability Topics";
 const DOOR_GROUP = "Door and Lock Topics";
 const SIDE_DOOR_GROUP = "Side Door Topics (UA Gate Only)";
 const TELEMETRY_GROUP = "Telemetry Topics";
@@ -20,9 +21,13 @@ const TELEMETRY_GROUP = "Telemetry Topics";
  * An entry's label is the word the client's get and set log lines carry: it reaches subscribeGet and subscribeSet as the name of the thing being read or written,
  * and the user sees it in the sentence the client writes. The device column is documentation alone, projected by the renderer into each row's device cell and read
  * by nothing at runtime, so its vocabulary fixes both the spelling of every device kind and the order each cell lists them in.
+ *
+ * The availability entry is the library's own, spread here so every plugin in the family states a device's reachability on the same tail, in the same words,
+ * and with the same message text. The catalog adds only what the library cannot know: the device kinds that carry it and the heading it is printed under.
  */
 export const mqttTopics = mqttTopicCatalog({
 
+  availability: { ...mqttAvailabilityEntry, devices: ["allDevices"], group: AVAILABILITY_GROUP },
   doorbell: { devices: ["doorbellHub"], get: "`true` will trigger a publish event of the current doorbell ring status.", group: DOOR_GROUP, label: "doorbell",
     publish: "`true` when ringing, `false` when the ring ends.", topic: "doorbell" },
   dps: { devices: [ "ultra", "hub", "hubDoorMini", "gate", "enterprisePort" ], get: "`true` will trigger a publish event of the current door position sensor state.",
@@ -62,6 +67,7 @@ export const mqttTopics = mqttTopicCatalog({
   heading: "Access Device Type",
   vocabulary: {
 
+    allDevices: "All devices",
     allHubs: "All hubs",
     controller: "Controller",
     doorbellHub: "Hub with a doorbell",

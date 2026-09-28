@@ -26,6 +26,7 @@ I've provided MQTT support for those that are interested - I'm genuinely curious
 
 `homebridge-unifi-access` will publish MQTT events if you've configured a broker in the controller-specific settings. The plugin supports a rich set of capabilities over MQTT. This includes:
 
+  * Device availability, stated on each device's own retained `availability` topic. A device is available only when its statement and the plugin-level `availability` statement both read `online`.
   * Doorbell ring events.
   * Lock events, including triggering locks via MQTT.
   * Door position sensor (DPS) events.
@@ -71,6 +72,12 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 | Topic           | Message Published
 |-----------------|----------------------------------
 | `availability`  | `online` while the plugin holds a broker session, `offline` by the broker's last will when the plugin exits or its connection drops. Retained either way.
+
+#### Availability Topics
+
+| Topic           | Access Device Type  | Message Published
+|-----------------|---------------------|----------------------------------
+| `availability`  | All devices         | `online` when the plugin can reach the device, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. A device is available only when this topic and the plugin-level `availability` topic both read `online`.
 
 #### Door and Lock Topics
 

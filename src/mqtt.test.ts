@@ -8,7 +8,7 @@
  * Importing the topic catalog runs the builder's own validation, so a declaration carrying a duplicate wire topic, an entry with no message text at all, or a
  * malformed placeholder fails this whole file at load rather than reaching a broker.
  */
-import { FeatureOptions, MQTT_DEVICE_COLUMN, mqttConnectionSettings, mqttTopic } from "homebridge-plugin-utils";
+import { FeatureOptions, MQTT_DEVICE_COLUMN, mqttAvailabilityEntry, mqttConnectionSettings, mqttTopic } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import assert from "node:assert/strict";
@@ -127,6 +127,7 @@ test("the catalog declares the wire topics every subscriber already relies on", 
    */
   assert.deepEqual(Object.fromEntries(Object.entries(mqttTopics).map(([ key, entry ]) => [ key, entry.topic ])), {
 
+    availability: "availability",
     doorbell: "doorbell",
     dps: "dps",
     lock: "lock",
@@ -146,4 +147,16 @@ test("the catalog declares the wire topics every subscriber already relies on", 
 
   // The device column travels with the entries, which is what lets the renderer print a device cell for every row at the docs build.
   assert.equal(mqttTopics[MQTT_DEVICE_COLUMN].heading, "Access Device Type");
+});
+
+test("the catalog carries the library's availability entry for every device, under a heading of its own", () => {
+
+  /* The label, the message text, and the tail are the library's, so every plugin in the family states a device's reachability in the same words on the same tail.
+   * The catalog adds the device kinds and the heading alone, which is all a consumer spreading the entry is asked for.
+   */
+  const { devices, group, ...entry } = mqttTopics.availability;
+
+  assert.deepEqual(entry, mqttAvailabilityEntry);
+  assert.deepEqual(devices, ["allDevices"]);
+  assert.equal(group, "Availability Topics");
 });
