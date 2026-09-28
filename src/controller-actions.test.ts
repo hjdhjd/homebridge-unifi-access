@@ -16,7 +16,7 @@
  * than an agreement with the order the two happened to be written in.
  */
 import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
-import type { ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
+import type { ControllerAction, ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
 import assert from "node:assert/strict";
 import { makeControllerActions } from "../homebridge-ui/public/controller-actions.mjs";
 import test from "node:test";
@@ -63,8 +63,18 @@ const REMOVED_STAGED = "This controller has been removed, but Homebridge could n
 const SAVE_FAILURE_LINE = "Unable to save this controller.";
 const REMOVE_FAILURE_LINE = "Unable to remove this controller.";
 
+// A failure the page's probe paints for a controller it could not reach, in the headline, guidance, and detail it paints one with, and the one message the error
+// toast carries for it when the card does not present the save.
+const CHECK_FAILURE: RenderedVerdict = { detail: "the controller refused this sign-in", lines: [ "Unable to connect to the UniFi Access controller.",
+  "Please check your controller address and sign-in details." ], tone: "text-danger" };
+const CHECK_FAILURE_TOAST = "Unable to connect to the UniFi Access controller. Please check your controller address and sign-in details. the controller refused " +
+  "this sign-in";
+
 // What the interpreter holder throws when an arm asks it to.
 const INTERPRETERS_FAILURE = "the served catalog could not be read";
+
+// What befalls the card while a save is in flight: it closes, an edit to its fields retires the action on it, it leaves the screen, or it is re-populated.
+type CardEvent = "close" | "edit" | "hide" | "repopulate";
 
 // What a verdict render was handed, which is the whole of what a failure says on the card.
 interface RenderedVerdict {
@@ -82,6 +92,12 @@ interface InterpreterCall {
   payload: unknown;
 }
 
+// One probe request, as the save composed it: the card's identity and the report the check speaks through.
+interface ProbeRequest extends AccessIdentity {
+
+  action: Pick<ControllerAction, "render" | "signal">;
+}
+
 // One re-select, carrying the number of sends already made when it was asked for.
 interface Selection {
 
@@ -92,7 +108,7 @@ interface Selection {
 // One toast, by the severity it was spoken at and the sentence it carried.
 interface Toast {
 
-  kind: "success" | "warning";
+  kind: "error" | "success" | "warning";
   message: string;
 }
 
@@ -111,7 +127,7 @@ interface Stand {
   card: ControllerCard;
   composed: unknown[];
   interpreterCalls: InterpreterCall[];
-  probeCalls: unknown[];
+  probeCalls: ProbeRequest[];
   renders: RenderedVerdict[];
   seenDuringWrite: WriteObservation[];
   selections: Selection[];
@@ -165,27 +181,35 @@ function failedAnswer(): AccessProbeVerdict {
 
 /* Stand up the actions over recording fakes for every reach they make outside themselves.
  *
+ * @param options.checkFailure      - A failure the check paints through the action it was handed before it answers, the way the page's probe paints its own.
+ * @param options.duringCheck       - What befalls the card while the check is in flight, ahead of anything the check paints or answers.
+ * @param options.duringWrite       - What befalls the card while the write is in flight, after the check has passed.
  * @param options.interpretersThrow - Whether the interpreter holder rejects rather than answering.
  * @param options.probe             - What the connection validation answers, or null for the failure that writes nothing.
  * @param options.write             - The result the coordinated write resolves with, or the error it throws.
  *
  * @returns The actions and every recorder beneath them.
  */
-function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?: boolean; probe: AccessProbeSuccess | null;
-  write: ControllerWriteResult | Error; }): Stand {
+function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = false, probe, write }: { checkFailure?: RenderedVerdict; duringCheck?: CardEvent;
+  duringWrite?: CardEvent; interpretersThrow?: boolean; probe: AccessProbeSuccess | null; write: ControllerWriteResult | Error; }): Stand {
 
   const composed: unknown[] = [];
   const interpreterCalls: InterpreterCall[] = [];
-  const probeCalls: unknown[] = [];
+  const probeCalls: ProbeRequest[] = [];
   const renders: RenderedVerdict[] = [];
   const seenDuringWrite: WriteObservation[] = [];
   const selections: Selection[] = [];
   const serialReads: AccessProbeSuccess[] = [];
   const toasts: Toast[] = [];
+  let closed = false;
+  let current: AbortController | null = null;
+  let population = 0;
   let sends = 0;
+  let visible = true;
 
-  /* The card an action acts for. Only the field read and the verdict paint are ever reached: the probe is a fake here, so the members it would start and retire a
-   * validation through are stubs no arm asserts.
+  /* The card an action acts for, holding the page card's rules in miniature: a start retires the action before it, an edit retires whatever is current, a
+   * re-population moves the card on without retiring anything, and an action is presented while the card is open, the action stands, the card shows the
+   * population the action began under, and the card is on screen. An action's own paint records only what the card presents, and the plain paint records all.
    */
   const card: ControllerCard = {
 
@@ -196,8 +220,51 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
 
         renders.push(options);
       },
-      retire: (): void => undefined,
-      start: (): AbortSignal => new AbortController().signal
+      retire: (): void => {
+
+        current?.abort();
+        current = null;
+      },
+      start: (): ControllerAction => {
+
+        current?.abort();
+        current = new AbortController();
+
+        const { signal } = current;
+        const startedUnder = population;
+        const presented = (): boolean => !closed && !signal.aborted && (population === startedUnder) && visible;
+
+        return {
+
+          presented,
+          render: (options = {}): void => {
+
+            if(presented()) {
+
+              renders.push(options);
+            }
+          },
+          signal
+        };
+      }
+    }
+  };
+
+  // Each thing that can befall the card, as the page's own card meets it.
+  const befall: Record<CardEvent, () => void> = {
+
+    close: () => {
+
+      closed = true;
+    },
+    edit: () => card.verdict.retire(),
+    hide: () => {
+
+      visible = false;
+    },
+    repopulate: () => {
+
+      population++;
     }
   };
 
@@ -210,6 +277,11 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
       seenDuringWrite.push({ atAddress: actions.answers.get(ADDRESS), atOriginal: actions.answers.get(ORIGINAL_ADDRESS),
         generation: actions.answers.generation() });
       composed.push(compose(PLATFORM));
+
+      if(duringWrite) {
+
+        befall[duringWrite]();
+      }
 
       if(write instanceof Error) {
 
@@ -250,8 +322,25 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
     },
     probe: async (request) => {
 
-      // The request the save composed, kept because the real probe dereferences the verdict surface on it before anything else it does.
+      // The request the save composed, kept because the real probe dereferences the action on it before anything else it does.
       probeCalls.push(request);
+
+      // What befalls the card and the failure the check paints both land here, between the request and its answer, which is where the page's own probe meets
+      // them. The page's probe drops a retired check's answer before it reports anything, and so does this one.
+      if(duringCheck) {
+
+        befall[duringCheck]();
+      }
+
+      if(request.action.signal.aborted) {
+
+        return null;
+      }
+
+      if(checkFailure) {
+
+        request.action.render(checkFailure);
+      }
 
       return probe;
     },
@@ -275,6 +364,10 @@ function stand({ interpretersThrow = false, probe, write }: { interpretersThrow?
     },
     toast: {
 
+      error: (message) => {
+
+        toasts.push({ kind: "error", message });
+      },
       success: (message) => {
 
         toasts.push({ kind: "success", message });
@@ -339,8 +432,13 @@ test("s2: a committed save of a connected controller speaks its plain sentence, 
   const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
-  assert.deepEqual(stood.probeCalls, [{ ...IDENTITY, verdict: stood.card.verdict }],
-    "the probe received the card's identity and the card's own verdict surface");
+
+  // The card's own retirement, made once the save has answered, aborts the signal the probe was handed. That is what shows the check ran as this card's newest
+  // action rather than on a signal of the save's own making.
+  stood.card.verdict.retire();
+
+  assert.deepEqual(stood.probeCalls.map(({ action, ...identity }) => ({ identity, retiredByTheCard: action.signal.aborted })),
+    [{ identity: IDENTITY, retiredByTheCard: true }], "the probe received the card's identity and a check running as the card's own newest action");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });
 
@@ -563,6 +661,85 @@ test("s14: a token-only answer names no serial, on whichever side of the save it
   assert.deepEqual(held.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ADDRESS, originalSerial: undefined,
     serial: PROBE_SERIAL } }], "and a token-only answer held under the address hands no outgoing serial either");
   assert.deepEqual(held.serialReads.map((answer) => answer.message), [PROBE_MESSAGE], "its row going unread the same way");
+});
+
+test("s15: a save whose card closes, leaves the screen, or is re-populated during its check still writes, and speaks its success through the toast", async () => {
+
+  const assertWritten = async (event: CardEvent): Promise<void> => {
+
+    const label = event + ": ";
+    const stood = stand({ duringCheck: event, probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, label + "the save answers the address it wrote");
+    assert.deepEqual(stood.composed, [SAVE_PATCH], label + "and the write still received the patch the interpreter composed");
+    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  };
+
+  await assertWritten("close");
+  await assertWritten("hide");
+  await assertWritten("repopulate");
+});
+
+test("s16: a save whose check fails once its card has closed, left the screen, or been re-populated toasts the failure and paints nothing", async () => {
+
+  const assertToasted = async (event: CardEvent): Promise<void> => {
+
+    const label = event + ": ";
+    const stood = stand({ checkFailure: CHECK_FAILURE, duringCheck: event, probe: null, write: { kind: "committed" } });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assert.deepEqual(stood.composed, [], label + "nothing is composed");
+    assertSpoke({ label, sends: 0, stood, toasts: [{ kind: "error", message: CHECK_FAILURE_TOAST }] });
+  };
+
+  await assertToasted("close");
+  await assertToasted("hide");
+  await assertToasted("repopulate");
+});
+
+test("s17: a save whose write fails once its card has stopped presenting it toasts the failure and paints nothing", async () => {
+
+  const assertToasted = async ({ event, label, message, write }: { event: CardEvent; label: string; message: string;
+    write: ControllerWriteResult | Error; }): Promise<void> => {
+
+    const stood = stand({ duringWrite: event, probe: probeAnswer("connected"), write });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "error", message }] });
+  };
+
+  const refused = (): ControllerWriteResult => ({ error: new Error("the host refused the write"), kind: "failed" });
+  const refusedToast = "Unable to save this controller. the host refused the write";
+
+  await assertToasted({ event: "close", label: "close, failed: ", message: refusedToast, write: refused() });
+  await assertToasted({ event: "close", label: "close, thrown: ", message: "Unable to save this controller. the write threw", write: new Error("the write threw") });
+  await assertToasted({ event: "edit", label: "edit, failed: ", message: refusedToast, write: refused() });
+  await assertToasted({ event: "hide", label: "hide, failed: ", message: refusedToast, write: refused() });
+  await assertToasted({ event: "repopulate", label: "repopulate, failed: ", message: refusedToast, write: refused() });
+});
+
+test("s18: an open card's failures paint on its verdict line and toast nothing", async () => {
+
+  const checked = stand({ checkFailure: CHECK_FAILURE, probe: null, write: { kind: "committed" } });
+
+  assert.equal(await checked.actions.saveController({ card: checked.card, originalAddress: undefined }), null, "a failed check answers null");
+  assertSpoke({ label: "check: ", renders: [CHECK_FAILURE], sends: 0, stood: checked });
+
+  const written = stand({ probe: probeAnswer("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
+
+  assert.equal(await written.actions.saveController({ card: written.card, originalAddress: undefined }), null, "a failed write answers null");
+  assertSpoke({ label: "write: ", renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1,
+    stood: written });
+});
+
+test("s19: an edit to the card's fields during a save's check cancels the save, which writes nothing and says nothing", async () => {
+
+  const stood = stand({ duringCheck: "edit", probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.deepEqual(stood.interpreterCalls, [], "no interpreter runs");
+  assert.deepEqual(stood.composed, [], "nothing is composed");
+  assertSpoke({ sends: 0, stood });
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {

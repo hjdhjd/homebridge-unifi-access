@@ -32,7 +32,8 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
  * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
  * @param injected.selectController  - The page's selection of a controller's own sidebar entry, by the address the configuration records.
  * @param injected.sendStatusContext - The page's send of its controller context to the live-status feed.
- * @param injected.toast             - The host's toast surface, which is where a write that landed speaks.
+ * @param injected.toast             - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when its card does
+ *                                     not present it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
@@ -102,8 +103,12 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
 
   /* Validate a card's connection and persist it, which is the whole of what Save means.
    *
-   * Validation comes first and a failure writes nothing at all: a controller the plugin cannot connect to is not a configuration worth saving, and the card's own
-   * verdict line already says why. The write is then handed to the feature-options page as a composer rather than made through a session of this card's own,
+   * A pressed Save is a request to save. Only the card's own retiring acts - an edit to its fields, a Validate press, or another Save - cancel it, and only while
+   * its check is in flight, so nothing is written and the newest action wins; once the write has started, nothing cancels it. Closing the card, re-populating it,
+   * or taking it off screen is moving on rather than cancelling, so the save goes on to write if its check passes.
+   *
+   * Validation comes first and a failure writes nothing at all: a controller the plugin cannot connect to is not a configuration worth saving, and this save's
+   * report already says why. The write is then handed to the feature-options page as a composer rather than made through a session of this card's own,
    * because the page's store holds the options array the user loaded and a write made behind it is one the next option edit writes back over. The page drains
    * whatever option edits are in flight, composes against the configuration as it then stands, writes and saves through the one session it owns, and re-establishes
    * itself on what was written.
@@ -115,15 +120,43 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
    *
    * Success speaks through the host's toast rather than the card's verdict line. The page re-runs this plugin's status-panel content hook during and after the
    * write - each run re-populates the docked card, and populating blanks its verdict - and a re-entry through show() discards the frame the card sits on
-   * altogether, so the toast is the one surface that survives every outcome. A failure still speaks on the card, because a write that changed nothing
-   * re-establishes nothing and the card stands.
+   * altogether, so the toast is the one surface that survives every outcome. A failure is delivered by one rule: it paints on the card while the card still
+   * presents this save - open, on screen, showing the controller the save began on, and not retired by a newer act - and otherwise it speaks through the host's
+   * error toast, since the line it would paint on is gone, hidden, or describing something else.
    *
    * @returns The address that was written, or null when nothing was.
    */
   const saveController = async ({ card, originalAddress }) => {
 
     const identity = card.values();
-    const validation = await probe({ ...identity, verdict: card.verdict });
+
+    /* This save's action on the card, and the report its check and its write both speak through under the delivery rule above. When the card does not present the
+     * action, a failure is reported by toast in the sentences and detail the line would have carried, and any other paint is dropped. The signal is the action's
+     * own, which keeps this save's check under the card's latest-action rule.
+     */
+    const action = card.verdict.start();
+    const report = {
+
+      render: (options = {}) => {
+
+        if(action.presented()) {
+
+          action.render(options);
+
+          return;
+        }
+
+        const { detail = "", lines = [], tone } = options;
+
+        if(tone === "text-danger") {
+
+          toast.error((detail.length ? [ ...lines, detail ] : lines).join(" "));
+        }
+      },
+      signal: action.signal
+    };
+
+    const validation = await probe({ ...identity, action: report });
 
     if(!validation) {
 
@@ -193,7 +226,7 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
     } catch(err) {
 
       restoreCache();
-      card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
+      report.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
 
       return null;
     }
@@ -237,7 +270,7 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
       case "failed": {
 
         restoreCache();
-        card.verdict.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
+        report.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
           lines: ["Unable to save this controller."], tone: "text-danger" });
 
         return null;

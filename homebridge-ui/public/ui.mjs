@@ -120,31 +120,28 @@ const renderVerdict = ({ detail = "", lines = [], row, tone = "" }) => {
 /* Probe a controller through the UI server and paint the outcome, shared by every card's validate control, every card's Save, and the first-run submit so none of
  * them can drift apart. The browser cannot reach the Access controller directly, so the request bridges through the plugin's UI server. Returns the probe's verdict
  * on either kind of success and null on any failure - a missing field, an identity the plugin would refuse, a rejected connection, or a request that threw - with
- * the result line already painted for every outcome but success, whose message belongs to the caller.
+ * the failure already reported through the action for every outcome but success, whose message belongs to the caller.
  *
  * The identity gate is the browser's statement of the plugin's own composition rule, asked here so a user learns their sign-in is incomplete without waiting on a
  * round trip that would be rejected at the far end anyway.
  *
- * The verdict surface arrives from the card that asked, so a page holding several cards paints each answer on the card it belongs to and no card's slow response
- * can paint over another's.
+ * The action arrives already started by the card that asked, so a page holding several cards paints each answer on the card it belongs to and no card's slow
+ * response can paint over another's. Starting it is the caller's act because the caller speaks through the same action once this answers - a Validate's success,
+ * a Save's write - and starting blanks the line before the call rather than after it, so a call that never resolves cannot leave an older verdict beside newer
+ * input. The action's own paint decides where each failure lands.
  */
-const requestControllerProbe = async ({ address, password, tokens, username, verdict, verifyTls }) => {
-
-  // This request is the newest the moment it starts: starting it retires any response still in flight, and the signal it answers is what this request's own
-  // resolution reads below. Whatever the last validation said is stale now too, so the line is blanked before the call rather than after it - a call that never
-  // resolves must not leave an older verdict standing beside newer input.
-  const signal = verdict.start();
+const requestControllerProbe = async ({ action, address, password, tokens, username, verifyTls }) => {
 
   if(!address?.length) {
 
-    verdict.render({ lines: ["Please enter your UniFi Access controller's address."], tone: "text-danger" });
+    action.render({ lines: ["Please enter your UniFi Access controller's address."], tone: "text-danger" });
 
     return null;
   }
 
   if(!hasValidIdentity({ password, tokens, username })) {
 
-    verdict.render({ lines: [ "Please enter a way to sign in to this UniFi Access controller.",
+    action.render({ lines: [ "Please enter a way to sign in to this UniFi Access controller.",
       "That is a local user's username and password, an Access console API token, or both." ], tone: "text-danger" });
 
     return null;
@@ -154,9 +151,9 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
 
     const probe = classifyProbeResponse(await homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }));
 
-    // An edit or a newer request on this card retires this one, and so does the card closing. A retired request must not paint over what the newer input or
-    // request is showing, or into a card that is gone.
-    if(signal.aborted) {
+    // An edit or a newer action on this card retires this one, and a retired request must not paint over what the newer input or action is showing. Closing,
+    // re-populating, or hiding the card retires nothing: the action's own paint decides where an answer that outlives what the card presents goes.
+    if(action.signal.aborted) {
 
       return null;
     }
@@ -166,7 +163,7 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
     // markup.
     if(probe.kind === "error") {
 
-      verdict.render({ detail: probe.message, lines: [ probe.headline,
+      action.render({ detail: probe.message, lines: [ probe.headline,
         probe.guidance ?? "Please check your controller address and sign-in details." ], tone: "text-danger" });
 
       return null;
@@ -176,14 +173,14 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
   } catch(err) {
 
     // A retired request's failure is nobody's news - the retirement rule above governs this paint too.
-    if(signal.aborted) {
+    if(action.signal.aborted) {
 
       return null;
     }
 
     // The UI server failing to start or respond lands here. Painting into the result line keeps the user on the form with the specific failure, while the
     // framework's toast stays the generic net for consumers without their own handling.
-    verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to validate your controller connection."], tone: "text-danger" });
+    action.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to validate your controller connection."], tone: "text-danger" });
 
     return null;
   }
@@ -193,7 +190,7 @@ const requestControllerProbe = async ({ address, password, tokens, username, ver
 const firstRunOnSubmit = async ({ commit, config }) => {
 
   const identity = firstRunCard.values();
-  const probe = await requestControllerProbe({ ...identity, verdict: firstRunCard.verdict });
+  const probe = await requestControllerProbe({ ...identity, action: firstRunCard.verdict.start() });
 
   if(!probe) {
 
@@ -582,12 +579,18 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   const teardown = new AbortController();
   const cardSignal = signal ? AbortSignal.any([ signal, teardown.signal ]) : teardown.signal;
 
-  /* This card's latest-action-wins guard, so only the newest validation ON THIS CARD can paint. It belongs to the card rather than to the module so two mounted
-   * cards cannot retire each other's validation; an edit retires the validation in flight, so a slow answer never lands beside input it no longer describes; and
-   * its parent is the card's own lifetime, so closing the card retires it too. The UI-server bridge carries no abort surface, so a retired validation is dropped at
-   * the paint rather than cancelled on the wire.
+  /* This card's latest-action-wins guard, so only the newest action ON THIS CARD stands. It belongs to the card rather than to the module so two mounted cards
+   * cannot retire each other's actions, and an edit retires the action in flight, so a slow answer never lands beside input it no longer describes.
+   *
+   * It takes no parent, because only this card's own acts retire an action: an edit, a Validate press, or another Save. Closing the card or re-populating it is
+   * moving on rather than retiring, so neither cancels a pressed Save, which goes on to write if its check passes; where each answer lands is the presentation rule
+   * start() states below. The UI-server bridge carries no abort surface, so a retired validation is dropped at the paint rather than cancelled on the wire.
    */
-  const guard = createActionGuard({ signal: cardSignal });
+  const guard = createActionGuard();
+
+  // The population the card is presenting, which every populate moves on. An action captures it when it starts, which is how the card tells an answer about what it
+  // shows now from an answer about what it showed when the action began.
+  let population = 0;
 
   // The MAC addresses a removal would offer to strip settings for, as the caller's last population named them.
   let removalMacs = [];
@@ -596,21 +599,43 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
 
     render: (options = {}) => renderVerdict({ ...options, row }),
 
-    // Retire any validation still in flight and blank the line. An edit and a re-population both call for this, because the verdict standing there describes input
-    // the card no longer holds.
+    // Retire any action still in flight and blank the line. An edit calls for this, because the verdict standing there describes input the card no longer holds.
     retire: () => {
 
       guard.cancel();
       renderVerdict({ row });
     },
 
-    // Blank the line and begin a validation, answering the signal it carries. The signal aborts the moment this validation stops being the newest one the card
-    // issued, whether a later start, a retirement, or the card closing is what overtook it.
+    /* Blank the line and begin an action, answering its handle: the signal that aborts the moment a later start or a retirement overtakes the action, and the one
+     * rule for where the action's answers land. The card presents an action while the card is open, the action has not been retired, the card still shows the
+     * population it showed when the action began, and the line is on screen. The action's own paint lands on the line only while that holds and is dropped
+     * otherwise, and a caller with somewhere else to report reads the same rule through presented().
+     *
+     * Whether the line is on screen is read at delivery rather than tracked, because the ways a card leaves the screen without closing are many and one of them
+     * runs no code of ours: a device selection hides the docked editor, a takeover hides the region it docks in, a disclosure collapses over it, and the
+     * connection-error view's panel is detached when the page leaves that view without calling back into this plugin. checkVisibility() answers false for every
+     * one of them - a detached element, a display: none ancestor, and hidden content alike.
+     */
     start: () => {
 
       renderVerdict({ row });
 
-      return guard.start();
+      const signal = guard.start();
+      const startedUnder = population;
+      const presented = () => !cardSignal.aborted && !signal.aborted && (population === startedUnder) && row.checkVisibility();
+
+      return {
+
+        presented,
+        render: (options = {}) => {
+
+          if(presented()) {
+
+            renderVerdict({ ...options, row });
+          }
+        },
+        signal
+      };
     }
   };
 
@@ -658,7 +683,8 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
     },
 
     /* Fill the card in from a configured controller, and name what a removal would strip alongside it. Populating is also what disarms a standing removal
-     * confirmation and blanks the verdict line: both describe whatever the card was showing a moment ago, and the card is now describing something else.
+     * confirmation and blanks the verdict line: both describe whatever the card was showing a moment ago, and the card is now describing something else. It moves
+     * the card to a new population and retires nothing, so an action still in flight goes on and the presentation rule in start() decides where its answers land.
      */
     populate: ({ address, macs = [], password, tokens, username, verifyTls }) => {
 
@@ -668,9 +694,10 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       fields.username.value = username;
       fields.verifyTls.checked = verifyTls;
       removalMacs = macs;
+      population++;
 
       disarmRemoval();
-      verdict.retire();
+      renderVerdict({ row });
     },
 
     /* What the user has entered, in the shape a controllers[] item itself carries, so every validation, every probe body, and every write reads one vocabulary all
@@ -781,11 +808,15 @@ const mountControllerEditor = ({ collapsible = false, container, heading, helper
     onRemove: ({ macs }) => removeController({ address: configAddress, card, macs }),
     onSave: async () => {
 
-      const saved = await saveController({ card, originalAddress: configAddress });
+      const edited = configAddress;
+      const saved = await saveController({ card, originalAddress: edited });
 
-      // The card now stands for the address it just wrote. Following it is what keeps an address change an edit: without this, a second save would look for the
-      // address the user replaced, find nothing, and append a duplicate controller beside the one it meant to edit.
-      if(saved !== null) {
+      /* The card now stands for the address it just wrote. Following it is what keeps an address change an edit: without this, a second save would look for the
+       * address the user replaced, find nothing, and append a duplicate controller beside the one it meant to edit. A save outlives a re-population, so the card
+       * follows only while it still stands for the item this save edited...once it has been pointed at another controller, following would aim that controller's
+       * next save or removal at the item this one wrote.
+       */
+      if((saved !== null) && (configAddress === edited)) {
 
         configAddress = saved;
       }
@@ -1132,15 +1163,18 @@ const onValidateLogin = async ({ button, card }) => {
 
   try {
 
-    const probe = await requestControllerProbe({ ...card.values(), verdict: card.verdict });
+    // The success is said through the same action the check ran on, so an answer about a controller the card has moved on from, or about a card that has left
+    // the screen, is dropped rather than painted where nobody asked for it.
+    const action = card.verdict.start();
+    const probe = await requestControllerProbe({ ...card.values(), action });
 
-    // The helper paints every failure itself, so only the success verdict is ours to say.
+    // The helper reports every failure itself, so only the success verdict is ours to say.
     if(!probe) {
 
       return;
     }
 
-    card.verdict.render(successVerdict(probe));
+    action.render(successVerdict(probe));
   } finally {
 
     // The re-enable is unconditional: the invocation that disabled the control is the only thing that can balance its own disable.
