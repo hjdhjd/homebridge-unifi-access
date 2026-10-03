@@ -381,25 +381,21 @@ const patchControllerLabel = ({ address, devices }) => {
 };
 
 /* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
- * outside themselves is handed in from here, because each of those reaches is the page's to own: the DOM a re-select clicks through, the host's toast, the
- * framework's coordinated write and the catalog-backed interpreters behind it, the UI-server bridge the probe and the status-context send travel over, and the
- * row shape the UI server writes a controller into, which the serial read interprets. What the actions keep about each controller stays theirs, and the page
- * reads it back through the handle alone.
+ * outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
+ * catalog-backed interpreters behind it, the UI-server bridge the probe and the status-context send travel over, and the row shape the UI server writes a
+ * controller into, which the serial read interprets. What the actions keep about each controller stays theirs, and the page reads it back through the handle
+ * alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
   // The write is reached through a closure rather than handed over as a reference, because the framework page is constructed further down and the method reads its
-  // own object: taking the reference at call time is what binds it to the page that exists by then.
-  commitConfig: (compose) => ui.featureOptions.commitConfig(compose),
+  // own object: taking the reference at call time is what binds it to the page that exists by then. The options travel with the composer, because they carry the
+  // rename an address change declares, and the framework carries the selection onto a renamed controller only when it is handed that rename.
+  commitConfig: (compose, options) => ui.featureOptions.commitConfig(compose, options),
   controllerSerial,
   interpreters: accessConfig,
   probe: requestControllerProbe,
   processDeviceList,
-  selectController: (address) => {
-
-    // The entry is found the way patchControllerLabel finds it. A sidebar entry is named by its configured address, which is what the lookup matches on.
-    [...document.querySelectorAll("[data-navigation='controller']")].find((c) => c.getAttribute("data-device-serial") === address)?.click();
-  },
   sendStatusContext,
   toast: homebridge.toast
 });

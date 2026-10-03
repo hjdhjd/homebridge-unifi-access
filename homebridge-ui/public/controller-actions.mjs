@@ -10,9 +10,9 @@
  * reader that has no business making them.
  *
  * The module takes no imports at all and names no browser global. Every reach beyond it - the connection probe, the configuration interpreters, the host's toast,
- * the framework's coordinated write, the status-context send, the device-list decoration, and the sidebar re-select - is handed in, so the whole of it runs under
- * node against recording fakes. That is what puts a swapped toast severity, a put-back that restores the wrong address, and a seed that lands after its write in
- * front of a gate rather than in front of a user.
+ * the framework's coordinated write, the status-context send, and the device-list decoration - is handed in, so the whole of it runs under node against recording
+ * fakes. That is what puts a swapped toast severity, a put-back that restores the wrong address, and a seed that lands after its write in front of a gate rather
+ * than in front of a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
@@ -24,20 +24,20 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
  * framework, and the UI-server bridge.
  *
- * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer and answers what became of it.
+ * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer and the rename an address change declares, and
+ *                                     answers what became of it.
  * @param injected.controllerSerial  - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
  *                                     controller-scoped entries by.
  * @param injected.interpreters      - The page's holder for the configuration interpreters that need the served catalog.
  * @param injected.probe             - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
  * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
- * @param injected.selectController  - The page's selection of a controller's own sidebar entry, by the address the configuration records.
  * @param injected.sendStatusContext - The page's send of its controller context to the live-status feed.
  * @param injected.toast             - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when its card does
  *                                     not present it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
-export const makeControllerActions = ({ commitConfig, controllerSerial, interpreters, probe, processDeviceList, selectController, sendStatusContext, toast }) => {
+export const makeControllerActions = ({ commitConfig, controllerSerial, interpreters, probe, processDeviceList, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
@@ -123,6 +123,11 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
    * altogether, so the toast is the one surface that survives every outcome. A failure is delivered by one rule: it paints on the card while the card still
    * presents this save - open, on screen, showing the controller the save began on, and not retired by a newer act - and otherwise it speaks through the host's
    * error toast, since the line it would paint on is gone, hidden, or describing something else.
+   *
+   * An address change replaces the controller's sidebar key, which is its configured address, so the write declares the change as a rename from the address the
+   * card started from to the one it wrote, and the page's framework carries the selection. It does so once the controller lists from before and after the write
+   * prove the rename, and only while the selection still names the controller's previous key, so a user who moved to another controller while the save was in
+   * flight stays where they went.
    *
    * @returns The address that was written, or null when nothing was.
    */
@@ -221,8 +226,12 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
 
       // The holder read sits inside the try, so a catalog read that rejects renders the failure verdict rather than escaping this handler.
       const { withControllerSaved } = await interpreters();
+      const compose = (platform) => withControllerSaved(platform, { ...identity, originalAddress, originalSerial, serial });
 
-      result = await commitConfig((platform) => withControllerSaved(platform, { ...identity, originalAddress, originalSerial, serial }));
+      // The framework refuses a rename whose keys are not strings, so an original address a hand edit left as anything else declares none rather than turning a
+      // save that would write into a failure.
+      result = await ((replaced && (typeof originalAddress === "string")) ? commitConfig(compose, { rename: { from: originalAddress, to: identity.address } }) :
+        commitConfig(compose));
     } catch(err) {
 
       restoreCache();
@@ -285,14 +294,6 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
 
     // The status feed's registry follows the re-seed, so the saved controller's devices are viewable under the identity that was just validated.
     void sendStatusContext();
-
-    /* An address edit leaves the selection naming a controller the refreshed list no longer holds, and the framework drops such a selection to the global scope - so
-     * the entry the save just wrote is selected on the page's own navigation.
-     */
-    if(replaced) {
-
-      selectController(identity.address);
-    }
 
     return identity.address;
   };

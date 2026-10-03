@@ -6,14 +6,14 @@
  * What these arms prove is the part of a save and a removal no type can state: that each write outcome speaks in exactly the sentence and exactly the severity it
  * is supposed to, that the seed a save makes lands BEFORE the write rather than after it, that a write which failed puts both addresses back exactly as it found
  * them, and that a send follows every write that keeps or drops an answer and follows nothing else. A swapped toast severity, a put-back that restores the wrong
- * address, a dropped generation bump, and a re-select that fires on the wrong outcome each redden an arm here.
+ * address, a dropped generation bump, and a rename declared on a save that changed no address, or missing from one that did, each redden an arm here.
  *
- * Every arm asserts the exact toast list, the exact verdict list, the exact send count, and the exact re-select list, so an arm proves the absence of the other
+ * Every arm asserts the exact toast list, the exact verdict list, the exact send count, and the exact rename list, so an arm proves the absence of the other
  * outcomes as precisely as the presence of its own. The two addresses differ, their device serials differ, and the answer already held under an address differs
  * from the one the probe returns, so a restore that puts back the wrong thing cannot coincide with one that puts back the right thing.
  *
- * A re-select records the number of sends that had already been made when it was asked for, which is what makes "the re-select follows the send" a proof rather
- * than an agreement with the order the two happened to be written in.
+ * The write fake refuses a declared rename whose keys are not strings, as the framework refuses one ahead of its queue, so a rename built from a value that is
+ * no sidebar key fails the save it reaches rather than recording as though the page had accepted it.
  */
 import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
 import type { ControllerAction, ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
@@ -98,13 +98,6 @@ interface ProbeRequest extends AccessIdentity {
   action: Pick<ControllerAction, "render" | "signal">;
 }
 
-// One re-select, carrying the number of sends already made when it was asked for.
-interface Selection {
-
-  address: unknown;
-  sends: number;
-}
-
 // One toast, by the severity it was spoken at and the sentence it carried.
 interface Toast {
 
@@ -128,9 +121,9 @@ interface Stand {
   composed: unknown[];
   interpreterCalls: InterpreterCall[];
   probeCalls: ProbeRequest[];
+  renames: unknown[];
   renders: RenderedVerdict[];
   seenDuringWrite: WriteObservation[];
-  selections: Selection[];
   sends: () => number;
   serialReads: AccessProbeSuccess[];
   toasts: Toast[];
@@ -196,9 +189,9 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
   const composed: unknown[] = [];
   const interpreterCalls: InterpreterCall[] = [];
   const probeCalls: ProbeRequest[] = [];
+  const renames: unknown[] = [];
   const renders: RenderedVerdict[] = [];
   const seenDuringWrite: WriteObservation[] = [];
-  const selections: Selection[] = [];
   const serialReads: AccessProbeSuccess[] = [];
   const toasts: Toast[] = [];
   let closed = false;
@@ -270,7 +263,22 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
 
   const actions: ControllerActions = makeControllerActions({
 
-    commitConfig: async (compose) => {
+    commitConfig: async (compose, options) => {
+
+      // The rename this call declared, read as the framework reads it: absent declares none, and anything present whose from or to is not a string is refused
+      // before anything else happens, so nothing is composed or written for it.
+      const rename: unknown = options?.rename;
+
+      if(rename !== undefined) {
+
+        if((typeof rename !== "object") || (rename === null) || !("from" in rename) || !("to" in rename) || (typeof rename.from !== "string") ||
+          (typeof rename.to !== "string")) {
+
+          throw new TypeError("A declared rename names the controller's previous and current sidebar keys, each a string.");
+        }
+
+        renames.push(rename);
+      }
 
       // What the answers held, and which generation they were on, at the moment the write ran. This is what places the seed and the bump ahead of the write rather
       // than behind it, which no assertion made after the save resolves could tell apart.
@@ -354,10 +362,6 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
 
       return devices;
     },
-    selectController: (address) => {
-
-      selections.push({ address, sends });
-    },
     sendStatusContext: async () => {
 
       sends++;
@@ -379,7 +383,7 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
     }
   });
 
-  return { actions, card, composed, interpreterCalls, probeCalls, renders, seenDuringWrite, selections, sends: (): number => sends, serialReads, toasts };
+  return { actions, card, composed, interpreterCalls, probeCalls, renames, renders, seenDuringWrite, sends: (): number => sends, serialReads, toasts };
 }
 
 /* Put an answer into the kept answers the only way a reader can, which exercises the keep rule on the way in.
@@ -398,19 +402,19 @@ function seed(stood: Stand, address: string, answer: AccessProbeVerdict): void {
  * other outcomes occurred.
  *
  * @param expected.label       - A prefix for each assertion message, for arms that run more than one case.
+ * @param expected.renames     - The renames the write declared, in order.
  * @param expected.renders     - The verdicts painted on the card, in order.
- * @param expected.selections  - The re-selects asked for, each with the sends already made when it was.
  * @param expected.sends       - How many times the status context was sent.
  * @param expected.stood       - The stand to read.
  * @param expected.toasts      - The toasts spoken, in order.
  */
-function assertSpoke({ label = "", renders = [], selections = [], sends, stood, toasts = [] }: { label?: string; renders?: RenderedVerdict[];
-  selections?: Selection[]; sends: number; stood: Stand; toasts?: Toast[]; }): void {
+function assertSpoke({ label = "", renames = [], renders = [], sends, stood, toasts = [] }: { label?: string; renames?: unknown[];
+  renders?: RenderedVerdict[]; sends: number; stood: Stand; toasts?: Toast[]; }): void {
 
   assert.deepEqual(stood.toasts, toasts, label + "the toasts spoken");
   assert.deepEqual(stood.renders, renders, label + "the verdicts painted on the card");
   assert.equal(stood.sends(), sends, label + "the status-context sends made");
-  assert.deepEqual(stood.selections, selections, label + "the sidebar re-selects asked for");
+  assert.deepEqual(stood.renames, renames, label + "the renames the write declared");
 }
 
 test("s1: a save whose validation fails writes nothing, touches no answer, and says nothing", async () => {
@@ -458,7 +462,7 @@ test("s3b: a committed save of a controller that refused its API token warns tha
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_TOKEN_REFUSED }] });
 });
 
-test("s4: an address edit drops the original address before the write and re-selects the new address after the send", async () => {
+test("s4: an address edit drops the original address before the write and declares the rename on the write", async () => {
 
   const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
 
@@ -467,17 +471,17 @@ test("s4: an address edit drops the original address before the write and re-sel
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), ADDRESS, "the save answers the address it wrote");
   assert.deepEqual(stood.seenDuringWrite.map((seen) => seen.atOriginal), [undefined], "the original address is already empty when the write runs");
   assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), undefined, "and it is still empty once the save has landed");
-  assertSpoke({ selections: [{ address: ADDRESS, sends: 1 }], sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });
 
-test("s5: a staged save warns that the file was not written, sends once, and re-selects an edited address after the send", async () => {
+test("s5: a staged save warns that the file was not written, sends once, and declares an edited address's rename on its write", async () => {
 
   const stood = stand({ probe: probeAnswer("connected"), write: { error: new Error("the host could not write"), kind: "staged" } });
 
   seed(stood, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), ADDRESS, "the save answers the address it wrote");
-  assertSpoke({ selections: [{ address: ADDRESS, sends: 1 }], sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_STAGED }] });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_STAGED }] });
 });
 
 test("s6a: a failed save restores what each address held and paints an Error's own message", async () => {
@@ -495,7 +499,8 @@ test("s6a: a failed save restores what each address held and paints an Error's o
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: probeAnswer("connected"), generation: stood.seenDuringWrite[0]?.generation ?? -1 }),
     false, "a fetch issued against the seeded state loses its claim to be kept once the put-back has moved the generation");
   assert.deepEqual(stood.actions.answers.get(ADDRESS), priorAtAddress, "so the refused fetch wrote nothing over the restored answer");
-  assertSpoke({ renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE],
+    tone: "text-danger" }], sends: 1, stood });
 });
 
 test("s6b: a failed save leaves both addresses empty where it found them empty, and paints a non-Error through String", async () => {
@@ -505,7 +510,8 @@ test("s6b: a failed save leaves both addresses empty where it found them empty, 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the save answers null");
   assert.equal(stood.actions.answers.get(ADDRESS), undefined, "the address the save wrote is empty again");
   assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), undefined, "the original address is empty too");
-  assertSpoke({ renders: [{ detail: "the host answered in a shape it never writes", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: "the host answered in a shape it never writes",
+    lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
 });
 
 test("s7a: an interpreter holder that rejects restores the map and paints the failure, without composing anything", async () => {
@@ -600,9 +606,10 @@ test("s11: a save hands the interpreter the card's identity with the original ad
   assert.deepEqual(stood.interpreterCalls, [{ config: PLATFORM, kind: "saved", payload: { ...IDENTITY, originalAddress: ORIGINAL_ADDRESS,
     originalSerial: undefined, serial: PROBE_SERIAL } }], "the save interpreter ran once, against the configuration the write composed over");
   assert.deepEqual(stood.composed, [SAVE_PATCH], "and the write received exactly the patch the interpreter composed");
+  assert.deepEqual(stood.renames, [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], "beside the rename from the address the card started from to the one it wrote");
 });
 
-test("s12: a save that leaves the address alone seeds it before the write and asks for no re-select", async () => {
+test("s12: a save that leaves the address alone seeds it before the write and declares no rename", async () => {
 
   const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
 
@@ -627,6 +634,7 @@ test("s13: a save reads the outgoing serial from the answer held under the addre
   "an address edit reads the outgoing serial under the address it replaced, and the incoming one from this save's own validation");
   assert.deepEqual(replacing.serialReads.map((answer) => answer.message), [ PRIOR_MESSAGE, PROBE_MESSAGE ],
     "which is read from the answer this session was already holding rather than from the one the seed puts in its place");
+  assert.deepEqual(replacing.renames, [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], "and the address edit declares its rename on the write");
 
   const same = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
 
@@ -740,6 +748,17 @@ test("s19: an edit to the card's fields during a save's check cancels the save, 
   assert.deepEqual(stood.interpreterCalls, [], "no interpreter runs");
   assert.deepEqual(stood.composed, [], "nothing is composed");
   assertSpoke({ sends: 0, stood });
+});
+
+test("s20: a save whose original address is not a string declares no rename, and writes and speaks as any other save does", async () => {
+
+  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+  // A hand edit is the only way a configured address arrives as something other than a string, and the editors pass it through unconverted. Such a save still
+  // replaces an address, but the framework refuses a rename whose keys are not strings, so the save declares none and writes rather than failing.
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: 42 }), ADDRESS, "the save answers the address it wrote");
+  assert.deepEqual(stood.composed, [SAVE_PATCH], "and the write received the patch the interpreter composed");
+  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {
