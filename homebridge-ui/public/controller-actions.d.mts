@@ -2,7 +2,8 @@
  *
  * controller-actions.d.mts: Type declarations for the settings page's kept controller answers and the controller save and removal.
  */
-import type { AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "./access-config.mjs";
+import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, controllerListedElsewhere,
+  isControllerListed } from "./access-config.mjs";
 
 /**
  * What became of a coordinated write. This vocabulary belongs to the webUI framework's `commitConfig`, which publishes it as a JSDoc typedef inside a browser
@@ -74,23 +75,31 @@ export declare const TOKEN_REFUSED_WARNING: string;
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
  * framework, and the UI-server bridge.
  *
- * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer of the configuration patch and the rename an address
- *                                     change declares as the sidebar keys before and after the write, and answers what became of it.
- * @param injected.controllerSerial  - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
- *                                     controller-scoped entries by.
- * @param injected.interpreters      - The page's holder for the configuration interpreters, narrowed to the two an action reads.
- * @param injected.probe             - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
- * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
- * @param injected.sendStatusContext - The page's send of its controller context to the live-status feed.
- * @param injected.toast             - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when its card does
- *                                     not present it.
+ * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer of the configuration patch and the rename
+ *                                             an address change declares as the sidebar keys before and after the write, and answers what became of it.
+ * @param injected.controllerListedElsewhere - The rule that answers whether another configured controller already holds the address a save writes.
+ * @param injected.controllerListedWarning   - The sentence a save speaks when that rule refuses it.
+ * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
+ *                                             controller-scoped entries by.
+ * @param injected.interpreters              - The page's holder for the configuration interpreters, narrowed to the two an action reads.
+ * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
+ * @param injected.platformConfig            - The page's read of the platform configuration it last received, or null before it has received one.
+ * @param injected.probe                     - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
+ * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
+ * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
+ * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
+ *                                             when its card does not present it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
 export declare const makeControllerActions: (injected: {
   commitConfig: (compose: (platform: unknown) => unknown, options?: { rename?: { from: string; to: string } }) => Promise<ControllerWriteResult>;
+  controllerListedElsewhere: typeof controllerListedElsewhere;
+  controllerListedWarning: string;
   controllerSerial: (answer: AccessProbeSuccess) => unknown;
   interpreters: () => Promise<Pick<AccessConfigInterpreter, "withControllerRemoved" | "withControllerSaved">>;
+  isControllerListed: typeof isControllerListed;
+  platformConfig: () => AccessConfig | null;
   probe: (request: AccessIdentity & { action: Pick<ControllerAction, "render" | "signal"> }) => Promise<AccessProbeSuccess | null>;
   processDeviceList: (list: { address: unknown; devices: Record<string, unknown>[] }) => Record<string, unknown>[];
   sendStatusContext: () => Promise<void>;

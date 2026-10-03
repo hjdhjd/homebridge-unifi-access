@@ -4,11 +4,11 @@
  */
 "use strict";
 
+import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsewhere, controllers, deviceListResult, hasValidIdentity, isControllerListed,
+  makeAccessConfig, primaryController, primaryListedElsewhere, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
 import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
-import { classifyProbeResponse, controllers, deviceListResult, hasValidIdentity, makeAccessConfig, primaryController, staleSelectionVerdict,
-  withPrimaryIdentity } from "./access-config.mjs";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
@@ -190,7 +190,22 @@ const requestControllerProbe = async ({ action, address, password, tokens, usern
 const firstRunOnSubmit = async ({ commit, config }) => {
 
   const identity = firstRunCard.values();
-  const probe = await requestControllerProbe({ ...identity, action: firstRunCard.verdict.start() });
+  const action = firstRunCard.verdict.start();
+  const listed = { lines: [CONTROLLER_LISTED_WARNING], tone: "text-warning" };
+
+  /* An address a controller after the primary already holds is refused before the connection test, by the rule a controller save is refused under, because the
+   * answer needs no controller and the user should not wait on a connection whose result would be thrown away. The card's action is started first, as a save's
+   * is, so a validation still in flight cannot paint over the refusal.
+   */
+  if(primaryListedElsewhere(config, identity)) {
+
+    firstRunCard.verdict.render(listed);
+    homebridge.hideSpinner();
+
+    return false;
+  }
+
+  const probe = await requestControllerProbe({ ...identity, action });
 
   if(!probe) {
 
@@ -217,10 +232,12 @@ const firstRunOnSubmit = async ({ commit, config }) => {
     return true;
   } catch(err) {
 
-    // The config write can reject. Painting into the result line keeps the user on the form with concrete guidance and the specific failure, and this catch resolves
-    // first, so the framework's generic toast never fires for this plugin.
-    firstRunCard.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to complete the plugin configuration."],
-      tone: "text-danger" });
+    /* The config write can reject. Painting into the result line keeps the user on the form with concrete guidance and the specific failure, and this catch resolves
+     * first, so the framework's generic toast never fires for this plugin. The composer's listed-address refusal is the authority behind the early check above,
+     * and is told apart by its type and painted as that check paints it; every other rejection paints as the failure it is.
+     */
+    firstRunCard.verdict.render(isControllerListed(err) ? listed : { detail: (err instanceof Error) ? err.message : String(err),
+      lines: ["Unable to complete the plugin configuration."], tone: "text-danger" });
     homebridge.hideSpinner();
 
     return false;
@@ -241,8 +258,10 @@ const controllerSerial = (answer) => answer?.devices.find(isController)?.serialN
  * itself is working from rather than a snapshot taken at load. The docked editors populate their fields from it, which is a read the framework's render path gives
  * them no other way to make: the info-panel and connection-error bags carry the selection, not the configuration behind it.
  *
- * Nothing WRITES through this copy. Every write opens a session of its own and commits against what that session reads, so a stale copy here can only ever show a
- * stale field value in a collapsed card, never persist one.
+ * Nothing WRITES through this copy. Every write opens a session of its own and commits against what that session reads, so a stale copy here never persists. A
+ * save's listed-address check does read it, ahead of the connection test, so a stale copy can refuse a save the composer would accept, which the user retries once
+ * the page has caught up. It can never let a duplicate through, because the composer asks the same rule of the configuration the write composes over, and its
+ * refusal is the one that decides.
  */
 let injectedConfig = null;
 
@@ -382,9 +401,10 @@ const patchControllerLabel = ({ address, devices }) => {
 
 /* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
  * outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
- * catalog-backed interpreters behind it, the UI-server bridge the probe and the status-context send travel over, and the row shape the UI server writes a
- * controller into, which the serial read interprets. What the actions keep about each controller stays theirs, and the page reads it back through the handle
- * alone.
+ * catalog-backed interpreters behind it, the configuration the page last received, the UI-server bridge the probe and the status-context send travel over, and
+ * the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule, its test, and its sentence come straight from
+ * the interpretation module rather than through the interpreters, because none of them needs the catalog and a save's refusal must not wait on a catalog read.
+ * What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
@@ -392,8 +412,12 @@ const { answers, removeController, saveController } = makeControllerActions({
   // own object: taking the reference at call time is what binds it to the page that exists by then. The options travel with the composer, because they carry the
   // rename an address change declares, and the framework carries the selection onto a renamed controller only when it is handed that rename.
   commitConfig: (compose, options) => ui.featureOptions.commitConfig(compose, options),
+  controllerListedElsewhere,
+  controllerListedWarning: CONTROLLER_LISTED_WARNING,
   controllerSerial,
   interpreters: accessConfig,
+  isControllerListed,
+  platformConfig: () => injectedConfig,
   probe: requestControllerProbe,
   processDeviceList,
   sendStatusContext,

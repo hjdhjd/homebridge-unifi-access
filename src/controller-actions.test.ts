@@ -6,7 +6,8 @@
  * What these arms prove is the part of a save and a removal no type can state: that each write outcome speaks in exactly the sentence and exactly the severity it
  * is supposed to, that the seed a save makes lands BEFORE the write rather than after it, that a write which failed puts both addresses back exactly as it found
  * them, and that a send follows every write that keeps or drops an answer and follows nothing else. A swapped toast severity, a put-back that restores the wrong
- * address, a dropped generation bump, and a rename declared on a save that changed no address, or missing from one that did, each redden an arm here.
+ * address, a dropped generation bump, a rename declared on a save that changed no address, or missing from one that did, and a listed-address refusal painted as
+ * a failure, or a failure painted as that refusal, each redden an arm here.
  *
  * Every arm asserts the exact toast list, the exact verdict list, the exact send count, and the exact rename list, so an arm proves the absence of the other
  * outcomes as precisely as the presence of its own. The two addresses differ, their device serials differ, and the answer already held under an address differs
@@ -17,6 +18,7 @@
  */
 import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
 import type { ControllerAction, ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
+import { ControllerListedError, isControllerListed } from "../homebridge-ui/public/access-config.mjs";
 import assert from "node:assert/strict";
 import { makeControllerActions } from "../homebridge-ui/public/controller-actions.mjs";
 import test from "node:test";
@@ -62,6 +64,15 @@ const SAVED_STAGED = "This controller has been saved, but Homebridge could not w
 const REMOVED_STAGED = "This controller has been removed, but Homebridge could not write the configuration file. Save the plugin's settings to keep the change.";
 const SAVE_FAILURE_LINE = "Unable to save this controller.";
 const REMOVE_FAILURE_LINE = "Unable to remove this controller.";
+const LISTED_REFUSAL = "This controller is already listed.";
+
+// What the composer's refusal carries as its message when an arm has it throw one, worded unlike the sentence a save speaks, so a catch that read the sentence
+// off the error rather than speaking the one the page handed in could not pass for one that did.
+const COMPOSER_REFUSAL_MESSAGE = "the composer refused an address another controller holds";
+
+// The configuration the page last received, which the listed-address check is asked of. It is a sentinel distinct from the one the write composes against, so
+// an early check asked of the write's configuration rather than the page's reads as the mistake it is.
+const PAGE_CONFIG = { controllers: [{ address: ORIGINAL_ADDRESS, name: "the configuration the page last received" }] };
 
 // A failure the page's probe paints for a controller it could not reach, in the headline, guidance, and detail it paints one with, and the one message the error
 // toast carries for it when the card does not present the save.
@@ -92,6 +103,13 @@ interface InterpreterCall {
   payload: unknown;
 }
 
+// One ask of the listed-address rule: the configuration it was asked of and the save it was asked about.
+interface ListedCheck {
+
+  config: unknown;
+  save: unknown;
+}
+
 // One probe request, as the save composed it: the card's identity and the report the check speaks through.
 interface ProbeRequest extends AccessIdentity {
 
@@ -120,6 +138,7 @@ interface Stand {
   card: ControllerCard;
   composed: unknown[];
   interpreterCalls: InterpreterCall[];
+  listedChecks: ListedCheck[];
   probeCalls: ProbeRequest[];
   renames: unknown[];
   renders: RenderedVerdict[];
@@ -175,19 +194,24 @@ function failedAnswer(): AccessProbeVerdict {
 /* Stand up the actions over recording fakes for every reach they make outside themselves.
  *
  * @param options.checkFailure      - A failure the check paints through the action it was handed before it answers, the way the page's probe paints its own.
+ * @param options.composerThrows    - What the save interpreter throws rather than composing, which reaches the save the way the real write rejects with it.
  * @param options.duringCheck       - What befalls the card while the check is in flight, ahead of anything the check paints or answers.
+ * @param options.duringListedCheck - What befalls the card while the listed-address rule is asked, ahead of the connection test.
  * @param options.duringWrite       - What befalls the card while the write is in flight, after the check has passed.
  * @param options.interpretersThrow - Whether the interpreter holder rejects rather than answering.
+ * @param options.listed            - Whether the listed-address rule answers that another configured controller already holds the written address.
  * @param options.probe             - What the connection validation answers, or null for the failure that writes nothing.
  * @param options.write             - The result the coordinated write resolves with, or the error it throws.
  *
  * @returns The actions and every recorder beneath them.
  */
-function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = false, probe, write }: { checkFailure?: RenderedVerdict; duringCheck?: CardEvent;
-  duringWrite?: CardEvent; interpretersThrow?: boolean; probe: AccessProbeSuccess | null; write: ControllerWriteResult | Error; }): Stand {
+function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, duringWrite, interpretersThrow = false, listed = false, probe, write }: {
+  checkFailure?: RenderedVerdict; composerThrows?: Error; duringCheck?: CardEvent; duringListedCheck?: CardEvent; duringWrite?: CardEvent;
+  interpretersThrow?: boolean; listed?: boolean; probe: AccessProbeSuccess | null; write: ControllerWriteResult | Error; }): Stand {
 
   const composed: unknown[] = [];
   const interpreterCalls: InterpreterCall[] = [];
+  const listedChecks: ListedCheck[] = [];
   const probeCalls: ProbeRequest[] = [];
   const renames: unknown[] = [];
   const renders: RenderedVerdict[] = [];
@@ -298,6 +322,19 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
 
       return write;
     },
+    controllerListedElsewhere: (config, save) => {
+
+      // Each ask is kept in a list of its own, so the exact interpreter lists other arms assert stay untouched by an ask every save makes.
+      listedChecks.push({ config, save });
+
+      if(duringListedCheck) {
+
+        befall[duringListedCheck]();
+      }
+
+      return listed;
+    },
+    controllerListedWarning: LISTED_REFUSAL,
     controllerSerial: (answer) => {
 
       // Which answers the read was handed is what places it before the seed rather than after it, so each one is kept.
@@ -324,10 +361,17 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
 
           interpreterCalls.push({ config, kind: "saved", payload: controller });
 
+          if(composerThrows) {
+
+            throw composerThrows;
+          }
+
           return SAVE_PATCH;
         }
       };
     },
+    isControllerListed,
+    platformConfig: () => PAGE_CONFIG,
     probe: async (request) => {
 
       // The request the save composed, kept because the real probe dereferences the action on it before anything else it does.
@@ -383,7 +427,22 @@ function stand({ checkFailure, duringCheck, duringWrite, interpretersThrow = fal
     }
   });
 
-  return { actions, card, composed, interpreterCalls, probeCalls, renames, renders, seenDuringWrite, sends: (): number => sends, serialReads, toasts };
+  return { actions, card, composed, interpreterCalls, listedChecks, probeCalls, renames, renders, seenDuringWrite, sends: (): number => sends, serialReads,
+    toasts };
+}
+
+/* The refusal the composer throws when an arm asks it to: the real error type, so the module's injected test recognizes it exactly as it would on the page, carrying
+ * a message unlike the sentence the save speaks.
+ *
+ * @returns The refusal.
+ */
+function composerRefusal(): ControllerListedError {
+
+  const refusal = new ControllerListedError();
+
+  refusal.message = COMPOSER_REFUSAL_MESSAGE;
+
+  return refusal;
 }
 
 /* Put an answer into the kept answers the only way a reader can, which exercises the keep rule on the way in.
@@ -759,6 +818,98 @@ test("s20: a save whose original address is not a string declares no rename, and
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: 42 }), ADDRESS, "the save answers the address it wrote");
   assert.deepEqual(stood.composed, [SAVE_PATCH], "and the write received the patch the interpreter composed");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+});
+
+test("s21: a save at an address another controller holds is refused before its connection test, writing nothing and saying the sentence on the card", async () => {
+
+  const stood = stand({ listed: true, probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const priorAtAddress = priorAt(ADDRESS);
+  const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
+
+  seed(stood, ADDRESS, priorAtAddress);
+  seed(stood, ORIGINAL_ADDRESS, priorAtOriginal);
+
+  const before = stood.actions.answers.generation();
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the save answers null");
+  assert.deepEqual(stood.listedChecks, [{ config: PAGE_CONFIG, save: { address: ADDRESS, originalAddress: ORIGINAL_ADDRESS } }],
+    "the rule was asked once, of the configuration the page last received, about the address written and the one the save started from");
+  assert.equal(stood.probeCalls.length, 0, "the connection test never ran");
+  assert.deepEqual(stood.interpreterCalls, [], "no interpreter ran");
+  assert.deepEqual(stood.composed, [], "nothing was composed or written");
+  assert.equal(stood.actions.answers.get(ADDRESS), priorAtAddress, "the address written still holds the very answer it held");
+  assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), priorAtOriginal, "and so does the address the save started from");
+  assert.equal(stood.actions.answers.generation(), before, "and the generation did not move, because nothing was seeded");
+  assertSpoke({ renders: [{ lines: [LISTED_REFUSAL], tone: "text-warning" }], sends: 0, stood });
+});
+
+test("s22: a listed address refused once the card has stopped presenting the save speaks through the warning toast and paints nothing", async () => {
+
+  const assertToasted = async (event: CardEvent): Promise<void> => {
+
+    const label = event + ": ";
+    const stood = stand({ duringListedCheck: event, listed: true, probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assert.equal(stood.probeCalls.length, 0, label + "the connection test never ran");
+    assert.deepEqual(stood.composed, [], label + "nothing was composed or written");
+    assertSpoke({ label, sends: 0, stood, toasts: [{ kind: "warning", message: LISTED_REFUSAL }] });
+  };
+
+  await assertToasted("close");
+  await assertToasted("hide");
+  await assertToasted("repopulate");
+});
+
+test("s23: a composer that refuses a listed address puts the answers back and says the page's sentence on the card, never the error's own message", async () => {
+
+  const stood = stand({ composerThrows: composerRefusal(), probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const prior = priorAt(ADDRESS);
+
+  seed(stood, ADDRESS, prior);
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.equal(stood.probeCalls.length, 1, "the early check passed, so the connection test ran");
+  assert.deepEqual(stood.composed, [], "the composer refused, so no patch reached the write");
+  assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, "the address holds exactly what it held before the seed");
+  assertSpoke({ renders: [{ lines: [LISTED_REFUSAL], tone: "text-warning" }], sends: 1, stood });
+});
+
+test("s24: a composer's refusal met once the card has stopped presenting the save speaks through the warning toast and paints nothing", async () => {
+
+  const assertToasted = async (event: CardEvent): Promise<void> => {
+
+    const label = event + ": ";
+    const stood = stand({ composerThrows: composerRefusal(), duringCheck: event, probe: probeAnswer("connected"), write: { kind: "committed" } });
+    const prior = priorAt(ADDRESS);
+
+    seed(stood, ADDRESS, prior);
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, label + "the address holds exactly what it held before the seed");
+    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "warning", message: LISTED_REFUSAL }] });
+  };
+
+  await assertToasted("close");
+  await assertToasted("hide");
+  await assertToasted("repopulate");
+});
+
+test("s25: a composer that throws anything else keeps the failure line and its detail, even an error carrying the refusal's sentence", async () => {
+
+  const assertFailed = async (thrown: Error): Promise<void> => {
+
+    const label = thrown.message + ": ";
+    const stood = stand({ composerThrows: thrown, probe: probeAnswer("connected"), write: { kind: "committed" } });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assertSpoke({ label, renders: [{ detail: thrown.message, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+  };
+
+  await assertFailed(new Error("the composer threw"));
+
+  // The refusal is told apart by its type alone, so an ordinary error whose message happens to be the sentence is still the failure it is.
+  await assertFailed(new Error(LISTED_REFUSAL));
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {

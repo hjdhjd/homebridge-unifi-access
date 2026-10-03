@@ -96,7 +96,8 @@ export interface AccessConfigPatch {
 
 /**
  * The interpreters that need the served catalog. Each is declared as a property carrying a function rather than as a method, which is what the module actually
- * builds - an object of arrow functions closed over the injected catalog - so a consumer is free to read one off the holder and call it on its own.
+ * builds - an object of arrow functions closed over the injected catalog - so a consumer is free to read one off the holder and call it on its own. The controller
+ * save throws a {@link ControllerListedError} rather than composing a patch when another configured controller already holds the address it writes.
  */
 export interface AccessConfigInterpreter {
 
@@ -113,6 +114,15 @@ export declare const CONNECTION_FAILURE_HEADLINE: string;
 /** The keys a controllers[] item converges to - every controller property except the ones that migrate into feature options. */
 export declare const CONTROLLER_KEYS: readonly [ "address", "name", "password", "tokens", "username", "verifyTls" ];
 
+/** What a save says when the address it writes is one another configured controller already holds, stated once for every surface that speaks the refusal. */
+export declare const CONTROLLER_LISTED_WARNING: string;
+
+/** The refusal a composer throws when the address a save writes is one another configured controller already holds; its message is the sentence above. */
+export declare class ControllerListedError extends Error {
+
+  constructor();
+}
+
 /** What to do about a UI server answering in a shape it never writes. */
 export declare const SERVER_FAILURE_GUIDANCE: string;
 
@@ -122,6 +132,12 @@ export declare const SERVER_FAILURE_HEADLINE: string;
 /** Read the UI server's kind-tagged device probe into the verdict every consumer branches on. */
 export declare const classifyProbeResponse: (response?: unknown) => AccessProbeVerdict;
 
+/**
+ * Whether a controller save would be refused because another configured controller already holds the address it writes, asked of the configuration the page last
+ * received so a save can answer before its connection test. The composer's own refusal, made against the configuration at the write, is the one that decides.
+ */
+export declare const controllerListedElsewhere: (config: AccessConfig | null | undefined, save: { address?: unknown; originalAddress?: unknown }) => boolean;
+
 /** The configured controllers, normalized so callers never branch on undefined. */
 export declare const controllers: (config?: AccessConfig) => AccessControllerConfig[];
 
@@ -130,6 +146,9 @@ export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDe
 
 /** Whether a controller item describes an identity the plugin can connect with, mirroring composeConnectIdentity's verdict exactly. */
 export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
+
+/** Whether a thrown value is the listed-address refusal, as opposed to any other failure a write can meet. */
+export declare const isControllerListed: (error: unknown) => error is ControllerListedError;
 
 /**
  * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its two
@@ -152,8 +171,15 @@ export declare const makeAccessConfig: (injected: { FeatureOptions: typeof Featu
 /** The primary controller entry (the first), or undefined on a fresh configuration. */
 export declare const primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;
 
+/** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
+export declare const primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
+
 /** The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call. */
 export declare const staleSelectionVerdict: () => AccessProbeFailure;
 
-/** The controllers patch that writes an identity onto the primary controller, or null when the identity is not one the plugin can connect with. */
+/**
+ * The controllers patch that writes an identity onto the primary controller, or null when the identity is not one the plugin can connect with. It throws a
+ * {@link ControllerListedError} instead when a controller after the primary holds the address the identity writes and the primary does not already store
+ * exactly that address.
+ */
 export declare const withPrimaryIdentity: (config: AccessConfig | undefined, identity: AccessIdentity) => { controllers: AccessControllerConfig[] } | null;

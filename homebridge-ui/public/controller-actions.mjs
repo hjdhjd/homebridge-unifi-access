@@ -9,10 +9,10 @@
  * keeping is stated once rather than at every site that fills one, and the seed, the delete, and the generation bump each action makes stay out of reach of every
  * reader that has no business making them.
  *
- * The module takes no imports at all and names no browser global. Every reach beyond it - the connection probe, the configuration interpreters, the host's toast,
- * the framework's coordinated write, the status-context send, and the device-list decoration - is handed in, so the whole of it runs under node against recording
- * fakes. That is what puts a swapped toast severity, a put-back that restores the wrong address, and a seed that lands after its write in front of a gate rather
- * than in front of a user.
+ * The module takes no imports at all and names no browser global. Every reach beyond it - the connection probe, the configuration interpreters, the listed-address
+ * rule and its test, the page's read of its configuration, the host's toast, the framework's coordinated write, the status-context send, and the device-list
+ * decoration - is handed in, so the whole of it runs under node against recording fakes. That is what puts a swapped toast severity, a put-back that restores the
+ * wrong address, and a seed that lands after its write in front of a gate rather than in front of a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
@@ -24,20 +24,25 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
  * framework, and the UI-server bridge.
  *
- * @param injected.commitConfig      - The feature-options page's coordinated write, which takes a composer and the rename an address change declares, and
- *                                     answers what became of it.
- * @param injected.controllerSerial  - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
- *                                     controller-scoped entries by.
- * @param injected.interpreters      - The page's holder for the configuration interpreters that need the served catalog.
- * @param injected.probe             - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
- * @param injected.processDeviceList - The page's decoration of a probe's device list into the shape the framework renders from.
- * @param injected.sendStatusContext - The page's send of its controller context to the live-status feed.
- * @param injected.toast             - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when its card does
- *                                     not present it.
+ * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer and the rename an address change declares,
+ *                                             and answers what became of it.
+ * @param injected.controllerListedElsewhere - The rule that answers whether another configured controller already holds the address a save writes.
+ * @param injected.controllerListedWarning   - The sentence a save speaks when that rule refuses it.
+ * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
+ *                                             controller-scoped entries by.
+ * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
+ * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
+ * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
+ * @param injected.probe                     - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
+ * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
+ * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
+ * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
+ *                                             when its card does not present it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
-export const makeControllerActions = ({ commitConfig, controllerSerial, interpreters, probe, processDeviceList, sendStatusContext, toast }) => {
+export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, interpreters, isControllerListed,
+  platformConfig, probe, processDeviceList, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
@@ -101,17 +106,19 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
     }
   };
 
-  /* Validate a card's connection and persist it, which is the whole of what Save means.
+  /* Check that a card's address is not already listed, validate its connection, and persist it, which is the whole of what Save means.
    *
    * A pressed Save is a request to save. Only the card's own retiring acts - an edit to its fields, a Validate press, or another Save - cancel it, and only while
    * its check is in flight, so nothing is written and the newest action wins; once the write has started, nothing cancels it. Closing the card, re-populating it,
    * or taking it off screen is moving on rather than cancelling, so the save goes on to write if its check passes.
    *
-   * Validation comes first and a failure writes nothing at all: a controller the plugin cannot connect to is not a configuration worth saving, and this save's
-   * report already says why. The write is then handed to the feature-options page as a composer rather than made through a session of this card's own,
-   * because the page's store holds the options array the user loaded and a write made behind it is one the next option edit writes back over. The page drains
-   * whatever option edits are in flight, composes against the configuration as it then stands, writes and saves through the one session it owns, and re-establishes
-   * itself on what was written.
+   * The listed-address check comes first. A save whose address another configured controller already holds is refused before its connection test, asked of
+   * the configuration the page last received: the answer needs no controller, and a user should not wait on a connection whose result would be thrown away.
+   * Nothing is probed, seeded, or written for it. Validation comes next and a failure writes nothing at all: a controller the plugin cannot connect to is not a
+   * configuration worth saving, and this save's report already says why. The write is then handed to the feature-options page as a composer rather than made
+   * through a session of this card's own, because the page's store holds the options array the user loaded and a write made behind it is one the next option edit
+   * writes back over. The page drains whatever option edits are in flight, composes against the configuration as it then stands, writes and saves through the one
+   * session it owns, and re-establishes itself on what was written.
    *
    * The cache work goes AHEAD of that write rather than after it, because the page re-reads through getControllers and getDevices inside the call and getDevices
    * answers from the map: a seed made afterwards would leave the page showing what the controller answered before the save, a token-only list for a controller that
@@ -123,6 +130,11 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
    * altogether, so the toast is the one surface that survives every outcome. A failure is delivered by one rule: it paints on the card while the card still
    * presents this save - open, on screen, showing the controller the save began on, and not retired by a newer act - and otherwise it speaks through the host's
    * error toast, since the line it would paint on is gone, hidden, or describing something else.
+   *
+   * The listed-address refusal is a delivery beside the failure's, under the same presentation rule but as guidance rather than failure: the sentence alone in
+   * the warning tone on the card while the card presents this save, and the host's warning toast otherwise. The composer asks the same rule again inside the
+   * write, against the configuration as it then stands, which is how a save queued behind another that changed the configuration is still refused; that refusal
+   * reaches the write's catch as a thrown error, and is delivered the same way once the cache is put back.
    *
    * An address change replaces the controller's sidebar key, which is its configured address, so the write declares the change as a rename from the address the
    * card started from to the one it wrote, and the page's framework carries the selection. It does so once the controller lists from before and after the write
@@ -160,6 +172,27 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
       },
       signal: action.signal
     };
+
+    // The listed-address refusal's delivery under the same rule. It goes around report.render, which drops every paint but a failure's once the card stops
+    // presenting this save, and it speaks the sentence the page handed in rather than any error's message.
+    const refuse = () => {
+
+      if(action.presented()) {
+
+        action.render({ lines: [controllerListedWarning], tone: "text-warning" });
+
+        return;
+      }
+
+      toast.warning(controllerListedWarning);
+    };
+
+    if(controllerListedElsewhere(platformConfig(), { address: identity.address, originalAddress })) {
+
+      refuse();
+
+      return null;
+    }
 
     const validation = await probe({ ...identity, action: report });
 
@@ -235,6 +268,15 @@ export const makeControllerActions = ({ commitConfig, controllerSerial, interpre
     } catch(err) {
 
       restoreCache();
+
+      // The composer's own listed-address refusal is told apart by its type alone and delivered as the early check's is; every other throw is a failure.
+      if(isControllerListed(err)) {
+
+        refuse();
+
+        return null;
+      }
+
       report.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
 
       return null;

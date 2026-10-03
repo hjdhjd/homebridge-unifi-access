@@ -13,8 +13,9 @@
 import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, mqttConnectionSettings,
   normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
-import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse, deviceListResult,
-  hasValidIdentity, makeAccessConfig, staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
+import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, ControllerListedError, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE,
+  classifyProbeResponse, controllerListedElsewhere, deviceListResult, hasValidIdentity, isControllerListed, makeAccessConfig, primaryListedElsewhere,
+  staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -71,6 +72,9 @@ const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
 // The configuration shapes these tests build. The module's own declaration types every property as unknown, which is the honest shape of a hand-editable config
 // file...narrowing the fields these tests read back keeps the assertions free of casts without weakening anything the interpreters are handed.
 type TestConfig = AccessConfig & { controllers?: AccessControllerConfig[]; options?: string[] };
+
+// What a controller save hands the save interpreter, read off the interpreter's own declaration so an arm's request is checked against the real contract.
+type SaveRequest = Parameters<typeof withControllerSaved>[1];
 
 // A feature-option engine over the real catalog and the supplied entries, which is how every post-migration assertion here resolves an option.
 function engineWith(options: string[] = []): FeatureOptions {
@@ -722,13 +726,13 @@ test("a serial or an address that names no identity moves nothing, and an item a
 
   const acrossBothNames = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
 
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: acrossBothNames }, { address: ADDRESS, originalAddress: "", tokens: TOKENS }),
+  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [], options: acrossBothNames }, { address: ADDRESS, originalAddress: "", tokens: TOKENS }),
     "options"), "an empty original address names no identity to move from, so a save that carries no outgoing serial either composes no options member");
 
   /* The same empty original address beside an outgoing serial: the empty name contributes nothing to the move list, and the serial is left as the one name to
    * carry entries from, so the controller's serial-keyed entries still land under the name it answers by once its credentials are gone.
    */
-  const withOutgoing = withControllerSaved({ controllers: [item], options: acrossBothNames },
+  const withOutgoing = withControllerSaved({ controllers: [], options: acrossBothNames },
     { address: ADDRESS, originalAddress: "", originalSerial: CONTROLLER_MAC, tokens: TOKENS });
   const acrossEngine = engineWith(withOutgoing.options);
 
@@ -762,6 +766,161 @@ test("the first-run save composes a complete identity as one patch and composes 
   assert.equal(withPrimaryIdentity({}, { address: ADDRESS, username: CREDENTIALS.username }), null, "half a credential pair composes nothing at all");
   assert.equal(withPrimaryIdentity({}, { tokens: TOKENS }), null, "and neither does an identity with nowhere to connect to");
   assert.equal(withPrimaryIdentity({}, { address: ADDRESS, tokens: {} }), null, "and an empty tokens object is no identity either, on the predicate's own reading");
+});
+
+// The sentence a refused save speaks, transcribed rather than referenced so a sentence that drifts by a character in its one home reddens an arm.
+const LISTED = "This controller is already listed.";
+
+// Whether a thrown value is the refusal carrying that sentence, which is the whole of what a refused composer may throw.
+const isListedRefusal = (error: unknown): boolean => isControllerListed(error) && (error.message === LISTED);
+
+/* Assert that a save is refused, by the early check the page makes before its connection test and by the composer inside the write alike, so every arm below
+ * also proves the two agree.
+ *
+ * @param config  - The configuration the save is asked of.
+ * @param save    - The save.
+ * @param message - What the refusal stands for, for the assertion messages.
+ */
+function assertRefused(config: TestConfig, save: SaveRequest, message: string): void {
+
+  assert.equal(controllerListedElsewhere(config, save), true, message + ", by the early check");
+  assert.throws(() => withControllerSaved(config, save), isListedRefusal, message + ", by the composer");
+}
+
+/* Assert that a save is accepted by the early check, and answer the controllers the composer writes for it, which an arm then reads.
+ *
+ * @param config  - The configuration the save is asked of.
+ * @param save    - The save.
+ * @param message - What the acceptance stands for, for the assertion messages.
+ *
+ * @returns The controllers array the composer wrote.
+ */
+function accepted(config: TestConfig, save: SaveRequest, message: string): AccessControllerConfig[] | undefined {
+
+  assert.equal(controllerListedElsewhere(config, save), false, message + ", by the early check");
+
+  return withControllerSaved(config, save).controllers;
+}
+
+test("an add at an address another controller holds is refused, and an add at a free address appends", () => {
+
+  const config = { controllers: [{ ...CREDENTIALS }] };
+
+  assertRefused(config, { address: ADDRESS, tokens: TOKENS }, "an add at the address the configured controller holds is refused");
+  assert.deepEqual(accepted(config, { address: SECOND_ADDRESS, tokens: TOKENS }, "an add at a free address is accepted"),
+    [ CREDENTIALS, { address: SECOND_ADDRESS, tokens: TOKENS } ], "and it appends beside the controller already there");
+});
+
+test("an edit moving onto another controller's address is refused, and one writing exactly its own stored address is accepted beside a controller sharing it", () => {
+
+  const second = { address: SECOND_ADDRESS, tokens: TOKENS };
+
+  assertRefused({ controllers: [ { ...CREDENTIALS }, second ] }, { address: ADDRESS, originalAddress: SECOND_ADDRESS, tokens: TOKENS },
+    "an edit moving the second controller onto the first one's address is refused");
+
+  // A configuration that already carries more than one controller at an address, which the refusal stops new saves from making but must leave editable.
+  const pair = [ { ...CREDENTIALS }, { address: ADDRESS, tokens: TOKENS } ];
+
+  assert.deepEqual(accepted({ controllers: pair }, { ...CREDENTIALS, originalAddress: ADDRESS, password: "new secret" },
+    "an edit writing exactly the address its item stores moves nothing and is accepted"), [ { ...CREDENTIALS, password: "new secret" }, pair[1] ],
+  "and it replaces the item it names while the item sharing its address stands");
+});
+
+test("an edit changing only the letter case of its own address is accepted where no other controller holds it, and refused onto a spelling another holds", () => {
+
+  const host = { address: "unifi.local", tokens: TOKENS };
+
+  assert.deepEqual(accepted({ controllers: [host] }, { address: "UNIFI.local", originalAddress: "unifi.local", tokens: TOKENS },
+    "a case-only edit of a controller no other controller shares an address with is accepted"), [{ address: "UNIFI.local", tokens: TOKENS }],
+  "and the address is stored exactly as typed");
+
+  // A case-variant pair, which the folded comparison treats as one controller: the edit would otherwise write the exact duplicate the page cannot tell apart.
+  assertRefused({ controllers: [ host, { address: "UNIFI.local", tokens: TOKENS } ] }, { address: "UNIFI.local", originalAddress: "unifi.local", tokens: TOKENS },
+    "a case-only edit onto the exact spelling another controller holds is refused, because only an exactly unchanged address moves nothing");
+});
+
+test("an edit whose original address matches no controller is refused at a held address and appends at a free one", () => {
+
+  const config = { controllers: [{ ...CREDENTIALS }] };
+
+  assertRefused(config, { address: ADDRESS, originalAddress: "10.0.0.250", tokens: TOKENS },
+    "an edit whose item left the configuration, writing an address another controller holds, is refused rather than appended");
+  assert.deepEqual(accepted(config, { address: SECOND_ADDRESS, originalAddress: "10.0.0.250", tokens: TOKENS }, "the same edit at a free address is accepted"),
+    [ CREDENTIALS, { address: SECOND_ADDRESS, tokens: TOKENS } ], "and it appends, because an original address that names no item is an add");
+});
+
+test("the comparison folds letter case and surrounding space, and an address differing in any other character is accepted and stored as typed", () => {
+
+  const config = { controllers: [ { address: "unifi.local", tokens: TOKENS }, { address: "fe80::1", tokens: TOKENS } ] };
+
+  for(const address of [ "UNIFI.LOCAL", " unifi.local", "unifi.local\t", "  Unifi.Local  ", "FE80::1" ]) {
+
+    assertRefused(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " names a held address in another case or with surrounding space");
+  }
+
+  // Each of these names the same machine in some readings, and each is accepted, because the comparison folds letter case and surrounding space and nothing else.
+  for(const address of [ "unifi.local.", "unifi.local:443", "unifi-local", "unifi.locals", "[fe80::1]", "fe80:0:0:0:0:0:0:1" ]) {
+
+    assert.deepEqual(accepted(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " differs in a character the form keeps")?.at(-1),
+      { address, tokens: TOKENS }, "and it appends exactly as typed");
+  }
+
+  assert.deepEqual(accepted({ controllers: [{ ...CREDENTIALS }] }, { address: " 10.0.0.9 ", tokens: TOKENS }, "a padded free address is accepted")?.at(-1),
+    { address: " 10.0.0.9 ", tokens: TOKENS }, "and is stored with its padding, because the fold is for comparing and never for writing");
+});
+
+test("an entry with no address, an empty one, or one that is not a string never matches, and an empty written address answers not listed", () => {
+
+  const entries: AccessControllerConfig[] = [ { tokens: TOKENS }, { address: "", tokens: TOKENS }, { address: 42, tokens: TOKENS } ];
+
+  for(const entry of entries) {
+
+    const label = "beside an entry whose address is " + JSON.stringify(entry.address ?? null);
+
+    assert.deepEqual(accepted({ controllers: [entry] }, { address: "42", tokens: TOKENS }, "an add " + label + " is accepted"),
+      [ entry, { address: "42", tokens: TOKENS } ], "and it appends " + label);
+  }
+
+  const unaddressed = { controllers: [ { address: "", tokens: TOKENS }, { tokens: TOKENS } ] };
+
+  for(const address of [ "", "   " ]) {
+
+    assert.equal(controllerListedElsewhere(unaddressed, { address }), false, "a written address of " + JSON.stringify(address) + " has no form, so it is never listed");
+    assert.doesNotThrow(() => withControllerSaved(unaddressed, { address, tokens: TOKENS }), "and the composer accepts it too");
+  }
+});
+
+test("first-run refuses an address a later controller holds, writes one none holds, and writes where the primary and a later controller already share it", () => {
+
+  const later = { address: ADDRESS, tokens: TOKENS };
+  const identity = { address: ADDRESS, tokens: TOKENS };
+
+  assert.equal(primaryListedElsewhere({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), true,
+    "an incomplete primary beside a later controller at the typed address is refused by the early check");
+  assert.throws(() => withPrimaryIdentity({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), isListedRefusal,
+    "and by the composer");
+
+  assert.equal(primaryListedElsewhere({ controllers: [ {}, { address: SECOND_ADDRESS, tokens: TOKENS } ] }, identity), false,
+    "an address no other controller holds is accepted by the early check");
+  assert.deepEqual(withPrimaryIdentity({ controllers: [ {}, { address: SECOND_ADDRESS, tokens: TOKENS } ] }, identity)?.controllers[0], identity,
+    "and written onto the primary");
+  assert.equal(primaryListedElsewhere({}, identity), false, "and a fresh configuration has nothing to refuse");
+
+  // A primary that already stores the typed address beside a later controller holding it too, which first run is the only screen able to reach.
+  const pair = { controllers: [ { address: ADDRESS, username: CREDENTIALS.username }, later ] };
+
+  assert.equal(primaryListedElsewhere(pair, identity), false, "a primary already storing exactly the typed address moves nothing, so the early check accepts it");
+  assert.deepEqual(withPrimaryIdentity(pair, identity)?.controllers, [ { address: ADDRESS, tokens: TOKENS }, later ],
+    "and the composer writes it, leaving the configuration passable rather than trapped in first run");
+});
+
+test("the listed-address refusal carries its one sentence, and its test answers true for the refusal alone", () => {
+
+  assert.equal(CONTROLLER_LISTED_WARNING, LISTED, "the sentence's one home holds the refusal's sentence");
+  assert.equal(new ControllerListedError().message, LISTED, "and the refusal carries it as its message");
+  assert.equal(isControllerListed(new ControllerListedError()), true, "the test answers true for the refusal");
+  assert.equal(isControllerListed(new Error(LISTED)), false, "and false for another error carrying the same sentence, because it reads the type and never the text");
+  assert.equal(isControllerListed(LISTED), false, "and false for a thrown value that is not an error at all");
 });
 
 test("removal drops the item its address names, and an empty MAC set leaves the configured options untouched", () => {

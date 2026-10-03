@@ -236,17 +236,95 @@ const withIdentityApplied = (base, identity) => {
   return successor;
 };
 
+// What a save says when the address it writes is one another configured controller already holds. It is stated once, here beside the rule that refuses such a
+// save, and the page hands it to every surface that speaks the refusal.
+export const CONTROLLER_LISTED_WARNING = "This controller is already listed.";
+
+/* The refusal a composer throws when the address a save writes is one another configured controller already holds. Throwing is the only refusal a composer has:
+ * the framework writes whatever patch a composer returns, an empty one included, and answers that it committed. The refusal is an error type of its own so the
+ * page can tell it apart from a write that failed and speak it as guidance rather than as a failure. Its message is the sentence above, but every surface speaks
+ * the constant itself rather than reading the message back off the error, so telling the refusal apart never depends on its text.
+ */
+export class ControllerListedError extends Error {
+
+  name = "ControllerListedError";
+
+  constructor() {
+
+    super(CONTROLLER_LISTED_WARNING);
+  }
+}
+
+// Whether a thrown value is the listed-address refusal, which is how a caller that receives one tells it apart from a write that failed.
+export const isControllerListed = (error) => error instanceof ControllerListedError;
+
+/* The form an address is compared in when a save asks whether another configured controller already holds it: surrounding space removed and letters lowercased.
+ * Only a string that is non-empty once trimmed has a form. An address that is absent, empty, or not a string - a hand edit can leave any of those - has none
+ * and never matches, so an empty field is left to the connection test's own sentence rather than read as a listed address.
+ *
+ * Every lookup on the page stays exact, because a lookup asks which stored entry a key names and the stored string is that key. The refusal asks a different
+ * question - whether a new entry would name a controller already listed - and the runtime builds one controller per configured entry with no check of its own,
+ * so a listed host name typed again in another case, or a listed address typed with a stray space, would reach the same machine twice. Host names are
+ * case-insensitive, and so are IPv6 literals, which is what makes the fold sound. The form folds nothing else: a bracketed and a bare IPv6 literal, a compressed
+ * and an expanded one, a trailing dot, and an added port each stay distinct, because naming one controller in such different spellings is out of this rule's
+ * reach.
+ */
+const listingForm = (address) => {
+
+  if(typeof address !== "string") {
+
+    return null;
+  }
+
+  const trimmed = address.trim();
+
+  return trimmed.length ? trimmed.toLowerCase() : null;
+};
+
+/* Whether the address a save writes onto the item at `index` is held by any other configured item, where an index of -1 names no target and the save appends.
+ * This is the one rule the save's composer, the first-run composer, and the page's early checks all ask, so none of them can disagree about what counts as the
+ * same controller.
+ *
+ * A save that writes exactly the address its target already stores moves nothing and is never refused, whatever the other items hold, which keeps a
+ * configuration that already carries more than one item at an address editable. "Exactly" is exact string equality rather than the folded form: an edit that changes
+ * only the letter case of its own address still moves it, and is refused where another item already holds the spelling it moves to.
+ */
+const listedElsewhere = (items, index, address) => {
+
+  if((index !== -1) && (items[index]?.address === address)) {
+
+    return false;
+  }
+
+  const form = listingForm(address);
+
+  return (form !== null) && items.some((item, position) => (position !== index) && (listingForm(item?.address) === form));
+};
+
+// The index of the item a save writes onto: the one whose address is exactly the address the save started from, or -1 for an add and for an original address no
+// item holds. The composer and the early check find their target here alike, so they ask the rule about the same item.
+const saveTarget = (items, originalAddress) => (originalAddress === undefined) ? -1 : items.findIndex((item) => item?.address === originalAddress);
+
 /* Compose the controllers array that writes one controller's identity, either onto the item it already has or as a new item at the end.
  *
  * The item the write lands on is found by the address the caller started from, not by the address being written, so an edit that changes a controller's address
  * replaces that controller rather than adding a second one beside it. An `originalAddress` that names no configured item - and the absent one an add passes -
  * appends instead, which is the whole of what distinguishes adding a controller from editing one.
+ *
+ * A save whose written address another item already holds is refused with a throw rather than composed, on the append and the replace alike. The
+ * composer runs against the configuration as it stands at the write, so this is the refusal that decides, including for a save queued behind another that
+ * changed the configuration after the page last read it.
  */
 const controllersWithSave = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
 
   const identity = { address, password, tokens, username, verifyTls };
   const items = controllers(config);
-  const index = (originalAddress === undefined) ? -1 : items.findIndex((item) => item?.address === originalAddress);
+  const index = saveTarget(items, originalAddress);
+
+  if(listedElsewhere(items, index, address)) {
+
+    throw new ControllerListedError();
+  }
 
   if(index === -1) {
 
@@ -260,6 +338,34 @@ const controllersWithSave = (config, { address, originalAddress, password, token
   return next;
 };
 
+/* Whether a controller save would be refused because another configured controller already holds the address it writes, asked of the configuration the page
+ * last received so a save can answer before its connection test. The composer asks the same rule again inside the write, against the configuration as it then
+ * stands, and its answer is the one that decides. A stale configuration can make the answers differ - this one can refuse a save the composer would accept,
+ * which the user retries, or pass one the composer then refuses - but it can never let a duplicate through.
+ *
+ * @param config - The platform configuration entry.
+ * @param save   - The address the save writes, and the address of the item it started from, absent for an add.
+ *
+ * @returns True when another configured controller already holds the written address.
+ */
+export const controllerListedElsewhere = (config, { address, originalAddress }) => {
+
+  const items = controllers(config);
+
+  return listedElsewhere(items, saveTarget(items, originalAddress), address);
+};
+
+/* Whether the first-run save would be refused because a controller after the primary already holds the address it writes. The first-run save always writes onto
+ * the primary, so the primary is the rule's target, and a primary that already stores exactly this address moves nothing, which keeps first run passable for a
+ * configuration whose primary and a later controller already share an address.
+ *
+ * @param config   - The platform configuration entry.
+ * @param identity - The identity the first-run form would write, of which only the address is read.
+ *
+ * @returns True when another configured controller already holds the written address.
+ */
+export const primaryListedElsewhere = (config, { address }) => listedElsewhere(controllers(config), 0, address);
+
 /* Produce the patch that writes an identity onto the primary controller, preserving any additional controllers and the primary's other fields. This is the first-run
  * save, and it composes nothing at all for an identity the plugin could not connect with: a configuration written from an incomplete form would leave the user with
  * a controller entry the platform's own gate skips and no first run to walk them back through it.
@@ -270,6 +376,9 @@ const controllersWithSave = (config, { address, originalAddress, password, token
  * @param identity - The identity to write onto the primary controller.
  *
  * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with.
+ *
+ * @throws {ControllerListedError} When a controller after the primary holds the address the identity writes and the primary does not already store exactly
+ *                                 that address, by the rule a controller save is refused under.
  */
 export const withPrimaryIdentity = (config, identity) => {
 
@@ -279,6 +388,11 @@ export const withPrimaryIdentity = (config, identity) => {
   }
 
   const next = [...controllers(config)];
+
+  if(listedElsewhere(next, 0, identity.address)) {
+
+    throw new ControllerListedError();
+  }
 
   next[0] = withIdentityApplied(next[0] ?? {}, identity);
 
@@ -710,6 +824,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
      *                     reached it, and the serial this save's own validation answered.
      *
      * @returns The patch for the session's commit to merge onto the platform entry.
+     *
+     * @throws {ControllerListedError} When another configured controller already holds the address this save writes, whether the save appends or moves its item
+     *                                 onto that address; nothing is composed.
      */
     withControllerSaved: (config, controller) => {
 
