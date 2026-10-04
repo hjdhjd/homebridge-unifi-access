@@ -167,10 +167,12 @@ test("makePlatformDouble with no options answers every member a suite stands its
   }
 
   assert.equal(platform.signal.aborted, false, "the plugin's lifetime is live, so nothing an arm stands up is torn down before it runs");
+
+  // Asking for a webhook listener says there is none rather than answering a silent one.
   assert.throws((): void => {
 
     platform.webhookListener();
-  }, { message: "This platform double carries no webhook listener." }, "asking for a webhook listener says there is none rather than answering a silent one");
+  }, { message: "This platform double carries no webhook listener." });
   assert.equal(platform.webhookPort, ACCESS_WEBHOOK_PORT, "and the webhook port is the plugin's own, whatever that constant is set to");
 });
 
@@ -214,10 +216,12 @@ test("every option given to makePlatformDouble reaches the member it names, over
   assert.deepEqual(lines, ["warn w"], "a line said at warning level reaches the arm's recorder, on the channel it was said on");
   assert.equal(platform.signal, aborted.signal, "the lifetime is the arm's own signal");
   assert.equal(platform.signal.aborted, true, "torn down already, which no freshly built default could answer");
+
+  // The webhook listener is the arm's factory rather than the one that says there is none.
   assert.throws((): void => {
 
     platform.webhookListener();
-  }, { message: "This arm's listener." }, "and the webhook listener is the arm's factory rather than the one that says there is none");
+  }, { message: "This arm's listener." });
   assert.equal(platform.webhookPort, 4242, "the webhook port is the number the arm named");
 });
 

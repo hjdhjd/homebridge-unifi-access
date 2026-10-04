@@ -380,8 +380,8 @@ test("a reader wrapped in the device's rule answers while the device can be reac
 
   harness.health.isHealthy = false;
 
-  assert.throws(() => read(), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
-    "the controller term refuses with HAP's own status error carrying the communication-failure status");
+  // The controller term refuses with HAP's own status error carrying the communication-failure status.
+  assert.throws(() => read(), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 
   harness.health.isHealthy = true;
 
@@ -389,8 +389,8 @@ test("a reader wrapped in the device's rule answers while the device can be reac
 
   device.uda = { ...device.uda, is_online: false };
 
-  assert.throws(() => read(), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
-    "the device's own record gates it from there");
+  // The device's own record gates the read from there, refusing it the same way.
+  assert.throws(() => read(), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 });
 
 test("a reachability refresh writes every service carrying availability and only those, reading the composition afresh each time", () => {

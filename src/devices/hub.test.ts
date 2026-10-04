@@ -1422,8 +1422,8 @@ test("every reader a hub wires answers while the device can be reached and refus
       const characteristic = call.this as Characteristic;
       const [handler] = call.arguments;
 
-      assert.throws(() => handler({}), (error: unknown) => (error instanceof HapStatusError) && (error.hapStatus === HAPStatus.SERVICE_COMMUNICATION_FAILURE),
-        "the rule refuses with HAP's own status error");
+      // The rule refuses with HAP's own status error.
+      assert.throws(() => handler({}), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 
       await assert.rejects(characteristic.handleGetRequest(), (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
         "which HAP's read path renders as the status HomeKit shows as Not Responding");

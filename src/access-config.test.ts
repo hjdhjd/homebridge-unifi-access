@@ -771,20 +771,20 @@ test("the first-run save composes a complete identity as one patch and composes 
 // The sentence a refused save speaks, transcribed rather than referenced so a sentence that drifts by a character in its one home reddens an arm.
 const LISTED = "This controller is already listed.";
 
-// Whether a thrown value is the refusal carrying that sentence, which is the whole of what a refused composer may throw.
-const isListedRefusal = (error: unknown): boolean => isControllerListed(error) && (error.message === LISTED);
+// What a refused composer throws: the listed-controller error carrying that sentence, and nothing else.
+const LISTED_REFUSAL = { constructor: ControllerListedError, message: LISTED };
 
 /* Assert that a save is refused, by the early check the page makes before its connection test and by the composer inside the write alike, so every arm below
  * also proves the two agree.
  *
  * @param config  - The configuration the save is asked of.
  * @param save    - The save.
- * @param message - What the refusal stands for, for the assertion messages.
+ * @param message - What the refusal stands for, for the early check's assertion message.
  */
 function assertRefused(config: TestConfig, save: SaveRequest, message: string): void {
 
   assert.equal(controllerListedElsewhere(config, save), true, message + ", by the early check");
-  assert.throws(() => withControllerSaved(config, save), isListedRefusal, message + ", by the composer");
+  assert.throws(() => withControllerSaved(config, save), LISTED_REFUSAL);
 }
 
 /* Assert that a save is accepted by the early check, and answer the controllers the composer writes for it, which an arm then reads.
@@ -897,8 +897,9 @@ test("first-run refuses an address a later controller holds, writes one none hol
 
   assert.equal(primaryListedElsewhere({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), true,
     "an incomplete primary beside a later controller at the typed address is refused by the early check");
-  assert.throws(() => withPrimaryIdentity({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), isListedRefusal,
-    "and by the composer");
+
+  // The composer refuses the same identity, as the early check above does.
+  assert.throws(() => withPrimaryIdentity({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), LISTED_REFUSAL);
 
   assert.equal(primaryListedElsewhere({ controllers: [ {}, { address: SECOND_ADDRESS, tokens: TOKENS } ] }, identity), false,
     "an address no other controller holds is accepted by the early check");
