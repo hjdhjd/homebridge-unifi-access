@@ -19,12 +19,6 @@ import type { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
 import { mqttTopics } from "../mqtt.ts";
 
-/* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
- * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
- *
- * The side-door pair is the exception the UA Gate earns: that hardware drives two doors, and which of them a hint speaks for is not something a shared reading can
- * express.
- */
 // The deliveries this plugin consumes, named by the settings constant so the registration a controller asks for and the handler that receives it agree on the
 // vocabulary by construction rather than by two literals happening to match.
 export type AccessConsumedWebhookEventName = typeof ACCESS_WEBHOOK_EVENTS[keyof typeof ACCESS_WEBHOOK_EVENTS];
@@ -32,10 +26,15 @@ export type AccessConsumedWebhookEventName = typeof ACCESS_WEBHOOK_EVENTS[keyof 
 // The delivery a consumed event name carries, extracted from the library's own union so the payload type follows the name with nothing restated here.
 export type AccessConsumedWebhookDelivery<K extends AccessConsumedWebhookEventName> = Extract<AccessWebhookEvent, { event: K }>;
 
+/* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
+ * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
+ *
+ * The side door hint is the exception the UA Gate earns, because that hardware drives two doors: the hint folds the fact that the device is a gate into the user's
+ * setting for its second door.
+ */
 export interface AccessHints {
 
   hasSideDoor: boolean;
-  hasSideDoorDps: boolean;
   logEvents: ReadonlySet<LogEventName>;
   syncName: boolean;
 }
@@ -170,7 +169,7 @@ export abstract class AccessDevice extends AccessBase {
     this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.isReachable });
     // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
     // states each one the user's settings actually decide.
-    this.hints = { hasSideDoor: false, hasSideDoorDps: false, logEvents: new Set(), syncName: false };
+    this.hints = { hasSideDoor: false, logEvents: new Set(), syncName: false };
     this.hubProjection = hubProjection;
     this.id = deviceSerial(admission);
     this.listeners = new Map();

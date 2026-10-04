@@ -236,7 +236,7 @@ export class AccessHub extends AccessDevice {
   /* Configure device-specific settings for this device.
    *
    * This runs once, from the constructor, so what lands here is the settings a hub reads at adoption and keeps for the life of the accessory: the side door's own
-   * pair, and which event categories are announced in the log. The sensor selection is deliberately not among them - it is read at the gate instead, for the
+   * setting, and which event categories are announced in the log. The sensor selection is deliberately not among them - it is read at the gate instead, for the
    * reason the helper below states.
    */
   protected override configureHints(): boolean {
@@ -245,7 +245,6 @@ export class AccessHub extends AccessDevice {
     super.configureHints();
 
     this.hints.hasSideDoor = (this.uda.device_type === "UGT") && this.hasFeature("Hub.SideDoor");
-    this.hints.hasSideDoorDps = this.hints.hasSideDoor && this.#selectedSensors().includes("SideDoorDPS");
 
     /* The cast states what the engine already guarantees: a domain-narrowed read answers members of the domain it was handed and nothing else, and the domain
      * here is the member table those names are derived from. Holding the selection as a set of the member type is what lets every logging site below name its
@@ -1280,17 +1279,18 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // Validate whether we should have this service enabled. We check the hasSideDoorDps hint, which already incorporates the feature option check, and a true
+    // Validate whether we should have this service enabled. The selection is read here, on every configure pass, exactly as every other sensor's is, and a true
     // verdict acquires the sensor, creating it where the accessory carries none.
+    const selected = this.#selectedSensors().includes("SideDoorDPS");
     const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + SIDE_DOOR_DPS_LABEL,
       serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE, validate: (hasService: boolean) => {
 
-        if(!this.hints.hasSideDoorDps && hasService) {
+        if(!selected && hasService) {
 
           this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
         }
 
-        return this.hints.hasSideDoorDps;
+        return selected;
       } });
 
     if(!service) {

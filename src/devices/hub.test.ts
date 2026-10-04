@@ -4599,6 +4599,25 @@ test("the side door position sensor announces its creation at adoption and its r
     "a harness that clears construction's lines keeps none of them, which is what tells the option apart from a clear that stopped running");
 });
 
+test("the side door position sensor retires on the next update once the user turns its selection off under a running gate", () => {
+
+  const harness = makeGate();
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE), "the gate carries the sensor before its selection moves");
+
+  // The selection is read at every configure pass, so the next update is what carries the user's choice into HomeKit.
+  harness.reconfigure([listLess("Hub.Sensors", hubSensorChoices(), "SideDoorDPS")]);
+  restateRecord(harness, {});
+
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE), "the selection turned off retires the sensor on the next update");
+  assert.equal(lineCount(harness, "Disabling the side door position sensor."), 1, "and the retirement is announced exactly once");
+
+  // A later update finds no sensor left to retire.
+  restateRecord(harness, {});
+
+  assert.equal(lineCount(harness, "Disabling the side door position sensor."), 1, "and an update after it has nothing left to announce");
+});
+
 test("a hub constructed while the tampering alert is off reads normal, and the alert returning is published and not announced", () => {
 
   const harness = makeHub({ record: tamperUltra({ "tamper_event": "true", "tampering": "false" }) });
