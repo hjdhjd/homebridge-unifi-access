@@ -61,18 +61,13 @@ export abstract class AccessBase {
      *
      * The gate wraps the prefix rather than the other way around, which is what makes a suppressed debug line cost one predicate call and no string composition. The
      * predicate is a closure over this owner's live identity rather than a value read here, so a line always resolves against the identity the owner holds at the
-     * moment it speaks...an owner consulted before its identity exists resolves at global scope, the only scope that can name it.
+     * moment it speaks.
      */
     this.log = debugGatedLog(prefixedLog(this.platform.log, () => this.name), () => this.debugEnabled());
   }
 
-  /* Whether this owner's debug lines speak. The base answers at the controller's scope alone, because an owner that is the controller itself has no device identity to
-   * resolve against, and a controller-suffixed Log.Debug entry turns on that controller and everything it manages.
-   */
-  protected debugEnabled(): boolean {
-
-    return this.platform.featureOptions.test("Log.Debug", undefined, this.controller.id);
-  }
+  // Whether this owner's debug lines speak, which each concrete owner supplies at its own scope.
+  protected abstract debugEnabled(): boolean;
 
   /* Configure the device information for HomeKit.
    *
@@ -106,11 +101,8 @@ export abstract class AccessBase {
     return true;
   }
 
-  // Utility function to return the fully enumerated name of this device.
-  public get name(): string {
-
-    return this.controller.name;
-  }
+  // The name every line this owner logs is prefixed with, which each concrete owner supplies.
+  public abstract get name(): string;
 }
 
 export abstract class AccessDevice extends AccessBase {
@@ -148,7 +140,7 @@ export abstract class AccessDevice extends AccessBase {
   protected readonly hubProjection: AccessHubProjection | undefined;
   protected readonly projection: AccessDeviceProjection;
   /* This device's own lifetime, as the composition of the controller's terminal signal with this device's own controller, so plugin shutdown and single-device
-   * removal each end it. Public because the controller's own delivery loops address a configured device through its public surface alone.
+   * removal each end it.
    */
   public readonly signal: AbortSignal;
   /* Every timer this device arms, bound to the lifetime above. cleanup() needs no call of its own: aborting the device controller drains the registry through the
