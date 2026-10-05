@@ -8,7 +8,7 @@ import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsew
   makeAccessConfig, primaryController, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
-import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
+import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./controller-actions.mjs";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
@@ -117,74 +117,10 @@ const renderVerdict = ({ detail = "", lines = [], row, tone = "" }) => {
   row.replaceChildren(...nodes);
 };
 
-/* Probe a controller through the UI server and paint the outcome, shared by every card's validate control, every card's Save, and the first-run submit so none of
- * them can drift apart. The browser cannot reach the Access controller directly, so the request bridges through the plugin's UI server. Returns the probe's verdict
- * on either kind of success and null on any failure - a missing field, an identity the plugin would refuse, a rejected connection, or a request that threw - with
- * the failure already reported through the action for every outcome but success, whose message belongs to the caller.
- *
- * The identity gate is the browser's statement of the plugin's own composition rule, asked here so a user learns their sign-in is incomplete without waiting on a
- * round trip that would be rejected at the far end anyway.
- *
- * The action arrives already started by the card that asked, so a page holding several cards paints each answer on the card it belongs to and no card's slow
- * response can paint over another's. Starting it is the caller's act because the caller speaks through the same action once this answers - a Validate's success,
- * a Save's write - and starting blanks the line before the call rather than after it, so a call that never resolves cannot leave an older verdict beside newer
- * input. The action's own paint decides where each failure lands.
- */
-const requestControllerProbe = async ({ action, address, password, tokens, username, verifyTls }) => {
-
-  if(!address?.length) {
-
-    action.render({ lines: ["Please enter your UniFi Access controller's address."], tone: "text-danger" });
-
-    return null;
-  }
-
-  if(!hasValidIdentity({ password, tokens, username })) {
-
-    action.render({ lines: [ "Please enter a way to sign in to this UniFi Access controller.",
-      "That is a local user's username and password, an Access console API token, or both." ], tone: "text-danger" });
-
-    return null;
-  }
-
-  try {
-
-    const probe = classifyProbeResponse(await homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }));
-
-    // An edit or a newer action on this card retires this one, and a retired request must not paint over what the newer input or action is showing. Closing,
-    // re-populating, or hiding the card retires nothing: the action's own paint decides where an answer that outlives what the card presents goes.
-    if(action.signal.aborted) {
-
-      return null;
-    }
-
-    // Couldn't reach the Access controller. The verdict names which failure this was in its own headline, and the second line is its own guidance where it has one
-    // and the card's own sentence where it does not; the controller-sourced detail arrives on the verdict too, rendered as text so it is never interpreted as
-    // markup.
-    if(probe.kind === "error") {
-
-      action.render({ detail: probe.message, lines: [ probe.headline,
-        probe.guidance ?? "Please check your controller address and sign-in details." ], tone: "text-danger" });
-
-      return null;
-    }
-
-    return probe;
-  } catch(err) {
-
-    // A retired request's failure is nobody's news - the retirement rule above governs this paint too.
-    if(action.signal.aborted) {
-
-      return null;
-    }
-
-    // The UI server failing to start or respond lands here. Painting into the result line keeps the user on the form with the specific failure, while the
-    // framework's toast stays the generic net for consumers without their own handling.
-    action.render({ detail: readProbeRejection(err), lines: ["Unable to validate your controller connection."], tone: "text-danger" });
-
-    return null;
-  }
-};
+// The controller connection check every card's validate control, every card's Save, and the first-run submit share. The bridge's request is reached through a
+// closure rather than handed over as a reference, because the method reads its own object.
+const requestControllerProbe = makeControllerProbe({ classifyProbeResponse, hasValidIdentity, readProbeRejection,
+  request: (path, body) => homebridge.request(path, body) });
 
 // Validate our Access sign-in and commit it.
 const firstRunOnSubmit = async ({ commit, config }) => {
@@ -204,9 +140,15 @@ const firstRunOnSubmit = async ({ commit, config }) => {
     return false;
   }
 
-  const probe = await requestControllerProbe({ ...identity, action });
+  const probe = await requestControllerProbe({ ...identity, signal: action.signal });
 
-  if(!probe) {
+  // A failed check is delivered through the action the submit started, which paints while the card presents it, and a retired one says nothing.
+  if(probe.kind !== "passed") {
+
+    if(probe.kind === "failed") {
+
+      action.report({ ...probe.outcome, tone: "text-danger" });
+    }
 
     return false;
   }
@@ -221,7 +163,7 @@ const firstRunOnSubmit = async ({ commit, config }) => {
      * control, in the sentence a card's Save speaks and through the host's toast it speaks through. It follows the write rather than preceding it, because the
      * sentence says the controller has been saved, and a write that rejects answers on the card instead.
      */
-    if(probe.tokenRefused) {
+    if(probe.answer.tokenRefused) {
 
       homebridge.toast.warning(TOKEN_REFUSED_WARNING);
     }
@@ -397,10 +339,10 @@ const patchControllerLabel = ({ address, devices }) => {
 
 /* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
  * outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
- * catalog-backed interpreters behind it, the configuration the page last received, the UI-server bridge the probe and the status-context send travel over, and
- * the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule, its test, and its sentence come straight from
- * the interpretation module rather than through the interpreters, because none of them needs the catalog and a save's refusal must not wait on a catalog read.
- * What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
+ * catalog-backed interpreters behind it, the configuration the page last received, the connection check and the status-context send, which travel over the
+ * UI-server bridge, and the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule, its test, and its
+ * sentence come straight from the interpretation module rather than through the interpreters, because none of them needs the catalog and a save's refusal must
+ * not wait on a catalog read. What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
@@ -414,8 +356,8 @@ const { answers, removeController, saveController } = makeControllerActions({
   interpreters: accessConfig,
   isControllerListed,
   platformConfig: () => injectedConfig,
-  probe: requestControllerProbe,
   processDeviceList,
+  requestControllerProbe,
   sendStatusContext,
   toast: homebridge.toast
 });
@@ -643,7 +585,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       return {
 
         presented,
-        render: (options = {}) => {
+        report: (options = {}) => {
 
           if(presented()) {
 
@@ -1179,18 +1121,33 @@ const onValidateLogin = async ({ button, card }) => {
 
   try {
 
-    // The success is said through the same action the check ran on, so an answer about a controller the card has moved on from, or about a card that has left
-    // the screen, is dropped rather than painted where nobody asked for it.
     const action = card.verdict.start();
-    const probe = await requestControllerProbe({ ...card.values(), action });
+    const probe = await requestControllerProbe({ ...card.values(), signal: action.signal });
 
-    // The helper reports every failure itself, so only the success verdict is ours to say.
-    if(!probe) {
+    // Every outcome is said through the same action the check ran under, so an answer about a controller the card has moved on from, or about a card that has left
+    // the screen, is dropped rather than painted where nobody asked for it.
+    switch(probe.kind) {
 
-      return;
+      case "passed": {
+
+        action.report(successVerdict(probe.answer));
+
+        break;
+      }
+
+      case "failed": {
+
+        action.report({ ...probe.outcome, tone: "text-danger" });
+
+        break;
+      }
+
+      // A retired check belongs to an action a newer act on the card already replaced, so it says nothing at all.
+      default: {
+
+        break;
+      }
     }
-
-    action.render(successVerdict(probe));
   } finally {
 
     // The re-enable is unconditional: the invocation that disabled the control is the only thing that can balance its own disable.

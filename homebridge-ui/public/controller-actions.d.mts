@@ -1,9 +1,9 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * controller-actions.d.mts: Type declarations for the settings page's kept controller answers and the controller save and removal.
+ * controller-actions.d.mts: Type declarations for the settings page's controller connection check, its kept controller answers, and the controller save and removal.
  */
-import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, controllerListedElsewhere,
-  isControllerListed } from "./access-config.mjs";
+import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, classifyProbeResponse, controllerListedElsewhere,
+  hasValidIdentity, isControllerListed, readProbeRejection } from "./access-config.mjs";
 
 /**
  * What became of a coordinated write. This vocabulary belongs to the webUI framework's `commitConfig`, which publishes it as a JSDoc typedef inside a browser
@@ -12,15 +12,34 @@ import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbe
  */
 export type ControllerWriteResult = { kind: "committed" } | { error: unknown; kind: "staged" } | { error: unknown; kind: "failed" };
 
+/** The sentences and the detail one connection check outcome shows, in the shape a card's line and a toast each read. */
+export interface ProbeOutcome {
+
+  detail?: string;
+  lines: string[];
+}
+
 /**
- * One action a card has begun, as its verdict line answers it: whether the card presents the action, the paint that lands on the line only while it does and is
+ * What the connection check answers: the classified success when the controller accepted the identity, the outcome to show when it did not, or retired when the
+ * action the check ran under was retired before it answered.
+ */
+export type ControllerProbe = { answer: AccessProbeSuccess; kind: "passed" } | { kind: "failed"; outcome: ProbeOutcome } | { kind: "retired" };
+
+/**
+ * The controller connection check: given a card's identity and the signal of the action it runs under, it answers what came of validating that identity. The page
+ * builds one with makeControllerProbe and hands it to every surface that checks a connection, the controller save among them.
+ */
+export type ControllerProbeRequest = (request: AccessIdentity & { signal: AbortSignal }) => Promise<ControllerProbe>;
+
+/**
+ * One action a card has begun, as its verdict line answers it: whether the card presents the action, the report that paints on the line only while it does and is
  * dropped otherwise, and the signal that aborts once an edit to the card's fields or a newer action on the card retires it. The card presents an action while the
  * card is open, the action has not been retired, the card still shows the population it showed when the action began, and the line is on screen.
  */
 export interface ControllerAction {
 
   presented: () => boolean;
-  render: ControllerVerdict["render"];
+  report: ControllerVerdict["render"];
   signal: AbortSignal;
 }
 
@@ -84,8 +103,8 @@ export declare const TOKEN_REFUSED_WARNING: string;
  * @param injected.interpreters              - The page's holder for the configuration interpreters, narrowed to the two an action reads.
  * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
  * @param injected.platformConfig            - The page's read of the platform configuration it last received, or null before it has received one.
- * @param injected.probe                     - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
+ * @param injected.requestControllerProbe    - The connection check, which answers whether the controller accepted an identity and reports nothing itself.
  * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
  * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
  *                                             when its card does not present it.
@@ -100,7 +119,23 @@ export declare const makeControllerActions: (injected: {
   interpreters: () => Promise<Pick<AccessConfigInterpreter, "withControllerRemoved" | "withControllerSaved">>;
   isControllerListed: typeof isControllerListed;
   platformConfig: () => AccessConfig | null;
-  probe: (request: AccessIdentity & { action: Pick<ControllerAction, "render" | "signal"> }) => Promise<AccessProbeSuccess | null>;
   processDeviceList: (list: { address: unknown; devices: Record<string, unknown>[] }) => Record<string, unknown>[];
+  requestControllerProbe: ControllerProbeRequest;
   sendStatusContext: () => Promise<void>;
   toast: { error: (message: string) => void; success: (message: string) => void; warning: (message: string) => void } }) => ControllerActions;
+
+/**
+ * Build the controller connection check over the UI-server bridge's request, the probe classifier, the rejection's reading, and the identity rule.
+ *
+ * @param injected.classifyProbeResponse - The one reading of the UI server's probe answer, which a fulfilled request's outcome is composed from.
+ * @param injected.hasValidIdentity      - The rule that answers whether an identity is one the plugin can connect with.
+ * @param injected.readProbeRejection    - The one reading of a rejected request, which a rejection's detail is composed from.
+ * @param injected.request               - The UI-server bridge's request, taking a path and a payload.
+ *
+ * @returns The connection check.
+ */
+export declare const makeControllerProbe: (injected: {
+  classifyProbeResponse: typeof classifyProbeResponse;
+  hasValidIdentity: typeof hasValidIdentity;
+  readProbeRejection: typeof readProbeRejection;
+  request: (path: string, payload: unknown) => Promise<unknown>; }) => ControllerProbeRequest;

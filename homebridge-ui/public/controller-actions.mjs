@@ -1,24 +1,30 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * controller-actions.mjs: The settings page's kept controller answers, and the controller save and removal that write them.
+ * controller-actions.mjs: The settings page's controller connection check, its kept controller answers, and the controller save and removal that write them.
  */
 "use strict";
 
-/* The single home for what the settings page remembers about each configured controller and for the two configuration actions that change it - a controller's save
- * and a controller's removal. The memory is private here and the page reads it through a handle of four operations, so the rule deciding whether an answer is worth
- * keeping is stated once rather than at every site that fills one, and the seed, the delete, and the generation bump each action makes stay out of reach of every
- * reader that has no business making them.
+/* The single home for the controller connection check every card and the first-run submit share, for what the settings page remembers about each configured
+ * controller, and for the configuration actions that change it - a controller's save and a controller's removal. The memory is private here and the page reads it
+ * through a small handle, so the rule deciding whether an answer is worth keeping is stated once rather than at every site that fills one, and the seed, the
+ * delete, and the generation bump each action makes stay out of reach of every reader that has no business making them.
  *
- * The module takes no imports at all and names no browser global. Every reach beyond it - the connection probe, the configuration interpreters, the listed-address
- * rule and its test, the page's read of its configuration, the host's toast, the framework's coordinated write, the status-context send, and the device-list
- * decoration - is handed in, so the whole of it runs under node against recording fakes. That is what puts a swapped toast severity, a put-back that restores the
- * wrong address, and a seed that lands after its write in front of a gate rather than in front of a user.
+ * The module takes no imports at all and names no browser global. Every reach beyond it is handed in: the UI-server bridge's request, the probe classifier, the
+ * rejection's reading, and the identity rule the connection check runs over, and the connection check, the configuration interpreters, the listed-address rule and
+ * its test, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the status-context send, and the
+ * device-list decoration the save and the removal run over. That is what lets the whole of it run under node against recording fakes, which puts a swapped toast
+ * severity, a put-back that restores the wrong address, a seed that lands after its write, and a connection check that drops a failure's sentence in front of a
+ * gate rather than in front of a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
 // once, here beside the save that speaks it.
 export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did not accept the API token. The plugin will use the local user's username and " +
   "password alone; webhooks and the doorbell trigger need an API token the controller accepts.";
+
+// The message a thrown value or a failed write's error carries, read the one way this module's failure paints read it: an error's own message, and anything else
+// as its text.
+const errorMessage = (error) => (error instanceof Error) ? error.message : String(error);
 
 /**
  * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
@@ -33,8 +39,8 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
  * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
  * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
  * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
- * @param injected.probe                     - The connection validation, which answers a controller's verdict on either kind of success and null on any failure.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
+ * @param injected.requestControllerProbe    - The connection check, which answers whether the controller accepted an identity and reports nothing itself.
  * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
  * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
  *                                             when its card does not present it.
@@ -42,7 +48,7 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
  * @returns The kept answers, the controller removal, and the controller save.
  */
 export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, interpreters, isControllerListed,
-  platformConfig, probe, processDeviceList, sendStatusContext, toast }) => {
+  platformConfig, processDeviceList, requestControllerProbe, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
@@ -147,9 +153,9 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 
     const identity = card.values();
 
-    /* This save's action on the card, and the report its check and its write both speak through under the delivery rule above. When the card does not present the
-     * action, a failure is reported by toast in the sentences and detail the line would have carried, and any other paint is dropped. The signal is the action's
-     * own, which keeps this save's check under the card's latest-action rule.
+    /* This save's action on the card, and the report its check's failure and its write both speak through under the delivery rule above. When the card does not
+     * present the action, a failure is reported by toast in the sentences and detail the line would have carried, and any other paint is dropped. The check runs on
+     * the action's own signal, which keeps it under the card's latest-action rule.
      */
     const action = card.verdict.start();
     const report = {
@@ -158,7 +164,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 
         if(action.presented()) {
 
-          action.render(options);
+          action.report(options);
 
           return;
         }
@@ -169,8 +175,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 
           toast.error((detail.length ? [ ...lines, detail ] : lines).join(" "));
         }
-      },
-      signal: action.signal
+      }
     };
 
     // The listed-address refusal's delivery under the same rule. It goes around report.render, which drops every paint but a failure's once the card stops
@@ -179,7 +184,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 
       if(action.presented()) {
 
-        action.render({ lines: [controllerListedWarning], tone: "text-warning" });
+        action.report({ lines: [controllerListedWarning], tone: "text-warning" });
 
         return;
       }
@@ -194,9 +199,15 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
       return null;
     }
 
-    const validation = await probe({ ...identity, action: report });
+    const probe = await requestControllerProbe({ ...identity, signal: action.signal });
 
-    if(!validation) {
+    // A failed check is said through this save's report, and a retired one belongs to an action a newer act on the card already replaced, so it says nothing.
+    if(probe.kind !== "passed") {
+
+      if(probe.kind === "failed") {
+
+        report.render({ ...probe.outcome, tone: "text-danger" });
+      }
 
       return null;
     }
@@ -215,7 +226,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
      */
     const serialOf = (answer) => ((answer?.kind === "connected") ? controllerSerial(answer) : undefined);
     const originalSerial = serialOf(replaced ? priorAtOriginal : priorAtAddress);
-    const serial = serialOf(validation);
+    const serial = serialOf(probe.answer);
 
     /* Put the map back the way this save found it, restoring each address to the answer read above or deleting it where the map held none, and move the generation
      * again so a fetch issued against the seeded state loses its claim to be kept. A save that wrote nothing then costs the session nothing it knew, and a
@@ -251,7 +262,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
      * and came back with its answer. That is newer than anything a deletion would have left behind, so the repaint the page makes inside the write labels the entry
      * with the controller's live name rather than falling back to the raw address, and the next selection is served rather than reconnecting.
      */
-    byAddress.set(identity.address, { ...validation, devices: processDeviceList({ address: identity.address, devices: validation.devices }) });
+    byAddress.set(identity.address, { ...probe.answer, devices: processDeviceList({ address: identity.address, devices: probe.answer.devices }) });
 
     let result;
 
@@ -277,7 +288,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
         return null;
       }
 
-      report.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to save this controller."], tone: "text-danger" });
+      report.render({ detail: errorMessage(err), lines: ["Unable to save this controller."], tone: "text-danger" });
 
       return null;
     }
@@ -290,7 +301,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
          * credentials arrive. A connection whose token the controller refused is a successful save as well, and it warns, since the plugin runs on the credentials
          * alone and what only an accepted token reaches stays off until the configuration carries one.
          */
-        if(validation.kind === "token-only") {
+        if(probe.answer.kind === "token-only") {
 
           toast.success("This controller has been saved. Its API token is valid. Its doors and devices appear in HomeKit; adding a local user's username and " +
             "password lets the plugin read the controller's own document as well.");
@@ -298,7 +309,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
           break;
         }
 
-        if(validation.tokenRefused) {
+        if(probe.answer.tokenRefused) {
 
           toast.warning(TOKEN_REFUSED_WARNING);
 
@@ -321,8 +332,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
       case "failed": {
 
         restoreCache();
-        report.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
-          lines: ["Unable to save this controller."], tone: "text-danger" });
+        report.render({ detail: errorMessage(result.error), lines: ["Unable to save this controller."], tone: "text-danger" });
 
         return null;
       }
@@ -364,7 +374,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
       result = await commitConfig((platform) => withControllerRemoved(platform, { address, macs }));
     } catch(err) {
 
-      card.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to remove this controller."], tone: "text-danger" });
+      card.verdict.render({ detail: errorMessage(err), lines: ["Unable to remove this controller."], tone: "text-danger" });
 
       return;
     }
@@ -388,8 +398,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 
       case "failed": {
 
-        card.verdict.render({ detail: (result.error instanceof Error) ? result.error.message : String(result.error),
-          lines: ["Unable to remove this controller."], tone: "text-danger" });
+        card.verdict.render({ detail: errorMessage(result.error), lines: ["Unable to remove this controller."], tone: "text-danger" });
 
         return;
       }
@@ -411,4 +420,75 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
   };
 
   return { answers, removeController, saveController };
+};
+
+/**
+ * Build the controller connection check over the page's own reach into the UI-server bridge. The check validates a controller identity against the UI server and
+ * answers what came of it, and every card's validate control, every card's Save, and the first-run submit share it so none of them can drift apart. The browser
+ * cannot reach the Access controller directly, so the request bridges through the plugin's UI server.
+ *
+ * It answers an outcome and reports nothing itself: passed with the classified success, failed with the sentences and the detail that a missing address, an
+ * identity the plugin would refuse, a refused connection, or a request that threw calls for, or retired when the signal it was handed aborted before the answer
+ * arrived. Each caller delivers the outcome under its own rule: the validate control and the first-run submit through the action they started, which paints while
+ * the card presents it and drops it otherwise, and a Save under the rule its failures follow, which still reaches the user through the host's toast once the card
+ * no longer presents the save.
+ *
+ * The signal is the caller's action's own, so an edit to the card's fields or a newer act on the card retires the request. Starting that action is the caller's
+ * act: the caller speaks through it once this answers, so a page holding several cards speaks each answer on the card it belongs to; starting blanks the line
+ * before the request rather than after it, so a check that never answers cannot leave an older verdict beside newer input; and a Save and the first-run submit
+ * each ask whether the address is already listed before this check begins. The bridge offers no cancellation, so a retired request still runs to its answer at
+ * the host, where that answer is dropped.
+ *
+ * @param injected.classifyProbeResponse - The one reading of the UI server's probe answer, which a fulfilled request's outcome is composed from.
+ * @param injected.hasValidIdentity      - The rule that answers whether an identity is one the plugin can connect with.
+ * @param injected.readProbeRejection    - The one reading of a rejected request, which a rejection's detail is composed from.
+ * @param injected.request               - The UI-server bridge's request, taking a path and a payload.
+ *
+ * @returns The connection check.
+ */
+export const makeControllerProbe = ({ classifyProbeResponse, hasValidIdentity, readProbeRejection, request }) => async ({ address, password, signal, tokens,
+  username, verifyTls }) => {
+
+  if(!address?.length) {
+
+    return { kind: "failed", outcome: { lines: ["Please enter your UniFi Access controller's address."] } };
+  }
+
+  // The identity gate is the browser's statement of the plugin's own composition rule, asked here so a user learns their sign-in is incomplete without waiting on a
+  // round trip that would be refused at the far end anyway.
+  if(!hasValidIdentity({ password, tokens, username })) {
+
+    return { kind: "failed", outcome: { lines: [ "Please enter a way to sign in to this UniFi Access controller.",
+      "That is a local user's username and password, an Access console API token, or both." ] } };
+  }
+
+  const [settled] = await Promise.allSettled([request("/getDevices", { address, password, tokens, username, verifyTls })]);
+
+  // An edit to this card's fields, or a newer validation or Save on it, retires this one. A retired request answers nothing to show, whether the bridge answered
+  // or failed, so it never paints over what the newer input or action is showing, and a Save waiting on it writes nothing. Closing, re-populating, or hiding the
+  // card retires nothing: the caller's own delivery decides where an answer that outlives what the card presents goes.
+  if(signal.aborted) {
+
+    return { kind: "retired" };
+  }
+
+  // The UI server failing to start or respond lands here. Answering the specific failure keeps it on the card for a user still looking at it, while the framework's
+  // toast stays the generic net for consumers without their own handling.
+  if(settled.status === "rejected") {
+
+    return { kind: "failed", outcome: { detail: readProbeRejection(settled.reason), lines: ["Unable to validate your controller connection."] } };
+  }
+
+  const verdict = classifyProbeResponse(settled.value);
+
+  // Couldn't reach the Access controller. The verdict names which failure this was in its own headline, and the second line is its own guidance where it has one
+  // and the card's own sentence where it does not; the controller-sourced detail arrives on the verdict too, and every surface renders it as text so it is never
+  // interpreted as markup.
+  if(verdict.kind === "error") {
+
+    return { kind: "failed", outcome: { detail: verdict.message, lines: [ verdict.headline,
+      verdict.guidance ?? "Please check your controller address and sign-in details." ] } };
+  }
+
+  return { answer: verdict, kind: "passed" };
 };

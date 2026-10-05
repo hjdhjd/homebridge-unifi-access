@@ -1,7 +1,7 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * controller-actions.test.ts: The settings page's kept controller answers and the two configuration actions that write them, driven through recording fakes for
- * every reach the module makes outside itself.
+ * controller-actions.test.ts: The settings page's controller connection check, its kept controller answers, and the controller save and removal that write them,
+ * driven through recording fakes for every reach the module makes outside itself.
  *
  * What these arms prove is the part of a save and a removal no type can state: that each write outcome speaks in exactly the sentence and exactly the severity it
  * is supposed to, that the seed a save makes lands BEFORE the write rather than after it, that a write which failed puts both addresses back exactly as it found
@@ -15,12 +15,15 @@
  *
  * The write fake refuses a declared rename whose keys are not strings, as the framework refuses one ahead of its queue, so a rename built from a value that is
  * no sidebar key fails the save it reaches rather than recording as though the page had accepted it.
+ *
+ * The connection check's rows run the real probe classifier, identity rule, and rejection reading behind a request double, so each failure's sentences and detail
+ * are read where the check composes them.
  */
 import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
-import type { ControllerAction, ControllerActions, ControllerCard, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
-import { ControllerListedError, isControllerListed } from "../homebridge-ui/public/access-config.mjs";
+import type { ControllerAction, ControllerActions, ControllerCard, ControllerProbe, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
+import { ControllerListedError, classifyProbeResponse, hasValidIdentity, isControllerListed, readProbeRejection } from "../homebridge-ui/public/access-config.mjs";
+import { makeControllerActions, makeControllerProbe } from "../homebridge-ui/public/controller-actions.mjs";
 import assert from "node:assert/strict";
-import { makeControllerActions } from "../homebridge-ui/public/controller-actions.mjs";
 import test from "node:test";
 
 // The address a save writes and a removal drops, and the address an address-edit save replaces. They differ so a put-back that restores one in place of the other
@@ -74,10 +77,13 @@ const COMPOSER_REFUSAL_MESSAGE = "the composer refused an address another contro
 // an early check asked of the write's configuration rather than the page's reads as the mistake it is.
 const PAGE_CONFIG = { controllers: [{ address: ORIGINAL_ADDRESS, name: "the configuration the page last received" }] };
 
-// A failure the page's probe paints for a controller it could not reach, in the headline, guidance, and detail it paints one with, and the one message the error
-// toast carries for it when the card does not present the save.
-const CHECK_FAILURE: RenderedVerdict = { detail: "the controller refused this sign-in", lines: [ "Unable to connect to the UniFi Access controller.",
-  "Please check your controller address and sign-in details." ], tone: "text-danger" };
+/* A failure the connection check answers for a controller it could not reach, in the headline, guidance, and detail it answers one with; the verdict a save paints
+ * for it, in the error tone; and the one message the error toast carries for it when the card does not present the save.
+ */
+const CHECK_OUTCOME = { detail: "the controller refused this sign-in", lines: [ "Unable to connect to the UniFi Access controller.",
+  "Please check your controller address and sign-in details." ] };
+const CHECK_FAILED: ControllerProbe = { kind: "failed", outcome: CHECK_OUTCOME };
+const CHECK_FAILURE: RenderedVerdict = { ...CHECK_OUTCOME, tone: "text-danger" };
 const CHECK_FAILURE_TOAST = "Unable to connect to the UniFi Access controller. Please check your controller address and sign-in details. the controller refused " +
   "this sign-in";
 
@@ -110,10 +116,10 @@ interface ListedCheck {
   save: unknown;
 }
 
-// One probe request, as the save composed it: the card's identity and the report the check speaks through.
+// One connection check request, as its caller composed it: the card's identity and the signal of the action the check runs under.
 interface ProbeRequest extends AccessIdentity {
 
-  action: Pick<ControllerAction, "render" | "signal">;
+  signal: AbortSignal;
 }
 
 // One toast, by the severity it was spoken at and the sentence it carried.
@@ -171,6 +177,18 @@ function probeAnswer(kind: "connected" | "token-only", tokenRefused = false): Ac
   return { devices: [device(PROBE_SERIAL)], kind, message: PROBE_MESSAGE, tokenRefused };
 }
 
+/* What the connection check answers when the controller accepted this save's identity, carrying the probe's answer.
+ *
+ * @param kind         - Whether the controller answered with credentials or with an API token alone.
+ * @param tokenRefused - Whether the controller refused the API token beside the credentials.
+ *
+ * @returns The connection check's answer.
+ */
+function passed(kind: "connected" | "token-only", tokenRefused = false): ControllerProbe {
+
+  return { answer: probeAnswer(kind, tokenRefused), kind: "passed" };
+}
+
 /* The answer this session was already holding for an address, deliberately unlike anything a probe here returns.
  *
  * @param address - The address the answer is held under.
@@ -193,21 +211,20 @@ function failedAnswer(): AccessProbeVerdict {
 
 /* Stand up the actions over recording fakes for every reach they make outside themselves.
  *
- * @param options.checkFailure      - A failure the check paints through the action it was handed before it answers, the way the page's probe paints its own.
  * @param options.composerThrows    - What the save interpreter throws rather than composing, which reaches the save the way the real write rejects with it.
- * @param options.duringCheck       - What befalls the card while the check is in flight, ahead of anything the check paints or answers.
+ * @param options.duringCheck       - What befalls the card while the check is in flight, ahead of anything the check answers.
  * @param options.duringListedCheck - What befalls the card while the listed-address rule is asked, ahead of the connection test.
  * @param options.duringWrite       - What befalls the card while the write is in flight, after the check has passed.
  * @param options.interpretersThrow - Whether the interpreter holder rejects rather than answering.
  * @param options.listed            - Whether the listed-address rule answers that another configured controller already holds the written address.
- * @param options.probe             - What the connection validation answers, or null for the failure that writes nothing.
+ * @param options.probe             - What the connection check answers, which an arm that never reaches the check leaves out.
  * @param options.write             - The result the coordinated write resolves with, or the error it throws.
  *
  * @returns The actions and every recorder beneath them.
  */
-function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, duringWrite, interpretersThrow = false, listed = false, probe, write }: {
-  checkFailure?: RenderedVerdict; composerThrows?: Error; duringCheck?: CardEvent; duringListedCheck?: CardEvent; duringWrite?: CardEvent;
-  interpretersThrow?: boolean; listed?: boolean; probe: AccessProbeSuccess | null; write: ControllerWriteResult | Error; }): Stand {
+function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, interpretersThrow = false, listed = false, probe, write }: {
+  composerThrows?: Error; duringCheck?: CardEvent; duringListedCheck?: CardEvent; duringWrite?: CardEvent; interpretersThrow?: boolean; listed?: boolean;
+  probe?: ControllerProbe; write: ControllerWriteResult | Error; }): Stand {
 
   const composed: unknown[] = [];
   const interpreterCalls: InterpreterCall[] = [];
@@ -226,7 +243,7 @@ function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, d
 
   /* The card an action acts for, holding the page card's rules in miniature: a start retires the action before it, an edit retires whatever is current, a
    * re-population moves the card on without retiring anything, and an action is presented while the card is open, the action stands, the card shows the
-   * population the action began under, and the card is on screen. An action's own paint records only what the card presents, and the plain paint records all.
+   * population the action began under, and the card is on screen. An action's own report records only what the card presents, and the plain paint records all.
    */
   const card: ControllerCard = {
 
@@ -254,7 +271,7 @@ function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, d
         return {
 
           presented,
-          render: (options = {}): void => {
+          report: (options = {}): void => {
 
             if(presented()) {
 
@@ -372,30 +389,6 @@ function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, d
     },
     isControllerListed,
     platformConfig: () => PAGE_CONFIG,
-    probe: async (request) => {
-
-      // The request the save composed, kept because the real probe dereferences the action on it before anything else it does.
-      probeCalls.push(request);
-
-      // What befalls the card and the failure the check paints both land here, between the request and its answer, which is where the page's own probe meets
-      // them. The page's probe drops a retired check's answer before it reports anything, and so does this one.
-      if(duringCheck) {
-
-        befall[duringCheck]();
-      }
-
-      if(request.action.signal.aborted) {
-
-        return null;
-      }
-
-      if(checkFailure) {
-
-        request.action.render(checkFailure);
-      }
-
-      return probe;
-    },
     processDeviceList: ({ address, devices }) => {
 
       for(const record of devices) {
@@ -405,6 +398,27 @@ function stand({ checkFailure, composerThrows, duringCheck, duringListedCheck, d
       }
 
       return devices;
+    },
+    requestControllerProbe: async (request) => {
+
+      // The request the save composed, kept so an arm can read the identity it carried and the signal it ran under.
+      probeCalls.push(request);
+
+      // What befalls the card lands here, between the request and its answer, which is where the page's own check meets it. The page's check answers retired for
+      // a request its card retired before it answers anything else, and so does this one.
+      if(duringCheck) {
+
+        befall[duringCheck]();
+      }
+
+      if(request.signal.aborted) {
+
+        return { kind: "retired" };
+      }
+
+      assert.ok(probe, "an arm that reaches the connection check scripts what it answers");
+
+      return probe;
     },
     sendStatusContext: async () => {
 
@@ -476,9 +490,9 @@ function assertSpoke({ label = "", renames = [], renders = [], sends, stood, toa
   assert.deepEqual(stood.renames, renames, label + "the renames the write declared");
 }
 
-test("s1: a save whose validation fails writes nothing, touches no answer, and says nothing", async () => {
+test("s1: a save whose connection check fails writes nothing, touches no answer, and speaks the failure once", async () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ probe: CHECK_FAILED, write: { kind: "committed" } });
   const before = stood.actions.answers.generation();
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
@@ -486,13 +500,13 @@ test("s1: a save whose validation fails writes nothing, touches no answer, and s
   assert.equal(stood.actions.answers.generation(), before, "the generation does not move");
   assert.deepEqual(stood.interpreterCalls, [], "no interpreter runs");
   assert.deepEqual(stood.composed, [], "nothing is composed");
-  assert.equal(stood.probeCalls.length, 1, "the validation still ran, which is what answered the failure");
-  assertSpoke({ sends: 0, stood });
+  assert.equal(stood.probeCalls.length, 1, "the check ran once, and its answer is the failure");
+  assertSpoke({ renders: [CHECK_FAILURE], sends: 0, stood });
 });
 
 test("s2: a committed save of a connected controller speaks its plain sentence, sends once, and answers the address", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
 
@@ -500,14 +514,14 @@ test("s2: a committed save of a connected controller speaks its plain sentence, 
   // action rather than on a signal of the save's own making.
   stood.card.verdict.retire();
 
-  assert.deepEqual(stood.probeCalls.map(({ action, ...identity }) => ({ identity, retiredByTheCard: action.signal.aborted })),
+  assert.deepEqual(stood.probeCalls.map(({ signal, ...identity }) => ({ identity, retiredByTheCard: signal.aborted })),
     [{ identity: IDENTITY, retiredByTheCard: true }], "the probe received the card's identity and a check running as the card's own newest action");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
 });
 
 test("s3a: a committed save of a token-only controller speaks the sentence that says what credentials would add", async () => {
 
-  const stood = stand({ probe: probeAnswer("token-only"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("token-only"), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_TOKEN_ONLY }] });
@@ -515,7 +529,7 @@ test("s3a: a committed save of a token-only controller speaks the sentence that 
 
 test("s3b: a committed save of a controller that refused its API token warns that the plugin runs on the credentials alone", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected", true), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected", true), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
   assertSpoke({ sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_TOKEN_REFUSED }] });
@@ -523,7 +537,7 @@ test("s3b: a committed save of a controller that refused its API token warns tha
 
 test("s4: an address edit drops the original address before the write and declares the rename on the write", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(stood, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
 
@@ -535,7 +549,7 @@ test("s4: an address edit drops the original address before the write and declar
 
 test("s5: a staged save warns that the file was not written, sends once, and declares an edited address's rename on its write", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { error: new Error("the host could not write"), kind: "staged" } });
+  const stood = stand({ probe: passed("connected"), write: { error: new Error("the host could not write"), kind: "staged" } });
 
   seed(stood, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
 
@@ -545,7 +559,7 @@ test("s5: a staged save warns that the file was not written, sends once, and dec
 
 test("s6a: a failed save restores what each address held and paints an Error's own message", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const stood = stand({ probe: passed("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
   const priorAtAddress = priorAt(ADDRESS);
   const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
 
@@ -564,7 +578,7 @@ test("s6a: a failed save restores what each address held and paints an Error's o
 
 test("s6b: a failed save leaves both addresses empty where it found them empty, and paints a non-Error through String", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { error: "the host answered in a shape it never writes", kind: "failed" } });
+  const stood = stand({ probe: passed("connected"), write: { error: "the host answered in a shape it never writes", kind: "failed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the save answers null");
   assert.equal(stood.actions.answers.get(ADDRESS), undefined, "the address the save wrote is empty again");
@@ -575,7 +589,7 @@ test("s6b: a failed save leaves both addresses empty where it found them empty, 
 
 test("s7a: an interpreter holder that rejects restores the map and paints the failure, without composing anything", async () => {
 
-  const stood = stand({ interpretersThrow: true, probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ interpretersThrow: true, probe: passed("connected"), write: { kind: "committed" } });
   const prior = priorAt(ADDRESS);
   const before = stood.actions.answers.generation();
 
@@ -597,7 +611,7 @@ test("s7a: an interpreter holder that rejects restores the map and paints the fa
 
 test("s7b: a coordinated write that throws restores the map and paints the failure", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: new Error("the write threw") });
+  const stood = stand({ probe: passed("connected"), write: new Error("the write threw") });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -612,7 +626,7 @@ test("s8: a write this page does not recognize answers null, keeps the seed, and
   const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
 
     const label = write.kind + ": ";
-    const stood = stand({ probe: probeAnswer("connected"), write });
+    const stood = stand({ probe: passed("connected"), write });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assert.equal(stood.actions.answers.get(ADDRESS)?.devices[0]?.["processed"], PROCESSED, label + "the seed is left exactly where the save put it");
@@ -626,7 +640,7 @@ test("s8: a write this page does not recognize answers null, keeps the seed, and
 
 test("s9: the address a save writes is seeded with its own processed answer before the write runs", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -645,7 +659,7 @@ test("s9: the address a save writes is seeded with its own processed answer befo
 
 test("s10: a save moves the generation before the write, so a fetch captured earlier is refused afterwards", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
   const mark = stood.actions.answers.generation();
 
   await stood.actions.saveController({ card: stood.card, originalAddress: undefined });
@@ -658,7 +672,7 @@ test("s10: a save moves the generation before the write, so a fetch captured ear
 
 test("s11: a save hands the interpreter the card's identity with the original address, and the write the patch that came back", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS });
 
@@ -670,7 +684,7 @@ test("s11: a save hands the interpreter the card's identity with the original ad
 
 test("s12: a save that leaves the address alone seeds it before the write and declares no rename", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -681,7 +695,7 @@ test("s12: a save that leaves the address alone seeds it before the write and de
 
 test("s13: a save reads the outgoing serial from the answer held under the address it is writing over, ahead of the seed that replaces it", async () => {
 
-  const replacing = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const replacing = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(replacing, ADDRESS, priorAt(ADDRESS));
   seed(replacing, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
@@ -695,7 +709,7 @@ test("s13: a save reads the outgoing serial from the answer held under the addre
     "which is read from the answer this session was already holding rather than from the one the seed puts in its place");
   assert.deepEqual(replacing.renames, [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], "and the address edit declares its rename on the write");
 
-  const same = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const same = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(same, ADDRESS, priorAt(ADDRESS));
 
@@ -708,7 +722,7 @@ test("s13: a save reads the outgoing serial from the answer held under the addre
 
 test("s14: a token-only answer names no serial, on whichever side of the save it sits", async () => {
 
-  const validated = stand({ probe: probeAnswer("token-only"), write: { kind: "committed" } });
+  const validated = stand({ probe: passed("token-only"), write: { kind: "committed" } });
 
   seed(validated, ADDRESS, priorAt(ADDRESS));
 
@@ -719,7 +733,7 @@ test("s14: a token-only answer names no serial, on whichever side of the save it
   "a token-only validation hands no serial, because the row it would be read from carries an address identity rather than one");
   assert.deepEqual(validated.serialReads.map((answer) => answer.message), [PRIOR_MESSAGE], "and that row goes unread");
 
-  const held = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const held = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   seed(held, ADDRESS, { ...priorAt(ADDRESS), kind: "token-only" });
 
@@ -735,7 +749,7 @@ test("s15: a save whose card closes, leaves the screen, or is re-populated durin
   const assertWritten = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ duringCheck: event, probe: probeAnswer("connected"), write: { kind: "committed" } });
+    const stood = stand({ duringCheck: event, probe: passed("connected"), write: { kind: "committed" } });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, label + "the save answers the address it wrote");
     assert.deepEqual(stood.composed, [SAVE_PATCH], label + "and the write still received the patch the interpreter composed");
@@ -752,7 +766,7 @@ test("s16: a save whose check fails once its card has closed, left the screen, o
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ checkFailure: CHECK_FAILURE, duringCheck: event, probe: null, write: { kind: "committed" } });
+    const stood = stand({ duringCheck: event, probe: CHECK_FAILED, write: { kind: "committed" } });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assert.deepEqual(stood.composed, [], label + "nothing is composed");
@@ -769,7 +783,7 @@ test("s17: a save whose write fails once its card has stopped presenting it toas
   const assertToasted = async ({ event, label, message, write }: { event: CardEvent; label: string; message: string;
     write: ControllerWriteResult | Error; }): Promise<void> => {
 
-    const stood = stand({ duringWrite: event, probe: probeAnswer("connected"), write });
+    const stood = stand({ duringWrite: event, probe: passed("connected"), write });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "error", message }] });
@@ -787,12 +801,12 @@ test("s17: a save whose write fails once its card has stopped presenting it toas
 
 test("s18: an open card's failures paint on its verdict line and toast nothing", async () => {
 
-  const checked = stand({ checkFailure: CHECK_FAILURE, probe: null, write: { kind: "committed" } });
+  const checked = stand({ probe: CHECK_FAILED, write: { kind: "committed" } });
 
   assert.equal(await checked.actions.saveController({ card: checked.card, originalAddress: undefined }), null, "a failed check answers null");
   assertSpoke({ label: "check: ", renders: [CHECK_FAILURE], sends: 0, stood: checked });
 
-  const written = stand({ probe: probeAnswer("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const written = stand({ probe: passed("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
 
   assert.equal(await written.actions.saveController({ card: written.card, originalAddress: undefined }), null, "a failed write answers null");
   assertSpoke({ label: "write: ", renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1,
@@ -801,7 +815,7 @@ test("s18: an open card's failures paint on its verdict line and toast nothing",
 
 test("s19: an edit to the card's fields during a save's check cancels the save, which writes nothing and says nothing", async () => {
 
-  const stood = stand({ duringCheck: "edit", probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ duringCheck: "edit", probe: passed("connected"), write: { kind: "committed" } });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
   assert.deepEqual(stood.interpreterCalls, [], "no interpreter runs");
@@ -811,7 +825,7 @@ test("s19: an edit to the card's fields during a save's check cancels the save, 
 
 test("s20: a save whose original address is not a string declares no rename, and writes and speaks as any other save does", async () => {
 
-  const stood = stand({ probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
 
   // A hand edit is the only way a configured address arrives as something other than a string, and the editors pass it through unconverted. Such a save still
   // replaces an address, but the framework refuses a rename whose keys are not strings, so the save declares none and writes rather than failing.
@@ -822,7 +836,7 @@ test("s20: a save whose original address is not a string declares no rename, and
 
 test("s21: a save at an address another controller holds is refused before its connection test, writing nothing and saying the sentence on the card", async () => {
 
-  const stood = stand({ listed: true, probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ listed: true, probe: passed("connected"), write: { kind: "committed" } });
   const priorAtAddress = priorAt(ADDRESS);
   const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
 
@@ -848,7 +862,7 @@ test("s22: a listed address refused once the card has stopped presenting the sav
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ duringListedCheck: event, listed: true, probe: probeAnswer("connected"), write: { kind: "committed" } });
+    const stood = stand({ duringListedCheck: event, listed: true, probe: passed("connected"), write: { kind: "committed" } });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assert.equal(stood.probeCalls.length, 0, label + "the connection test never ran");
@@ -863,7 +877,7 @@ test("s22: a listed address refused once the card has stopped presenting the sav
 
 test("s23: a composer that refuses a listed address puts the answers back and says the page's sentence on the card, never the error's own message", async () => {
 
-  const stood = stand({ composerThrows: composerRefusal(), probe: probeAnswer("connected"), write: { kind: "committed" } });
+  const stood = stand({ composerThrows: composerRefusal(), probe: passed("connected"), write: { kind: "committed" } });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -880,7 +894,7 @@ test("s24: a composer's refusal met once the card has stopped presenting the sav
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ composerThrows: composerRefusal(), duringCheck: event, probe: probeAnswer("connected"), write: { kind: "committed" } });
+    const stood = stand({ composerThrows: composerRefusal(), duringCheck: event, probe: passed("connected"), write: { kind: "committed" } });
     const prior = priorAt(ADDRESS);
 
     seed(stood, ADDRESS, prior);
@@ -900,7 +914,7 @@ test("s25: a composer that throws anything else keeps the failure line and its d
   const assertFailed = async (thrown: Error): Promise<void> => {
 
     const label = thrown.message + ": ";
-    const stood = stand({ composerThrows: thrown, probe: probeAnswer("connected"), write: { kind: "committed" } });
+    const stood = stand({ composerThrows: thrown, probe: passed("connected"), write: { kind: "committed" } });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assertSpoke({ label, renders: [{ detail: thrown.message, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
@@ -914,7 +928,7 @@ test("s25: a composer that throws anything else keeps the failure line and its d
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -931,7 +945,7 @@ test("r1: a committed removal drops the answer, sends once, and says nothing at 
 
 test("r2: a staged removal warns that the file was not written, and still drops the answer", async () => {
 
-  const stood = stand({ probe: null, write: { error: new Error("the host could not write"), kind: "staged" } });
+  const stood = stand({ write: { error: new Error("the host could not write"), kind: "staged" } });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -948,7 +962,7 @@ test("r2: a staged removal warns that the file was not written, and still drops 
 
 test("r3: a failed removal paints the failure on the card and keeps the answer", async () => {
 
-  const stood = stand({ probe: null, write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const stood = stand({ write: { error: new Error("the host refused the write"), kind: "failed" } });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -961,7 +975,7 @@ test("r3: a failed removal paints the failure on the card and keeps the answer",
 
 test("r4: a removal whose write throws paints the failure and keeps the answer", async () => {
 
-  const stood = stand({ probe: null, write: new Error("the write threw") });
+  const stood = stand({ write: new Error("the write threw") });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -977,7 +991,7 @@ test("r5: a removal this page does not recognize says nothing and keeps the answ
   const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
 
     const label = write.kind + ": ";
-    const stood = stand({ probe: null, write });
+    const stood = stand({ write });
     const prior = priorAt(ADDRESS);
 
     seed(stood, ADDRESS, prior);
@@ -994,7 +1008,7 @@ test("r5: a removal this page does not recognize says nothing and keeps the answ
 
 test("r6: a removal hands the interpreter the address and the chosen sweep, and the write the patch that came back", async () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
 
   await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
 
@@ -1005,7 +1019,7 @@ test("r6: a removal hands the interpreter the address and the chosen sweep, and 
 
 test("a1: an answer that failed is refused, and nothing is written for it", () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
 
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: failedAnswer(), generation: stood.actions.answers.generation() }), false,
     "a failure is never kept");
@@ -1014,7 +1028,7 @@ test("a1: an answer that failed is refused, and nothing is written for it", () =
 
 test("a2: an answer an invalidation overtook is refused, and nothing is written for it", () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
   const mark = stood.actions.answers.generation();
 
   stood.actions.answers.clear();
@@ -1025,7 +1039,7 @@ test("a2: an answer an invalidation overtook is refused, and nothing is written 
 
 test("a3: a success offered at the current generation is kept, and reads back as the same answer", () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
   const answer = priorAt(ADDRESS);
 
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer, generation: stood.actions.answers.generation() }), true, "the answer is kept");
@@ -1034,7 +1048,7 @@ test("a3: a success offered at the current generation is kept, and reads back as
 
 test("a4: clearing empties the answers and moves the generation", () => {
 
-  const stood = stand({ probe: null, write: { kind: "committed" } });
+  const stood = stand({ write: { kind: "committed" } });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -1044,4 +1058,176 @@ test("a4: clearing empties the answers and moves the generation", () => {
 
   assert.equal(stood.actions.answers.get(ADDRESS), undefined, "nothing is held any more");
   assert.notEqual(stood.actions.answers.generation(), mark, "and a fetch issued before the clear has lost its claim to be kept");
+});
+
+// What the connection check says for each of its failures, transcribed from the module and the probe classifier rather than referenced, so a sentence that drifts
+// by a character reddens a row.
+const ADDRESS_MISSING = "Please enter your UniFi Access controller's address.";
+const SIGN_IN_MISSING = [ "Please enter a way to sign in to this UniFi Access controller.",
+  "That is a local user's username and password, an Access console API token, or both." ];
+const CONNECTION_REFUSED = [ "Unable to connect to the UniFi Access controller.", "Please check your controller address and sign-in details." ];
+const SERVER_FAILURE = [ "The plugin's UI server did not answer as expected.",
+  "Reload this page. If it keeps happening, restart Homebridge and check its log for the reason." ];
+const CONNECTION_UNVALIDATED = "Unable to validate your controller connection.";
+
+// One request the bridge double is handed.
+interface BridgeRequest {
+
+  path: string;
+  payload: unknown;
+}
+
+// A built connection check and every request its bridge double was handed.
+interface ProbeStand {
+
+  check: ReturnType<typeof makeControllerProbe>;
+  requests: BridgeRequest[];
+}
+
+/* Build the connection check over a bridge double and the real probe classifier, identity rule, and rejection reading.
+ *
+ * The bridge double records each request, runs the row's own step where it has one, and hands back the promise the row's answer makes, so a row decides whether
+ * the request fulfills, rejects, or is retired while it is in flight.
+ *
+ * @param options.answer    - What the bridge settles the request with.
+ * @param options.onRequest - What befalls the check while its request is in flight.
+ *
+ * @returns The check and every request its bridge double was handed.
+ */
+function standProbe({ answer, onRequest }: { answer: () => Promise<unknown>; onRequest?: () => void }): ProbeStand {
+
+  const requests: BridgeRequest[] = [];
+  const check = makeControllerProbe({
+
+    classifyProbeResponse,
+    hasValidIdentity,
+    readProbeRejection,
+    request: (path, payload) => {
+
+      requests.push({ path, payload });
+      onRequest?.();
+
+      return answer();
+    }
+  });
+
+  return { check, requests };
+}
+
+/* The card's identity and a signal no act retires, each of which a row overrides where the row is about it.
+ *
+ * @param overrides - The members the row is about.
+ *
+ * @returns The request.
+ */
+function probeRequest(overrides: Partial<ProbeRequest> = {}): ProbeRequest {
+
+  return { ...IDENTITY, signal: new AbortController().signal, ...overrides };
+}
+
+test("p1: a missing address answers failed with the address sentence and makes no request", async () => {
+
+  const s = standProbe({ answer: async () => ({ devices: [], kind: "connected" }) });
+
+  assert.deepEqual(await s.check(probeRequest({ address: "" })), { kind: "failed", outcome: { lines: [ADDRESS_MISSING] } },
+    "a blank address answers the address sentence");
+  assert.deepEqual(s.requests, [], "and no request reaches the bridge for it");
+});
+
+test("p2: an identity the plugin would refuse answers failed with the sign-in sentences and makes no request", async () => {
+
+  const s = standProbe({ answer: async () => ({ devices: [], kind: "connected" }) });
+
+  assert.deepEqual(await s.check(probeRequest({ password: "" })), { kind: "failed", outcome: { lines: SIGN_IN_MISSING } },
+    "half a credential pair answers the sign-in sentences, even with a token beside it");
+  assert.deepEqual(await s.check(probeRequest({ password: "", tokens: { access: "" }, username: "" })), { kind: "failed", outcome: { lines: SIGN_IN_MISSING } },
+    "and so does an identity carrying no way to sign in at all");
+  assert.deepEqual(s.requests, [], "and no request reaches the bridge for either");
+});
+
+test("p3: a connected answer passes with the classified success, and the one request carries exactly the card's identity", async () => {
+
+  const devices = [device(PROBE_SERIAL)];
+  const s = standProbe({ answer: async () => ({ devices, kind: "connected" }) });
+
+  assert.deepEqual(await s.check(probeRequest()), { answer: { devices, kind: "connected", message: "", tokenRefused: false }, kind: "passed" },
+    "a credentialed connect answers passed with the classified success");
+  assert.deepEqual(s.requests, [{ path: "/getDevices", payload: IDENTITY }],
+    "and the one request asks the UI server for the devices with the address, password, tokens, username, and TLS preference alone");
+});
+
+test("p4: a token-only answer passes as token-only, and a connected answer whose token was refused passes saying so", async () => {
+
+  const devices = [device(PROBE_SERIAL)];
+  const tokenOnly = standProbe({ answer: async () => ({ devices, kind: "token-only" }) });
+  const refused = standProbe({ answer: async () => ({ devices, kind: "connected", tokenRefused: true }) });
+
+  assert.deepEqual(await tokenOnly.check(probeRequest()), { answer: { devices, kind: "token-only", message: "", tokenRefused: false }, kind: "passed" },
+    "a token-only connect is a success the callers speak in their token-only sentences");
+  assert.deepEqual(await refused.check(probeRequest()), { answer: { devices, kind: "connected", message: "", tokenRefused: true }, kind: "passed" },
+    "and a connect whose token the controller refused is a success carrying the refusal");
+});
+
+test("p5: a server error answers failed with the connection sentences and the server's message as detail, or an empty detail for one that is no string", async () => {
+
+  const reported = standProbe({ answer: async () => ({ kind: "error", message: "Invalid credentials." }) });
+  const unworded = standProbe({ answer: async () => ({ kind: "error", message: 42 }) });
+
+  assert.deepEqual(await reported.check(probeRequest()), { kind: "failed", outcome: { detail: "Invalid credentials.", lines: CONNECTION_REFUSED } },
+    "a controller that refused the connection answers the classifier's headline, the card's own guidance line, and the server's own reason");
+  assert.deepEqual(await unworded.check(probeRequest()), { kind: "failed", outcome: { detail: "", lines: CONNECTION_REFUSED } },
+    "and a reason that is no string is written as an empty detail, which every reader drops");
+});
+
+test("p6: a success without a device list and an answer in an unrecognized shape each answer failed with the UI server's failure", async () => {
+
+  const listless = standProbe({ answer: async () => ({ devices: "not a list", kind: "connected" }) });
+  const unrecognized = standProbe({ answer: async () => ({ kind: "nonsense" }) });
+
+  assert.deepEqual(await listless.check(probeRequest()),
+    { kind: "failed", outcome: { detail: "The plugin's UI server answered a connection without a device list.", lines: SERVER_FAILURE } },
+    "a success carrying no device list is the UI server's failure, with the classifier's own detail");
+  assert.deepEqual(await unrecognized.check(probeRequest()),
+    { kind: "failed", outcome: { detail: "The plugin's UI server answered in an unrecognized shape.", lines: SERVER_FAILURE } },
+    "and so is an answer in a shape the server never writes");
+});
+
+test("p7: a rejected request answers failed with the validation sentence and the rejection's reason, for an error, the bridge's plain object, and a string", async () => {
+
+  // The plain object the bridge rejects with, which carries a message although it is no error, and a rejection that is a string, which carries no message at all.
+  const bridgeRejection: unknown = { message: "The plugin's UI server is not running." };
+  const stringRejection: unknown = "the bridge gave up on the request";
+  const thrown = standProbe({ answer: async () => Promise.reject(new Error("The UI server did not respond.")) });
+  const bridged = standProbe({ answer: async () => {
+
+    throw bridgeRejection;
+  } });
+  const worded = standProbe({ answer: async () => {
+
+    throw stringRejection;
+  } });
+
+  assert.deepEqual(await thrown.check(probeRequest()), { kind: "failed", outcome: { detail: "The UI server did not respond.", lines: [CONNECTION_UNVALIDATED] } },
+    "a request rejected with an error carries the error's own message");
+  assert.deepEqual(await bridged.check(probeRequest()),
+    { kind: "failed", outcome: { detail: "The plugin's UI server is not running.", lines: [CONNECTION_UNVALIDATED] } },
+    "and a request rejected with the bridge's plain object carries that object's message");
+  assert.deepEqual(await worded.check(probeRequest()),
+    { kind: "failed", outcome: { detail: "the bridge gave up on the request", lines: [CONNECTION_UNVALIDATED] } },
+    "and a request rejected with a string carries that string, which a read of the rejection's message alone would drop");
+});
+
+test("p8: a signal aborted while the request is in flight answers retired, where the request fulfilled and where it rejected", async () => {
+
+  const assertRetired = async ({ answer, settlement }: { answer: () => Promise<unknown>; settlement: string }): Promise<void> => {
+
+    const controller = new AbortController();
+    const s = standProbe({ answer, onRequest: () => controller.abort() });
+
+    assert.deepEqual(await s.check(probeRequest({ signal: controller.signal })), { kind: "retired" },
+      "a check its card retired while the request was in flight answers retired with nothing to show, where the request " + settlement);
+  };
+
+  await assertRetired({ answer: async () => ({ devices: [], kind: "connected" }), settlement: "fulfilled" });
+  await assertRetired({ answer: async () => Promise.reject(new Error("The UI server did not respond.")), settlement: "rejected" });
 });
