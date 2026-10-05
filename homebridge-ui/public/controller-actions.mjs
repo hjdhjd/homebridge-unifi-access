@@ -11,10 +11,10 @@
  *
  * The module takes no imports at all and names no browser global. Every reach beyond it is handed in: the UI-server bridge's request, the probe classifier, the
  * rejection's reading, and the identity rule the connection check runs over, and the connection check, the configuration interpreters, the listed-address rule and
- * its test, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the status-context send, and the
- * device-list decoration the save and the removal run over. That is what lets the whole of it run under node against recording fakes, which puts a swapped toast
- * severity, a put-back that restores the wrong address, a seed that lands after its write, and a connection check that drops a failure's sentence in front of a
- * gate rather than in front of a user.
+ * its sentence, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the status-context send, and the
+ * device-list decoration the save and the removal run over. A save runs through the save flow its card carries. That is what lets the whole of it run under node
+ * against recording doubles and the real save flow, which puts a swapped toast severity, a put-back that restores the wrong address, a seed that lands after its
+ * write, and a connection check that drops a failure's sentence in front of a gate rather than in front of a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
@@ -26,29 +26,35 @@ export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did
 // as its text.
 const errorMessage = (error) => (error instanceof Error) ? error.message : String(error);
 
+/* The words of one outcome as the single message a toast carries: its sentences, then any failure detail, in the order the line shows them, with an empty part
+ * dropped rather than joined. An outcome is composed once and delivered to whichever surface presents it, so the toast says exactly what the line would have said.
+ * The host renders the message as text, so a controller-reported detail is never interpreted as markup here either.
+ */
+const toastMessage = ({ detail = "", lines = [] }) => [ ...lines, detail ].filter((part) => part.length).join(" ");
+
 /**
- * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
- * framework, and the UI-server bridge.
+ * Build the settings page's kept controller answers and the controller save and the controller removal that write them, over the page's own reach into the browser, the
+ * host, the framework, and the UI-server bridge.
  *
- * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer and the rename an address change declares,
- *                                             and answers what became of it.
+ * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer and answers what became of it. A removal
+ *                                             writes through it; a save writes through the save flow its card carries, which the page builds over the same write
+ *                                             and which hands it the rename an address change declares.
  * @param injected.controllerListedElsewhere - The rule that answers whether another configured controller already holds the address a save writes.
- * @param injected.controllerListedWarning   - The sentence a save speaks when that rule refuses it.
+ * @param injected.controllerListedWarning   - The sentence a save speaks when that rule, or the composer asking it again, refuses the save.
  * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
  *                                             controller-scoped entries by.
  * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
- * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
  * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
  * @param injected.requestControllerProbe    - The connection check, which answers whether the controller accepted an identity and reports nothing itself.
  * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
- * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
- *                                             when its card does not present it.
+ * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when no
+ *                                             press delivery is left to carry it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
-export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, interpreters, isControllerListed,
-  platformConfig, processDeviceList, requestControllerProbe, sendStatusContext, toast }) => {
+export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, interpreters, platformConfig,
+  processDeviceList, requestControllerProbe, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
@@ -112,35 +118,87 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
     }
   };
 
+  // Put one address back to the answer it held, or take it out where it held none.
+  const putBack = (address, prior) => {
+
+    if(prior === undefined) {
+
+      byAddress.delete(address);
+
+      return;
+    }
+
+    byAddress.set(address, prior);
+  };
+
+  /* Seed the kept answers for a save about to be written, and answer the restore that undoes the seed where the write does not land.
+   *
+   * The seed goes AHEAD of the write rather than after it, because the page re-reads through getControllers and getDevices inside the write and getDevices answers
+   * from these answers: a seed made afterwards would leave the page showing what the controller answered before the save, a token-only list for a controller that
+   * has just been given credentials above all. The generation moves, so every fetch still in flight loses its claim to be kept; an address change strands whatever
+   * was remembered under the address the user replaced, which names nothing the configuration will hold; and the written address takes this save's own check
+   * answer, which connected to the controller with exactly this identity moments ago, kept whole with its outcome tag over the processed device list. The list is
+   * processed before anything here changes, so a list the processing cannot read leaves the answers as they were.
+   *
+   * What the answers held under each address the seed touches is read first, so the restore puts each one back exactly, or takes it out where there was none, and
+   * moves the generation again so a fetch issued against the seeded state loses its claim too. The restore ends with a send of the status context, so the
+   * live-status feed's registry follows the put-back as it follows every other write of these answers.
+   */
+  const seed = ({ address, answer, replacedAddress }) => {
+
+    const processed = { ...answer, devices: processDeviceList({ address, devices: answer.devices }) };
+    const priorAtAddress = byAddress.get(address);
+    const priorAtReplaced = (replacedAddress === undefined) ? undefined : byAddress.get(replacedAddress);
+
+    generation++;
+
+    if(replacedAddress !== undefined) {
+
+      byAddress.delete(replacedAddress);
+    }
+
+    byAddress.set(address, processed);
+
+    return () => {
+
+      putBack(address, priorAtAddress);
+
+      if(replacedAddress !== undefined) {
+
+        putBack(replacedAddress, priorAtReplaced);
+      }
+
+      generation++;
+      void sendStatusContext();
+    };
+  };
+
   /* Check that a card's address is not already listed, validate its connection, and persist it, which is the whole of what Save means.
    *
-   * A pressed Save is a request to save. Only the card's own retiring acts - an edit to its fields, a Validate press, or another Save - cancel it, and only while
-   * its check is in flight, so nothing is written and the newest action wins; once the write has started, nothing cancels it. Closing the card, re-populating it,
-   * or taking it off screen is moving on rather than cancelling, so the save goes on to write if its check passes.
+   * A press runs through the save flow its card carries, which holds every press to the same rules. A press that arrives while a write is in flight starts nothing,
+   * and the card's Save control is not pressable for the write's span. A press begins its action through the card's own starter, so only the card's own retiring
+   * acts - an edit to its fields, a Validate press, or another Save - cancel it, and only while its check is in flight; once the write has started, nothing cancels
+   * it. Closing the card, re-populating it, or taking it off screen is moving on rather than cancelling, so a pressed Save goes on to write if its check passes.
    *
-   * The listed-address check comes first. A save whose address another configured controller already holds is refused before its connection test, asked of
-   * the configuration the page last received: the answer needs no controller, and a user should not wait on a connection whose result would be thrown away.
-   * Nothing is probed, seeded, or written for it. Validation comes next and a failure writes nothing at all: a controller the plugin cannot connect to is not a
-   * configuration worth saving, and this save's report already says why. The write is then handed to the feature-options page as a composer rather than made
-   * through a session of this card's own, because the page's store holds the options array the user loaded and a write made behind it is one the next option edit
-   * writes back over. The page drains whatever option edits are in flight, composes against the configuration as it then stands, writes and saves through the one
-   * session it owns, and re-establishes itself on what was written.
+   * The check starts nothing of its own, because a second action on the card would retire the press it belongs to. A save whose address another configured
+   * controller already holds is refused before its connection check, asked of the configuration the page last received: the answer needs no controller, and a user
+   * should not wait on a connection whose result would be thrown away. The connection check comes next and a failure writes nothing at all: a controller the plugin
+   * cannot connect to is not a configuration worth saving. A check that passes then reads what the composer needs and cannot read for itself: the serials the
+   * controller's feature options move between, and the served catalog, whose read is asynchronous where the composer is not.
    *
-   * The cache work goes AHEAD of that write rather than after it, because the page re-reads through getControllers and getDevices inside the call and getDevices
-   * answers from the map: a seed made afterwards would leave the page showing what the controller answered before the save, a token-only list for a controller that
-   * has just been given credentials above all. The seed therefore lands before the write is known to have landed, so what the map held under both addresses is read
-   * first and a write that fails puts it back exactly as it stood.
+   * The write is handed to the feature-options page as a composer rather than made through a session of the card's own, because the page's store holds the options
+   * array the user loaded and a write made behind it is one the next option edit writes back over. The page drains whatever option edits are in flight, composes
+   * against the configuration as it then stands, writes and saves through the one session it owns, and re-establishes itself on what was written. The composer asks
+   * the listed-address rule again of that configuration, which is how a save queued behind another that changed it is still refused, and only a patch it composes
+   * seeds the kept answers.
    *
-   * Success speaks through the host's toast rather than the card's verdict line. The page re-runs this plugin's status-panel content hook during and after the
-   * write - each run re-populates the docked card, and populating blanks its verdict - and a re-entry through show() discards the frame the card sits on
-   * altogether, so the toast is the one surface that survives every outcome. A failure is delivered by one rule: it paints on the card while the card still
-   * presents this save - open, on screen, showing the controller the save began on, and not retired by a newer act - and otherwise it speaks through the host's
-   * error toast, since the line it would paint on is gone, hidden, or describing something else.
+   * Success speaks through the host's toast rather than the card's line, because the page's re-establishment re-populates the docked card, which blanks its line,
+   * and a re-entry discards the frame the card sits on altogether. A refusal speaks in the warning tone and a failure in the error tone, each through the press's own
+   * delivery: on the card while the card still presents the press, and on the host's toast otherwise. A write that reached the host's memory but not its disk is a
+   * save the user's own Save completes, so it warns and counts as saved.
    *
-   * The listed-address refusal is a delivery beside the failure's, under the same presentation rule but as guidance rather than failure: the sentence alone in
-   * the warning tone on the card while the card presents this save, and the host's warning toast otherwise. The composer asks the same rule again inside the
-   * write, against the configuration as it then stands, which is how a save queued behind another that changed the configuration is still refused; that refusal
-   * reaches the write's catch as a thrown error, and is delivered the same way once the cache is put back.
+   * A press whose write did not land puts back what its seed replaced. Where another write seeded the same address in the meantime, that put-back can restore an
+   * older answer than the one the configuration now holds; the cost is a stale sidebar label until the next Refresh.
    *
    * An address change replaces the controller's sidebar key, which is its configured address, so the write declares the change as a rename from the address the
    * card started from to the one it wrote, and the page's framework carries the selection. It does so once the controller lists from before and after the write
@@ -151,149 +209,132 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
    */
   const saveController = async ({ card, originalAddress }) => {
 
-    const identity = card.values();
+    const { address, password, tokens, username, verifyTls } = card.values();
+    const replaced = Boolean(originalAddress) && (originalAddress !== address);
 
-    /* This save's action on the card, and the report its check's failure and its write both speak through under the delivery rule above. When the card does not
-     * present the action, a failure is reported by toast in the sentences and detail the line would have carried, and any other paint is dropped. The check runs on
-     * the action's own signal, which keeps it under the card's latest-action rule.
-     */
-    const action = card.verdict.start();
-    const report = {
+    // This press's delivery, kept from its check so a press the write rejects still speaks under the press's own rule, and the restore its composer answers once
+    // it seeds. Each belongs to this press alone, so a later press on the same card can neither speak through this one's delivery nor undo this one's seed.
+    let deliver = null;
+    let restore = null;
 
-      render: (options = {}) => {
+    // Speak one outcome through a press's delivery: painted on the card in the outcome's tone while the card presents the press, and raised on the named toast
+    // otherwise.
+    const speak = (delivery, { channel, outcome, tone }) => delivery({ channel, paint: () => card.verdict.render({ ...outcome, tone }), text: toastMessage(outcome) });
 
-        if(action.presented()) {
-
-          action.report(options);
-
-          return;
-        }
-
-        const { detail = "", lines = [], tone } = options;
-
-        if(tone === "text-danger") {
-
-          toast.error((detail.length ? [ ...lines, detail ] : lines).join(" "));
-        }
-      }
-    };
-
-    // The listed-address refusal's delivery under the same rule. It goes around report.render, which drops every paint but a failure's once the card stops
-    // presenting this save, and it speaks the sentence the page handed in rather than any error's message.
-    const refuse = () => {
-
-      if(action.presented()) {
-
-        action.report({ lines: [controllerListedWarning], tone: "text-warning" });
-
-        return;
-      }
-
-      toast.warning(controllerListedWarning);
-    };
-
-    if(controllerListedElsewhere(platformConfig(), { address: identity.address, originalAddress })) {
-
-      refuse();
-
-      return null;
-    }
-
-    const probe = await requestControllerProbe({ ...identity, signal: action.signal });
-
-    // A failed check is said through this save's report, and a retired one belongs to an action a newer act on the card already replaced, so it says nothing.
-    if(probe.kind !== "passed") {
-
-      if(probe.kind === "failed") {
-
-        report.render({ ...probe.outcome, tone: "text-danger" });
-      }
-
-      return null;
-    }
-
-    const replaced = originalAddress && (originalAddress !== identity.address);
-
-    // What the map holds under each address this save touches, read before the seed replaces it so a failed write has something exact to put back.
-    const priorAtAddress = byAddress.get(identity.address);
-    const priorAtOriginal = replaced ? byAddress.get(originalAddress) : undefined;
-
-    /* The serial the controller being edited answered by when this session last reached it, and the serial this save's own validation answered. The interpreter
-     * carries the controller's feature options from the first onto the second, which is why the outgoing one is read here, ahead of the seed that replaces the
-     * answer it comes from: a credential pair being cleared is exactly the case where that serial exists nowhere else, because the token-only validation that
-     * follows reads no console document to name it. Each read is gated on the answer's kind because a token-only answer's controller row carries the address
-     * identity the UI server spelled for it rather than a serial, and the interpreter derives that identity from the address itself.
-     */
-    const serialOf = (answer) => ((answer?.kind === "connected") ? controllerSerial(answer) : undefined);
-    const originalSerial = serialOf(replaced ? priorAtOriginal : priorAtAddress);
-    const serial = serialOf(probe.answer);
-
-    /* Put the map back the way this save found it, restoring each address to the answer read above or deleting it where the map held none, and move the generation
-     * again so a fetch issued against the seeded state loses its claim to be kept. A save that wrote nothing then costs the session nothing it knew, and a
-     * controller that was token-only before the save still reads that way.
-     */
-    const restoreCache = () => {
-
-      const restore = (address, prior) => (prior === undefined) ? byAddress.delete(address) : byAddress.set(address, prior);
-
-      restore(identity.address, priorAtAddress);
-
-      if(replaced) {
-
-        restore(originalAddress, priorAtOriginal);
-      }
-
-      generation++;
-      void sendStatusContext();
-    };
-
-    /* What this session remembers about the controllers is now a write behind, so the generation moves and every fetch still in flight loses its claim to be kept.
-     * An address change also strands whatever was remembered under the address the user replaced, which names nothing the configuration holds any more; the Add
-     * Controller path has no previous address and strands nothing.
-     */
-    generation++;
-
-    if(replaced) {
-
-      byAddress.delete(originalAddress);
-    }
-
-    /* The address that was just written is then re-seeded from this save's own validation, which connected to the controller with exactly this identity moments ago
-     * and came back with its answer. That is newer than anything a deletion would have left behind, so the repaint the page makes inside the write labels the entry
-     * with the controller's live name rather than falling back to the raw address, and the next selection is served rather than reconnecting.
-     */
-    byAddress.set(identity.address, { ...probe.answer, devices: processDeviceList({ address: identity.address, devices: probe.answer.devices }) });
+    // The refusal of an address another controller already holds, which is guidance rather than failure, and a save's failure, which carries what went wrong.
+    const listed = { channel: "warning", outcome: { lines: [controllerListedWarning] }, tone: "text-warning" };
+    const failure = (error) => ({ channel: "error", outcome: { detail: errorMessage(error), lines: ["Unable to save this controller."] }, tone: "text-danger" });
 
     let result;
 
     try {
 
-      // The holder read sits inside the try, so a catalog read that rejects renders the failure verdict rather than escaping this handler.
-      const { withControllerSaved } = await interpreters();
-      const compose = (platform) => withControllerSaved(platform, { ...identity, originalAddress, originalSerial, serial });
+      result = await card.flow.save({
 
-      // The framework refuses a rename whose keys are not strings, so an original address a hand edit left as anything else declares none rather than turning a
-      // save that would write into a failure.
-      result = await ((replaced && (typeof originalAddress === "string")) ? commitConfig(compose, { rename: { from: originalAddress, to: identity.address } }) :
-        commitConfig(compose));
-    } catch(err) {
+        check: async (context) => {
 
-      restoreCache();
+          deliver = context.deliver;
 
-      // The composer's own listed-address refusal is told apart by its type alone and delivered as the early check's is; every other throw is a failure.
-      if(isControllerListed(err)) {
+          if(controllerListedElsewhere(platformConfig(), { address, originalAddress })) {
 
-        refuse();
+            return { kind: "declined", reason: { kind: "listed" } };
+          }
+
+          // A check that answers retired belongs to a press a newer act on the card has already retired, and the flow answers that press superseded before it
+          // reads what the check returned.
+          const probe = await requestControllerProbe({ address, password, signal: context.signal, tokens, username, verifyTls });
+
+          if(probe.kind !== "passed") {
+
+            return { kind: "declined", reason: probe };
+          }
+
+          /* The serial the controller being edited answered by when this session last reached it, and the serial this save's own check answered. The composer
+           * carries the controller's feature options from the first onto the second, which is why the outgoing one is read here, ahead of the seed that replaces
+           * the answer it comes from: a credential pair being cleared is exactly the case where that serial exists nowhere else, because the token-only check that
+           * follows reads no console document to name it, and a Refresh while the page's write queue waits empties the kept answers it is read from. Each read is
+           * gated on the answer's kind because a token-only answer's controller row carries the address identity the UI server spelled for it rather than a
+           * serial, and the composer derives that identity from the address itself.
+           */
+          const serialOf = (answer) => ((answer?.kind === "connected") ? controllerSerial(answer) : undefined);
+          const originalSerial = serialOf(byAddress.get(replaced ? originalAddress : address));
+          const serial = serialOf(probe.answer);
+
+          // The flow's composer runs synchronously inside the write and the catalog read does not, so the read belongs to the check, and a read that fails
+          // declines the press with nothing seeded.
+          let withControllerSaved;
+
+          try {
+
+            ({ withControllerSaved } = await interpreters());
+          } catch(error) {
+
+            return { kind: "declined", reason: { kind: "failed", outcome: failure(error).outcome } };
+          }
+
+          return { kind: "passed", value: { answer: probe.answer, originalSerial, serial, withControllerSaved } };
+        },
+        compose: (platform, { answer, originalSerial, serial, withControllerSaved }) => {
+
+          const patch = withControllerSaved(platform, { address, originalAddress, originalSerial, password, serial, tokens, username, verifyTls });
+
+          if(patch === null) {
+
+            return null;
+          }
+
+          restore = seed({ address, answer, replacedAddress: replaced ? originalAddress : undefined });
+
+          return patch;
+        },
+
+        // The framework refuses a rename whose keys are not strings, so an original address a hand edit left as anything else declares none rather than turning a
+        // save that would write into a failure.
+        rename: (replaced && (typeof originalAddress === "string") && (typeof address === "string")) ? { from: originalAddress, to: address } : undefined
+      });
+    } catch(error) {
+
+      // A rejected press is a bug in code the press ran, and whatever its composer seeded goes back. It speaks through the delivery its check kept, under the
+      // press's own rule, or through the host's error toast where the press rejected before any check ran.
+      restore?.();
+
+      if(deliver) {
+
+        speak(deliver, failure(error));
 
         return null;
       }
 
-      report.render({ detail: errorMessage(err), lines: ["Unable to save this controller."], tone: "text-danger" });
+      toast.error(toastMessage(failure(error).outcome));
 
       return null;
     }
 
     switch(result.kind) {
+
+      case "declined": {
+
+        speak(result.deliver, (result.reason.kind === "listed") ? listed : { channel: "error", outcome: result.reason.outcome, tone: "text-danger" });
+
+        return null;
+      }
+
+      // The composer answered null, which it does only for an address another controller holds in the configuration the write composed over. Nothing was written
+      // and nothing was seeded.
+      case "unchanged": {
+
+        speak(result.deliver, listed);
+
+        return null;
+      }
+
+      case "failed": {
+
+        restore?.();
+        speak(result.deliver, failure(result.error));
+
+        return null;
+      }
 
       case "committed": {
 
@@ -301,24 +342,22 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
          * credentials arrive. A connection whose token the controller refused is a successful save as well, and it warns, since the plugin runs on the credentials
          * alone and what only an accepted token reaches stays off until the configuration carries one.
          */
-        if(probe.answer.kind === "token-only") {
+        if(result.value.answer.kind === "token-only") {
 
           toast.success("This controller has been saved. Its API token is valid. Its doors and devices appear in HomeKit; adding a local user's username and " +
             "password lets the plugin read the controller's own document as well.");
-
-          break;
-        }
-
-        if(probe.answer.tokenRefused) {
+        } else if(result.value.answer.tokenRefused) {
 
           toast.warning(TOKEN_REFUSED_WARNING);
+        } else {
 
-          break;
+          toast.success("This controller has been saved.");
         }
 
-        toast.success("This controller has been saved.");
+        // The status feed's registry follows the seed, so the saved controller's devices are viewable under the identity that was just checked.
+        void sendStatusContext();
 
-        break;
+        return address;
       }
 
       case "staged": {
@@ -326,28 +365,21 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
         toast.warning("This controller has been saved, but Homebridge could not write the configuration file. Save the plugin's settings to keep the " +
           "change.");
 
-        break;
+        // A staged save counts as saved, so the status feed's registry follows its seed as it follows a committed one's.
+        void sendStatusContext();
+
+        return address;
       }
 
-      case "failed": {
-
-        restoreCache();
-        report.render({ detail: errorMessage(result.error), lines: ["Unable to save this controller."], tone: "text-danger" });
-
-        return null;
-      }
-
-      // An outcome this page does not recognize is one it cannot claim as a success, so the seed is left where it is and refusing to render is the only honest answer.
+      // A busy press started nothing and a superseded one was retired before its write, so neither wrote anything or is owed anything. An outcome this page does
+      // not recognize is one it cannot claim as a success, so it says nothing and leaves the seed where it is.
+      case "busy":
+      case "superseded":
       default: {
 
         return null;
       }
     }
-
-    // The status feed's registry follows the re-seed, so the saved controller's devices are viewable under the identity that was just validated.
-    void sendStatusContext();
-
-    return identity.address;
   };
 
   /* Remove a controller from the configuration, with the settings sweep the user chose.
@@ -430,8 +462,8 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
  * It answers an outcome and reports nothing itself: passed with the classified success, failed with the sentences and the detail that a missing address, an
  * identity the plugin would refuse, a refused connection, or a request that threw calls for, or retired when the signal it was handed aborted before the answer
  * arrived. Each caller delivers the outcome under its own rule: the validate control and the first-run submit through the action they started, which paints while
- * the card presents it and drops it otherwise, and a Save under the rule its failures follow, which still reaches the user through the host's toast once the card
- * no longer presents the save.
+ * the card presents it and drops it otherwise, and a Save through its press's delivery, which still reaches the user through the host's toast once the card no longer
+ * presents the press.
  *
  * The signal is the caller's action's own, so an edit to the card's fields or a newer act on the card retires the request. Starting that action is the caller's
  * act: the caller speaks through it once this answers, so a page holding several cards speaks each answer on the card it belongs to; starting blanks the line

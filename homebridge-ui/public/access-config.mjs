@@ -261,24 +261,6 @@ const withIdentityApplied = (base, identity) => {
 // save, and the page hands it to every surface that speaks the refusal.
 export const CONTROLLER_LISTED_WARNING = "This controller is already listed.";
 
-/* The refusal a composer throws when the address a save writes is one another configured controller already holds. Throwing is the only refusal a composer has:
- * the framework writes whatever patch a composer returns, an empty one included, and answers that it committed. The refusal is an error type of its own so the
- * page can tell it apart from a write that failed and speak it as guidance rather than as a failure. Its message is the sentence above, but every surface speaks
- * the constant itself rather than reading the message back off the error, so telling the refusal apart never depends on its text.
- */
-export class ControllerListedError extends Error {
-
-  name = "ControllerListedError";
-
-  constructor() {
-
-    super(CONTROLLER_LISTED_WARNING);
-  }
-}
-
-// Whether a thrown value is the listed-address refusal, which is how a caller that receives one tells it apart from a write that failed.
-export const isControllerListed = (error) => error instanceof ControllerListedError;
-
 /* The form an address is compared in when a save asks whether another configured controller already holds it: surrounding space removed and letters lowercased.
  * Only a string that is non-empty once trimmed has a form. An address that is absent, empty, or not a string - a hand edit can leave any of those - has none
  * and never matches, so an empty field is left to the connection test's own sentence rather than read as a listed address.
@@ -332,7 +314,7 @@ const saveTarget = (items, originalAddress) => (originalAddress === undefined) ?
  * replaces that controller rather than adding a second one beside it. An `originalAddress` that names no configured item - and the absent one an add passes -
  * appends instead, which is the whole of what distinguishes adding a controller from editing one.
  *
- * A save whose written address another item already holds is refused with a throw rather than composed, on the append and the replace alike. The
+ * A save whose written address another item already holds is refused rather than composed, answering null, on the append and the replace alike. The
  * composer runs against the configuration as it stands at the write, so this is the refusal that decides, including for a save queued behind another that
  * changed the configuration after the page last read it.
  */
@@ -344,7 +326,7 @@ const controllersWithSave = (config, { address, originalAddress, password, token
 
   if(listedElsewhere(items, index, address)) {
 
-    throw new ControllerListedError();
+    return null;
   }
 
   if(index === -1) {
@@ -396,10 +378,8 @@ export const primaryListedElsewhere = (config, { address }) => listedElsewhere(c
  * @param config   - The platform configuration entry.
  * @param identity - The identity to write onto the primary controller.
  *
- * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with.
- *
- * @throws {ControllerListedError} When a controller after the primary holds the address the identity writes and the primary does not already store exactly
- *                                 that address, by the rule a controller save is refused under.
+ * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary
+ *          holds the address the identity writes and the primary does not already store exactly that address, by the rule a controller save is refused under.
  */
 export const withPrimaryIdentity = (config, identity) => {
 
@@ -412,7 +392,7 @@ export const withPrimaryIdentity = (config, identity) => {
 
   if(listedElsewhere(next, 0, identity.address)) {
 
-    throw new ControllerListedError();
+    return null;
   }
 
   next[0] = withIdentityApplied(next[0] ?? {}, identity);
@@ -844,14 +824,19 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
      * @param controller - The identity to write, the address of the item to write it onto, the serial that item's controller answered by when the page last
      *                     reached it, and the serial this save's own validation answered.
      *
-     * @returns The patch for the session's commit to merge onto the platform entry.
-     *
-     * @throws {ControllerListedError} When another configured controller already holds the address this save writes, whether the save appends or moves its item
-     *                                 onto that address; nothing is composed.
+     * @returns The patch for the session's commit to merge onto the platform entry, or null when another configured controller already holds the address this
+     *          save writes, whether the save appends or moves its item onto it; nothing is composed.
      */
     withControllerSaved: (config, controller) => {
 
-      const patch = { controllers: controllersWithSave(config, controller) };
+      const items = controllersWithSave(config, controller);
+
+      if(items === null) {
+
+        return null;
+      }
+
+      const patch = { controllers: items };
       const serial = serialIdentity(controller.serial);
       const to = serial ?? addressIdentity(controller.address);
 

@@ -4,7 +4,7 @@
  */
 "use strict";
 
-import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsewhere, controllers, deviceListResult, hasValidIdentity, isControllerListed,
+import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsewhere, controllers, deviceListResult, hasValidIdentity,
   makeAccessConfig, primaryController, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
@@ -12,6 +12,7 @@ import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } fro
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
+import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
@@ -171,12 +172,10 @@ const firstRunOnSubmit = async ({ commit, config }) => {
     return true;
   } catch(err) {
 
-    /* The config write can reject. Painting into the result line keeps the user on the form with concrete guidance and the specific failure, and this catch resolves
-     * first, so the framework's generic toast never fires for this plugin. The composer's listed-address refusal is the authority behind the early check above,
-     * and is told apart by its type and painted as that check paints it; every other rejection paints as the failure it is.
-     */
-    firstRunCard.verdict.render(isControllerListed(err) ? listed : { detail: (err instanceof Error) ? err.message : String(err),
-      lines: ["Unable to complete the plugin configuration."], tone: "text-danger" });
+    // The config write can reject. Painting into the result line keeps the user on the form with concrete guidance and the specific failure, and this catch resolves
+    // first, so the framework's generic toast never fires for this plugin.
+    firstRunCard.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to complete the plugin configuration."],
+      tone: "text-danger" });
 
     return false;
   }
@@ -337,24 +336,27 @@ const patchControllerLabel = ({ address, devices }) => {
   }
 };
 
-/* The settings page's kept controller answers and the two configuration actions that write them, built once for this page copy. Everything those actions reach
- * outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
- * catalog-backed interpreters behind it, the configuration the page last received, the connection check and the status-context send, which travel over the
- * UI-server bridge, and the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule, its test, and its
- * sentence come straight from the interpretation module rather than through the interpreters, because none of them needs the catalog and a save's refusal must
- * not wait on a catalog read. What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
+/* The page's coordinated write, stated once and handed to the actions below, whose removal writes through it, and to every card's save flow, so the page has
+ * one account of how it reaches its write. It is a closure rather than a reference, because the framework page is constructed further down and the method reads
+ * its own object: taking the reference at call time is what binds it to the page that exists by then. The options travel with the composer, because they carry
+ * the rename an address change declares, and the framework carries the selection onto a renamed controller only when it is handed that rename.
+ */
+const commitConfig = (compose, options) => ui.featureOptions.commitConfig(compose, options);
+
+/* The settings page's kept controller answers and the controller save and the controller removal that write them, built once for this page copy. Everything those actions
+ * reach outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
+ * catalog-backed interpreters behind it, the configuration the page last received, the connection check and the status-context send, which travel over the UI-server
+ * bridge, and the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule and its sentence come straight from the
+ * interpretation module rather than through the interpreters, because neither needs the catalog and a save's refusal must not wait on a catalog read. What the actions
+ * keep about each controller stays theirs, and the page reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
-  // The write is reached through a closure rather than handed over as a reference, because the framework page is constructed further down and the method reads its
-  // own object: taking the reference at call time is what binds it to the page that exists by then. The options travel with the composer, because they carry the
-  // rename an address change declares, and the framework carries the selection onto a renamed controller only when it is handed that rename.
-  commitConfig: (compose, options) => ui.featureOptions.commitConfig(compose, options),
+  commitConfig,
   controllerListedElsewhere,
   controllerListedWarning: CONTROLLER_LISTED_WARNING,
   controllerSerial,
   interpreters: accessConfig,
-  isControllerListed,
   platformConfig: () => injectedConfig,
   processDeviceList,
   requestControllerProbe,
@@ -500,10 +502,10 @@ let cardInstances = 0;
  * @param options.noSweepReason  - What the removal confirmation says when there are no device settings it can offer to strip.
  * @param options.onCancel       - Invoked by the Cancel control, when the caller offers one.
  * @param options.onRemove       - Invoked with the MAC addresses to strip once a removal is confirmed, when the caller offers removal.
- * @param options.onSave         - Invoked by the Save control, when the caller offers one.
+ * @param options.onSave         - Invoked by the Save control, when the caller offers one. A card offering a Save carries the save flow its presses run through.
  * @param options.signal         - The caller's own lifecycle, when it has one. The card's teardown composes with it.
  *
- * @returns The card's surface: close, populate, values, and the verdict line.
+ * @returns The card's surface: close, its save flow or null, populate, values, and the verdict line.
  */
 const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", onCancel, onRemove, onSave, signal }) => {
 
@@ -537,12 +539,14 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   const teardown = new AbortController();
   const cardSignal = signal ? AbortSignal.any([ signal, teardown.signal ]) : teardown.signal;
 
-  /* This card's latest-action-wins guard, so only the newest action ON THIS CARD stands. It belongs to the card rather than to the module so two mounted cards
-   * cannot retire each other's actions, and an edit retires the action in flight, so a slow answer never lands beside input it no longer describes.
+  /* This card's latest-action-wins guard over its validations, including the one every Save runs before it writes, so only the newest action ON THIS CARD
+   * stands. It belongs to the card rather than to the module so two mounted cards cannot retire each other's actions, and an edit retires the action in flight, so
+   * a slow answer never lands beside input it no longer describes, and a Save waiting on it writes nothing.
    *
    * It takes no parent, because only this card's own acts retire an action: an edit, a Validate press, or another Save. Closing the card or re-populating it is
    * moving on rather than retiring, so neither cancels a pressed Save, which goes on to write if its check passes; where each answer lands is the presentation rule
-   * start() states below. The UI-server bridge carries no abort surface, so a retired validation is dropped at the paint rather than cancelled on the wire.
+   * start() states below. The UI-server bridge carries no abort surface, so a retired check still runs to its answer and is dropped there rather than cancelled
+   * on the wire.
    */
   const guard = createActionGuard();
 
@@ -564,10 +568,11 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       renderVerdict({ row });
     },
 
-    /* Blank the line and begin an action, answering its handle: the signal that aborts the moment a later start or a retirement overtakes the action, and the one
-     * rule for where the action's answers land. The card presents an action while the card is open, the action has not been retired, the card still shows the
-     * population it showed when the action began, and the line is on screen. The action's own paint lands on the line only while that holds and is dropped
-     * otherwise, and a caller with somewhere else to report reads the same rule through presented().
+    /* Blank the line and begin an action, answering its handle: the signal that aborts the moment a later start or a retirement overtakes the action, the one rule
+     * for where the action's answers land, and the report that lands an outcome on the line only while that rule holds. The card presents an action while the card
+     * is open, the action has not been retired, the card still shows the population it showed when the action began, and the line is on screen. A validation's
+     * outcome that the card no longer presents is dropped, because nothing it found changed anything. A Save delivers through its save flow instead, which reads
+     * this same rule and raises the host's toast where the paint would drop, because the Save writes whether or not anyone is still looking at its card.
      *
      * Whether the line is on screen is read at delivery rather than tracked, because the ways a card leaves the screen without closing are many and one of them
      * runs no code of ours: a device selection hides the docked editor, a takeover hides the region it docks in, a disclosure collapses over it, and the
@@ -596,6 +601,13 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       };
     }
   };
+
+  /* This card's save flow, built once beside its guard when the caller offers a Save. The flow's one piece of state across presses is whether a write is in flight,
+   * so a flow belongs to the card it serves: a press during this card's write starts nothing and the card's Save control is not pressable for that span, while
+   * another card's write refuses nothing here. It begins each press through the card's own starter, so a Save retires and is retired by the card's other actions
+   * exactly as they retire each other, and it delivers each outcome under the presentation rule that starter answers.
+   */
+  const flow = onSave ? createSaveFlow({ commit: commitConfig, control: control("save"), start: verdict.start, toast: homebridge.toast }) : null;
 
   // Put the removal confirmation away. Every path that changes what the card is describing takes it back to its unarmed state, so a confirmation can never outlive
   // the controller it was naming.
@@ -639,6 +651,9 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
       teardown.abort();
       card.remove();
     },
+
+    // The save flow this card's Save presses run through, or null for a card that offers no Save.
+    flow,
 
     /* Fill the card in from a configured controller, and name what a removal would strip alongside it. Populating is also what disarms a standing removal
      * confirmation and blanks the verdict line: both describe whatever the card was showing a moment ago, and the card is now describing something else. It moves

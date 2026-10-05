@@ -13,9 +13,9 @@
 import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, mqttConnectionSettings,
   normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
-import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, ControllerListedError, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE,
-  classifyProbeResponse, controllerListedElsewhere, deviceListResult, hasValidIdentity, isControllerListed, makeAccessConfig, primaryListedElsewhere,
-  readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
+import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse,
+  controllerListedElsewhere, deviceListResult, hasValidIdentity, makeAccessConfig, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict,
+  withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -109,6 +109,17 @@ function migrated(config: TestConfig, macByAddress: ReadonlyMap<string, string> 
   const patch = accessConfig.migrate(config, macByAddress);
 
   assert.ok(patch, "the configuration should have produced a migration patch");
+
+  return patch;
+}
+
+// The patch a controller save composes, asserted to exist so each check below reads a patch rather than a nullable one: the composer answers null only for an
+// address another controller holds, which the listed-address rows below assert on their own.
+function saved(config: TestConfig, save: SaveRequest): AccessConfigPatch {
+
+  const patch = withControllerSaved(config, save);
+
+  assert.ok(patch, "the save should have composed a patch");
 
   return patch;
 }
@@ -480,7 +491,7 @@ test("the device-list result carries each outcome's own copy and nothing else", 
 test("a credential edit carries every other key the item holds", () => {
 
   const item = { ...CREDENTIALS, mqttUrl: LEGACY_BROKER, name: "Front Gate", tokens: TOKENS, verifyTls: true };
-  const patch = withControllerSaved({ controllers: [item] },
+  const patch = saved({ controllers: [item] },
     { address: ADDRESS, originalAddress: ADDRESS, password: "new secret", tokens: TOKENS, username: CREDENTIALS.username, verifyTls: true });
 
   assert.deepEqual(patch.controllers?.[0], { ...item, password: "new secret" },
@@ -489,7 +500,7 @@ test("a credential edit carries every other key the item holds", () => {
 
 test("an edit clearing an identity field deletes it rather than storing it empty", () => {
 
-  const patch = withControllerSaved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS, verifyTls: true }] },
+  const patch = saved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS, verifyTls: true }] },
     { address: ADDRESS, originalAddress: ADDRESS, password: CREDENTIALS.password, tokens: { access: "" }, username: CREDENTIALS.username, verifyTls: false });
 
   assert.deepEqual(patch.controllers?.[0], CREDENTIALS, "a cleared field reads exactly as an absent one everywhere the configuration is consulted");
@@ -503,7 +514,7 @@ test("a save that carries no token writes no tokens member at all, in every shap
    */
   for(const tokens of [ undefined, {}, { access: "" } ]) {
 
-    const item = withControllerSaved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS }] },
+    const item = saved({ controllers: [{ ...CREDENTIALS, tokens: TOKENS }] },
       { address: ADDRESS, originalAddress: ADDRESS, password: CREDENTIALS.password, tokens, username: CREDENTIALS.username }).controllers?.[0] ?? {};
 
     assert.ok(!Object.hasOwn(item, "tokens"), "the tokens member deletes by omission for " + JSON.stringify(tokens ?? null) + " rather than being written empty");
@@ -605,7 +616,7 @@ test("the side door's sensor and the doorbell category compose onto their own fa
 
 test("an address change edits that item rather than adding a second one beside it, and an add appends", () => {
 
-  const moved = withControllerSaved({ controllers: [{ ...CREDENTIALS }] },
+  const moved = saved({ controllers: [{ ...CREDENTIALS }] },
     { address: "10.0.0.9", originalAddress: ADDRESS, password: CREDENTIALS.password, username: CREDENTIALS.username });
   const movedControllers = moved.controllers;
 
@@ -615,9 +626,9 @@ test("an address change edits that item rather than adding a second one beside i
 
   const added = { address: "10.0.0.9", tokens: TOKENS };
 
-  assert.deepEqual(withControllerSaved({ controllers: [{ ...CREDENTIALS }] }, added).controllers, [ CREDENTIALS, added ],
+  assert.deepEqual(saved({ controllers: [{ ...CREDENTIALS }] }, added).controllers, [ CREDENTIALS, added ],
     "an absent original address is what makes a write an add");
-  assert.deepEqual(withControllerSaved({ controllers: [{ ...CREDENTIALS }] }, { ...added, originalAddress: "10.0.0.250" }).controllers, [ CREDENTIALS, added ],
+  assert.deepEqual(saved({ controllers: [{ ...CREDENTIALS }] }, { ...added, originalAddress: "10.0.0.250" }).controllers, [ CREDENTIALS, added ],
     "and an original address matching no item falls back to the same append rather than writing nothing");
 });
 
@@ -628,7 +639,7 @@ test("an address edit carries the controller's own entries onto the new address 
   const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
   const options = [ telemetry, topic ];
   const before = [...options];
-  const edited = withControllerSaved({ controllers: [item], options },
+  const edited = saved({ controllers: [item], options },
     { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS });
   const engine = engineWith(edited.options);
 
@@ -644,16 +655,16 @@ test("an address edit carries the controller's own entries onto the new address 
   assert.notEqual(edited.options, options, "and the patch answers with an array of its own rather than the one it was given");
 
   // A save that changed no address must not re-key, which an entry sitting under the unchanged identity is what makes observable.
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
+  assert.ok(!Object.hasOwn(saved({ controllers: [item], options }, { address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
     "options"), "an unchanged address composes no options member at all, so a re-key that ran unconditionally would be visible here");
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: SECOND_ADDRESS, tokens: TOKENS }), "options"),
+  assert.ok(!Object.hasOwn(saved({ controllers: [item], options }, { address: SECOND_ADDRESS, tokens: TOKENS }), "options"),
     "an add has no address to move entries from, so it composes none either");
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options }, { address: SECOND_ADDRESS, originalAddress: 42, tokens: TOKENS }), "options"),
+  assert.ok(!Object.hasOwn(saved({ controllers: [item], options }, { address: SECOND_ADDRESS, originalAddress: 42, tokens: TOKENS }), "options"),
     "and an original address that is not a string names no identity, so it composes none and never reaches the repair that would throw on it");
 
   // A MAC-keyed entry belongs to the controller's hardware rather than to the address it is reached at, so an address edit is none of its business.
   const keyedByMac = ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC];
-  const macSave = withControllerSaved({ controllers: [item], options: keyedByMac },
+  const macSave = saved({ controllers: [item], options: keyedByMac },
     { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, tokens: TOKENS });
 
   assert.ok(!Object.hasOwn(macSave, "options"), "a controller keyed by its serial carries nothing under its address, so the move finds nothing and writes nothing");
@@ -667,7 +678,7 @@ test("a cleared credential pair carries the controller's serial-keyed entries on
   const options = [ "Enable.Controller.Publish.Telemetry." + CONTROLLER_MAC, "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC,
     "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
   const before = [...options];
-  const cleared = withControllerSaved({ controllers: [item], options },
+  const cleared = saved({ controllers: [item], options },
     { address: ADDRESS, originalAddress: ADDRESS, originalSerial: CONTROLLER_MAC, tokens: TOKENS });
   const engine = engineWith(cleared.options);
 
@@ -687,7 +698,7 @@ test("an added credential pair carries the controller's address-keyed entries on
   const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
   const options = [ "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
   const before = [...options];
-  const added = withControllerSaved({ controllers: [item], options },
+  const added = saved({ controllers: [item], options },
     { ...CREDENTIALS, address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, serial: CONTROLLER_MAC, tokens: TOKENS });
   const engine = engineWith(added.options);
 
@@ -705,7 +716,7 @@ test("a cleared pair and an address edit together carry both names' entries onto
   const options = [ "Enable.Controller.Publish.Telemetry." + CONTROLLER_MAC, "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC,
     "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC, "Enable.Mqtt.Url." + TOKEN_IDENTITY + "=" + LEGACY_BROKER ];
   const before = [...options];
-  const moved = withControllerSaved({ controllers: [item], options },
+  const moved = saved({ controllers: [item], options },
     { address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, originalSerial: CONTROLLER_MAC, tokens: TOKENS });
   const engine = engineWith(moved.options);
 
@@ -728,7 +739,7 @@ test("an added pair and an address edit together carry the old address's entries
   const item = { address: TOKEN_ADDRESS, tokens: TOKENS };
   const options = [ "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
   const before = [...options];
-  const added = withControllerSaved({ controllers: [item], options },
+  const added = saved({ controllers: [item], options },
     { ...CREDENTIALS, address: SECOND_ADDRESS, originalAddress: TOKEN_ADDRESS, serial: CONTROLLER_MAC, tokens: TOKENS });
   const engine = engineWith(added.options);
 
@@ -747,14 +758,14 @@ test("a credential edit that leaves the controller answering by its serial carri
   const save = { ...CREDENTIALS, originalAddress: ADDRESS, originalSerial: CONTROLLER_MAC, serial: CONTROLLER_MAC, tokens: TOKENS };
   const options = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
   const before = [...options];
-  const swept = withControllerSaved({ controllers: [item], options }, save);
+  const swept = saved({ controllers: [item], options }, save);
 
   assert.equal(engineWith(swept.options).value("Mqtt.Topic", undefined, CONTROLLER_MAC), LEGACY_TOPIC,
     "the entry under the name the controller answers by outranks the one arriving from its address");
   assert.deepEqual(swept.options?.filter((entry) => entry.toLowerCase().includes(ADDRESS_IDENTITY)), [], "and the stray entry is gone from the address it was keyed to");
   assert.deepEqual(options, before, "the array handed in is untouched");
   assert.notEqual(swept.options, options, "and the patch answers with an array of its own rather than the one it was given");
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC] }, save), "options"),
+  assert.ok(!Object.hasOwn(saved({ controllers: [item], options: ["Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC] }, save), "options"),
     "with nothing under the address there is nothing to move or forget, so the save composes no options member at all");
 });
 
@@ -765,20 +776,20 @@ test("a serial or an address that names no identity moves nothing, and an item a
 
   for(const originalSerial of [ 42, "" ]) {
 
-    assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [item], options: keyedBySerial },
+    assert.ok(!Object.hasOwn(saved({ controllers: [item], options: keyedBySerial },
       { address: ADDRESS, originalAddress: ADDRESS, originalSerial, tokens: TOKENS }), "options"),
     "an outgoing serial of " + JSON.stringify(originalSerial) + " names no identity to move from, so the save composes no options member");
   }
 
   const acrossBothNames = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + ADDRESS_IDENTITY + "=" + ADDRESS_TOPIC ];
 
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [], options: acrossBothNames }, { address: ADDRESS, originalAddress: "", tokens: TOKENS }),
+  assert.ok(!Object.hasOwn(saved({ controllers: [], options: acrossBothNames }, { address: ADDRESS, originalAddress: "", tokens: TOKENS }),
     "options"), "an empty original address names no identity to move from, so a save that carries no outgoing serial either composes no options member");
 
   /* The same empty original address beside an outgoing serial: the empty name contributes nothing to the move list, and the serial is left as the one name to
    * carry entries from, so the controller's serial-keyed entries still land under the name it answers by once its credentials are gone.
    */
-  const withOutgoing = withControllerSaved({ controllers: [], options: acrossBothNames },
+  const withOutgoing = saved({ controllers: [], options: acrossBothNames },
     { address: ADDRESS, originalAddress: "", originalSerial: CONTROLLER_MAC, tokens: TOKENS });
   const acrossEngine = engineWith(withOutgoing.options);
 
@@ -790,10 +801,10 @@ test("a serial or an address that names no identity moves nothing, and an item a
   const bothNames = [ "Enable.Mqtt.Topic." + CONTROLLER_MAC + "=" + LEGACY_TOPIC, "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC ];
   const tokenItem = { address: TOKEN_ADDRESS, tokens: TOKENS };
 
-  assert.ok(!Object.hasOwn(withControllerSaved({ controllers: [tokenItem], options: bothNames }, { address: "", originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
+  assert.ok(!Object.hasOwn(saved({ controllers: [tokenItem], options: bothNames }, { address: "", originalAddress: TOKEN_ADDRESS, tokens: TOKENS }),
     "options"), "an empty written address names no identity to move onto, so the save composes none either and never reaches the throw an empty destination earns");
 
-  const replacement = withControllerSaved({ controllers: [tokenItem], options: bothNames },
+  const replacement = saved({ controllers: [tokenItem], options: bothNames },
     { ...CREDENTIALS, address: TOKEN_ADDRESS, originalAddress: TOKEN_ADDRESS, originalSerial: CONTROLLER_MAC, serial: OTHER_MAC, tokens: TOKENS });
   const engine = engineWith(replacement.options);
 
@@ -817,20 +828,17 @@ test("the first-run save composes a complete identity as one patch and composes 
 // The sentence a refused save speaks, transcribed rather than referenced so a sentence that drifts by a character in its one home reddens an arm.
 const LISTED = "This controller is already listed.";
 
-// What a refused composer throws: the listed-controller error carrying that sentence, and nothing else.
-const LISTED_REFUSAL = { constructor: ControllerListedError, message: LISTED };
-
-/* Assert that a save is refused, by the early check the page makes before its connection test and by the composer inside the write alike, so every arm below
- * also proves the two agree.
+/* Assert that a save is refused, by the early check the page makes before its connection test and by the composer inside the write alike, the composer refusing
+ * by answering null, so every arm below also proves the two agree.
  *
  * @param config  - The configuration the save is asked of.
  * @param save    - The save.
- * @param message - What the refusal stands for, for the early check's assertion message.
+ * @param message - What the refusal stands for, for the assertion messages.
  */
 function assertRefused(config: TestConfig, save: SaveRequest, message: string): void {
 
   assert.equal(controllerListedElsewhere(config, save), true, message + ", by the early check");
-  assert.throws(() => withControllerSaved(config, save), LISTED_REFUSAL);
+  assert.equal(withControllerSaved(config, save), null, message + ", by the composer");
 }
 
 /* Assert that a save is accepted by the early check, and answer the controllers the composer writes for it, which an arm then reads.
@@ -845,7 +853,11 @@ function accepted(config: TestConfig, save: SaveRequest, message: string): Acces
 
   assert.equal(controllerListedElsewhere(config, save), false, message + ", by the early check");
 
-  return withControllerSaved(config, save).controllers;
+  const patch = withControllerSaved(config, save);
+
+  assert.ok(patch, message + ", by the composer");
+
+  return patch.controllers;
 }
 
 test("an add at an address another controller holds is refused, and an add at a free address appends", () => {
@@ -932,7 +944,7 @@ test("an entry with no address, an empty one, or one that is not a string never 
   for(const address of [ "", "   " ]) {
 
     assert.equal(controllerListedElsewhere(unaddressed, { address }), false, "a written address of " + JSON.stringify(address) + " has no form, so it is never listed");
-    assert.doesNotThrow(() => withControllerSaved(unaddressed, { address, tokens: TOKENS }), "and the composer accepts it too");
+    assert.ok(withControllerSaved(unaddressed, { address, tokens: TOKENS }), "and the composer answers a patch for it too");
   }
 });
 
@@ -944,8 +956,9 @@ test("first-run refuses an address a later controller holds, writes one none hol
   assert.equal(primaryListedElsewhere({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), true,
     "an incomplete primary beside a later controller at the typed address is refused by the early check");
 
-  // The composer refuses the same identity, as the early check above does.
-  assert.throws(() => withPrimaryIdentity({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), LISTED_REFUSAL);
+  // The composer refuses the same identity, as the early check above does, by answering null.
+  assert.equal(withPrimaryIdentity({ controllers: [ { username: CREDENTIALS.username }, later ] }, identity), null,
+    "and the composer answers null for it, by the same rule");
 
   assert.equal(primaryListedElsewhere({ controllers: [ {}, { address: SECOND_ADDRESS, tokens: TOKENS } ] }, identity), false,
     "an address no other controller holds is accepted by the early check");
@@ -961,13 +974,9 @@ test("first-run refuses an address a later controller holds, writes one none hol
     "and the composer writes it, leaving the configuration passable rather than trapped in first run");
 });
 
-test("the listed-address refusal carries its one sentence, and its test answers true for the refusal alone", () => {
+test("the listed-address refusal's sentence has one home, beside the rule that refuses", () => {
 
   assert.equal(CONTROLLER_LISTED_WARNING, LISTED, "the sentence's one home holds the refusal's sentence");
-  assert.equal(new ControllerListedError().message, LISTED, "and the refusal carries it as its message");
-  assert.equal(isControllerListed(new ControllerListedError()), true, "the test answers true for the refusal");
-  assert.equal(isControllerListed(new Error(LISTED)), false, "and false for another error carrying the same sentence, because it reads the type and never the text");
-  assert.equal(isControllerListed(LISTED), false, "and false for a thrown value that is not an error at all");
 });
 
 test("removal drops the item its address names, and an empty MAC set leaves the configured options untouched", () => {

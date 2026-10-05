@@ -3,14 +3,17 @@
  * controller-actions.d.mts: Type declarations for the settings page's controller connection check, its kept controller answers, and the controller save and removal.
  */
 import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, classifyProbeResponse, controllerListedElsewhere,
-  hasValidIdentity, isControllerListed, readProbeRejection } from "./access-config.mjs";
+  hasValidIdentity, readProbeRejection } from "./access-config.mjs";
+import type { CommitConfig, SaveFlow } from "homebridge-plugin-utils";
 
-/**
- * What became of a coordinated write. This vocabulary belongs to the webUI framework's `commitConfig`, which publishes it as a JSDoc typedef inside a browser
- * module rather than as a type any of its declaration files exports, so there is nothing to import and the union is restated here to be read against. The two
- * outcomes that carry the failure explaining them carry it as `unknown`, because a rejected write answers with whatever the host threw.
- */
-export type ControllerWriteResult = { kind: "committed" } | { error: unknown; kind: "staged" } | { error: unknown; kind: "failed" };
+/** The host's toast surface, one function per severity a delivery can name. */
+export interface HostToast {
+
+  error: (message: string) => void;
+  info: (message: string) => void;
+  success: (message: string) => void;
+  warning: (message: string) => void;
+}
 
 /** The sentences and the detail one connection check outcome shows, in the shape a card's line and a toast each read. */
 export interface ProbeOutcome {
@@ -31,35 +34,12 @@ export type ControllerProbe = { answer: AccessProbeSuccess; kind: "passed" } | {
  */
 export type ControllerProbeRequest = (request: AccessIdentity & { signal: AbortSignal }) => Promise<ControllerProbe>;
 
-/**
- * One action a card has begun, as its verdict line answers it: whether the card presents the action, the report that paints on the line only while it does and is
- * dropped otherwise, and the signal that aborts once an edit to the card's fields or a newer action on the card retires it. The card presents an action while the
- * card is open, the action has not been retired, the card still shows the population it showed when the action began, and the line is on screen.
- */
-export interface ControllerAction {
-
-  presented: () => boolean;
-  report: ControllerVerdict["render"];
-  signal: AbortSignal;
-}
-
-/**
- * The verdict line of the card an action acts for, exactly as the page's connection-card mount builds it: the plain paint a removal's failure lands through, the
- * retirement an edit makes, which retires any action in flight and blanks the line, and the start that blanks the line and begins an action. A save begins its
- * own action and reports through it.
- */
-export interface ControllerVerdict {
-
-  render: (options?: { detail?: string; lines?: string[]; tone?: string }) => void;
-  retire: () => void;
-  start: () => ControllerAction;
-}
-
-/** The part of a connection card an action reads: what the user has entered, and the verdict line an action begins on and a failure is painted on. */
+/** The part of a connection card an action reads: its save flow, what the user has entered, and the verdict line a save's outcome and a removal's failure paint on. */
 export interface ControllerCard {
 
+  flow: SaveFlow<AccessConfig>;
   values: () => AccessIdentity;
-  verdict: ControllerVerdict;
+  verdict: { render: (options?: { detail?: string; lines?: string[]; tone?: string }) => void };
 }
 
 /**
@@ -77,8 +57,8 @@ export interface ControllerAnswers {
 }
 
 /**
- * What the factory answers with: the kept answers the page reads its controllers through, and the two configuration actions that write them. The save resolves to
- * the address that was written, unknown because a card's values are carried through unvalidated, or to null when nothing was written.
+ * What the factory answers with: the kept answers the page reads its controllers through, and the controller save and the controller removal that write them. The save
+ * resolves to the address that was written, unknown because a card's values are carried through unvalidated, or to null when nothing was written.
  */
 export interface ControllerActions {
 
@@ -91,38 +71,37 @@ export interface ControllerActions {
 export declare const TOKEN_REFUSED_WARNING: string;
 
 /**
- * Build the settings page's kept controller answers and the two configuration actions that write them, over the page's own reach into the browser, the host, the
- * framework, and the UI-server bridge.
+ * Build the settings page's kept controller answers and the controller save and the controller removal that write them, over the page's own reach into the browser, the
+ * host, the framework, and the UI-server bridge.
  *
- * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer of the configuration patch and the rename
- *                                             an address change declares as the sidebar keys before and after the write, and answers what became of it.
+ * @param injected.commitConfig              - The feature-options page's coordinated write, which takes a composer and answers what became of it. A removal
+ *                                             writes through it; a save writes through the save flow its card carries, which the page builds over the same write
+ *                                             and which hands it the rename an address change declares.
  * @param injected.controllerListedElsewhere - The rule that answers whether another configured controller already holds the address a save writes.
- * @param injected.controllerListedWarning   - The sentence a save speaks when that rule refuses it.
+ * @param injected.controllerListedWarning   - The sentence a save speaks when that rule, or the composer asking it again, refuses the save.
  * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
  *                                             controller-scoped entries by.
- * @param injected.interpreters              - The page's holder for the configuration interpreters, narrowed to the two an action reads.
- * @param injected.isControllerListed        - The test that tells the composer's listed-address refusal apart from any other throw.
- * @param injected.platformConfig            - The page's read of the platform configuration it last received, or null before it has received one.
+ * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
+ * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
  * @param injected.requestControllerProbe    - The connection check, which answers whether the controller accepted an identity and reports nothing itself.
  * @param injected.sendStatusContext         - The page's send of its controller context to the live-status feed.
- * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure or refusal speaks
- *                                             when its card does not present it.
+ * @param injected.toast                     - The host's toast surface, which is where a write that landed speaks, and where a save's failure speaks when no
+ *                                             press delivery is left to carry it.
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
 export declare const makeControllerActions: (injected: {
-  commitConfig: (compose: (platform: unknown) => unknown, options?: { rename?: { from: string; to: string } }) => Promise<ControllerWriteResult>;
+  commitConfig: CommitConfig<AccessConfig>;
   controllerListedElsewhere: typeof controllerListedElsewhere;
   controllerListedWarning: string;
   controllerSerial: (answer: AccessProbeSuccess) => unknown;
   interpreters: () => Promise<Pick<AccessConfigInterpreter, "withControllerRemoved" | "withControllerSaved">>;
-  isControllerListed: typeof isControllerListed;
   platformConfig: () => AccessConfig | null;
   processDeviceList: (list: { address: unknown; devices: Record<string, unknown>[] }) => Record<string, unknown>[];
   requestControllerProbe: ControllerProbeRequest;
   sendStatusContext: () => Promise<void>;
-  toast: { error: (message: string) => void; success: (message: string) => void; warning: (message: string) => void } }) => ControllerActions;
+  toast: Pick<HostToast, "error" | "success" | "warning">; }) => ControllerActions;
 
 /**
  * Build the controller connection check over the UI-server bridge's request, the probe classifier, the rejection's reading, and the identity rule.

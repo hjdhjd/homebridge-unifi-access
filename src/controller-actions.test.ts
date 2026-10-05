@@ -1,29 +1,35 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * controller-actions.test.ts: The settings page's controller connection check, its kept controller answers, and the controller save and removal that write them,
- * driven through recording fakes for every reach the module makes outside itself.
+ * driven through the real save flow and recording doubles for every other reach the module makes outside itself.
  *
- * What these arms prove is the part of a save and a removal no type can state: that each write outcome speaks in exactly the sentence and exactly the severity it
- * is supposed to, that the seed a save makes lands BEFORE the write rather than after it, that a write which failed puts both addresses back exactly as it found
- * them, and that a send follows every write that keeps or drops an answer and follows nothing else. A swapped toast severity, a put-back that restores the wrong
- * address, a dropped generation bump, a rename declared on a save that changed no address, or missing from one that did, and a listed-address refusal painted as
- * a failure, or a failure painted as that refusal, each redden an arm here.
+ * What these arms prove is the part of a save and a removal no type can state: that each outcome speaks in exactly its sentence, on exactly its channel, and
+ * exactly once; that the seed a save makes lands BEFORE its write and only once its composer has a patch; that a press whose write did not land puts back what
+ * its own seed replaced and nothing else; that a send follows every write that keeps or drops an answer and follows nothing else; and that a press during a write
+ * starts nothing, because the save writes through its card's flow. A swapped toast severity, a put-back that restores the wrong address, a dropped generation
+ * bump, a rename declared on a save that changed no address, or missing from one that did, and a listed-address refusal spoken as a failure, or a failure spoken
+ * as that refusal, each redden an arm here.
  *
  * Every arm asserts the exact toast list, the exact verdict list, the exact send count, and the exact rename list, so an arm proves the absence of the other
  * outcomes as precisely as the presence of its own. The two addresses differ, their device serials differ, and the answer already held under an address differs
- * from the one the probe returns, so a restore that puts back the wrong thing cannot coincide with one that puts back the right thing.
+ * from the one the check returns, so a restore that puts back the wrong thing cannot coincide with one that puts back the right thing.
  *
- * The write fake refuses a declared rename whose keys are not strings, as the framework refuses one ahead of its queue, so a rename built from a value that is
- * no sidebar key fails the save it reaches rather than recording as though the page had accepted it.
+ * The card's save flow is the framework's own, imported from the package root, which is compiled from the same source as the page's browser module, so the rules
+ * a press runs under are the ones the page runs under. The arm that reads a control disabled during a write reads the flow's handling of the control the stand
+ * built it over, and says nothing about which control the page builds it over. The write double refuses a declared rename whose keys are not strings, as the
+ * framework refuses one ahead of its queue, so a rename built from a value that is no sidebar key fails the save it reaches rather than recording as though the
+ * page had accepted it.
  *
  * The connection check's rows run the real probe classifier, identity rule, and rejection reading behind a request double, so each failure's sentences and detail
  * are read where the check composes them.
  */
-import type { AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
-import type { ControllerAction, ControllerActions, ControllerCard, ControllerProbe, ControllerWriteResult } from "../homebridge-ui/public/controller-actions.mjs";
-import { ControllerListedError, classifyProbeResponse, hasValidIdentity, isControllerListed, readProbeRejection } from "../homebridge-ui/public/access-config.mjs";
+import type { AccessConfig, AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
+import type { CommitConfig, CommitConfigResult, SaveAction } from "homebridge-plugin-utils";
+import type { ControllerActions, ControllerCard, ControllerProbe } from "../homebridge-ui/public/controller-actions.mjs";
+import { classifyProbeResponse, hasValidIdentity, readProbeRejection } from "../homebridge-ui/public/access-config.mjs";
 import { makeControllerActions, makeControllerProbe } from "../homebridge-ui/public/controller-actions.mjs";
 import assert from "node:assert/strict";
+import { createSaveFlow } from "homebridge-plugin-utils";
 import test from "node:test";
 
 // The address a save writes and a removal drops, and the address an address-edit save replaces. They differ so a put-back that restores one in place of the other
@@ -51,9 +57,9 @@ const IDENTITY: AccessIdentity = { address: ADDRESS, password: "correct horse ba
 // The MAC addresses a swept removal offers to strip settings for.
 const MACS = [ "AABBCCDDEEFF", "112233445566" ];
 
-// The platform entry the write fake hands the composer, and the patches each interpreter composes from it. Each is a sentinel: what matters is that exactly this
-// object reached the interpreter and exactly that patch came back out of the composer.
-const PLATFORM = { theConfigurationTheWriteComposesAgainst: true };
+// The platform entry the write double hands the composer, and the patches each interpreter composes from it. Each is a sentinel: what matters is that exactly
+// this object reached the interpreter and exactly that patch came back out of the composer.
+const PLATFORM: AccessConfig = { controllers: [{ name: "the configuration the write composes against" }], options: [] };
 const SAVE_PATCH = { controllers: [{ address: ADDRESS }] };
 const REMOVE_PATCH = { controllers: [] };
 
@@ -69,9 +75,8 @@ const SAVE_FAILURE_LINE = "Unable to save this controller.";
 const REMOVE_FAILURE_LINE = "Unable to remove this controller.";
 const LISTED_REFUSAL = "This controller is already listed.";
 
-// What the composer's refusal carries as its message when an arm has it throw one, worded unlike the sentence a save speaks, so a catch that read the sentence
-// off the error rather than speaking the one the page handed in could not pass for one that did.
-const COMPOSER_REFUSAL_MESSAGE = "the composer refused an address another controller holds";
+// What a refused write carries, worded unlike any sentence the module speaks, so a delivery that dropped the detail or spoke its own cannot pass.
+const WRITE_FAILURE = "the host refused the write";
 
 // The configuration the page last received, which the listed-address check is asked of. It is a sentinel distinct from the one the write composes against, so
 // an early check asked of the write's configuration rather than the page's reads as the mistake it is.
@@ -89,6 +94,9 @@ const CHECK_FAILURE_TOAST = "Unable to connect to the UniFi Access controller. P
 
 // What the interpreter holder throws when an arm asks it to.
 const INTERPRETERS_FAILURE = "the served catalog could not be read";
+
+// What the device-list decoration throws when an arm asks it to.
+const PROCESSING_FAILURE = "the device list could not be processed";
 
 // What befalls the card while a save is in flight: it closes, an edit to its fields retires the action on it, it leaves the screen, or it is re-populated.
 type CardEvent = "close" | "edit" | "hide" | "repopulate";
@@ -122,11 +130,11 @@ interface ProbeRequest extends AccessIdentity {
   signal: AbortSignal;
 }
 
-// One toast, by the severity it was spoken at and the sentence it carried.
+// One toast, by the channel it was raised on and the message it carried.
 interface Toast {
 
-  kind: "error" | "success" | "warning";
-  message: string;
+  channel: "error" | "info" | "success" | "warning";
+  text: string;
 }
 
 // What the kept answers looked like at the moment the write ran, which is where the seed's placement and the generation bump's placement are read from.
@@ -137,20 +145,50 @@ interface WriteObservation {
   generation: number;
 }
 
-// A stood-up set of actions and everything the fakes beneath them recorded.
+/* One step of the write double's script. `natural` answers unchanged when the composer answered null and committed otherwise, which is what the page's write
+ * does when the host takes it, and no other step answers unchanged; `unrecognized` answers a kind the page does not know, after calling the composer;
+ * `failedWithString` answers failed after calling the composer, carrying a string rather than an error as its error; the others answer the kind they name, after
+ * calling the composer unless the name says the step answers before it.
+ */
+type WriteStep = "committed" | "failed" | "failedBeforeCompose" | "failedWithString" | "natural" | "rejected" | "rejectedBeforeCompose" | "staged" | "unrecognized";
+
+// What an arm stands the module up over. Every member has a default, so an arm names only what it is about.
+interface StandOptions {
+
+  composerRefuses?: boolean;
+  composerThrows?: Error;
+  duringCheck?: CardEvent;
+  duringListedCheck?: CardEvent;
+  duringWrite?: CardEvent;
+  hold?: Promise<void>;
+  interpretersThrow?: boolean;
+  listed?: boolean;
+  malformedStarter?: boolean;
+  onWrite?: () => void;
+  probe?: ControllerProbe;
+  processingThrows?: boolean;
+  retireDuringCatalogRead?: boolean;
+  writes?: WriteStep[];
+}
+
+// A stood-up set of actions and everything the doubles beneath them recorded.
 interface Stand {
 
   actions: ControllerActions;
   card: ControllerCard;
+  catalogReads: () => number;
   composed: unknown[];
+  control: { disabled: boolean };
   interpreterCalls: InterpreterCall[];
   listedChecks: ListedCheck[];
   probeCalls: ProbeRequest[];
   renames: unknown[];
   renders: RenderedVerdict[];
+  retire: () => void;
   seenDuringWrite: WriteObservation[];
   sends: () => number;
   serialReads: AccessProbeSuccess[];
+  starts: () => number;
   toasts: Toast[];
 }
 
@@ -209,79 +247,99 @@ function failedAnswer(): AccessProbeVerdict {
   return { devices: [], headline: "Unable to connect", kind: "error", message: "the controller refused this sign-in" };
 }
 
-/* Stand up the actions over recording fakes for every reach they make outside themselves.
+/* Stand up the actions over the real save flow and recording doubles for every other reach they make outside themselves.
  *
- * @param options.composerThrows    - What the save interpreter throws rather than composing, which reaches the save the way the real write rejects with it.
- * @param options.duringCheck       - What befalls the card while the check is in flight, ahead of anything the check answers.
- * @param options.duringListedCheck - What befalls the card while the listed-address rule is asked, ahead of the connection test.
- * @param options.duringWrite       - What befalls the card while the write is in flight, after the check has passed.
- * @param options.interpretersThrow - Whether the interpreter holder rejects rather than answering.
- * @param options.listed            - Whether the listed-address rule answers that another configured controller already holds the written address.
- * @param options.probe             - What the connection check answers, which an arm that never reaches the check leaves out.
- * @param options.write             - The result the coordinated write resolves with, or the error it throws.
+ * The card's starter holds the page card's rule in miniature: each start retires the action before it, exactly as the card's guard does, and an action is
+ * presented while the card is open, the action stands, the card shows the population the action began under, and the card is on screen. The write double records
+ * the rename it was handed, calls the composer against the platform the write composes over, records what the kept answers held once the composer had run, and
+ * answers what the arm's script names.
+ *
+ * @param options.composerRefuses         - Whether the save interpreter answers null, which is how it refuses an address another controller holds.
+ * @param options.composerThrows          - What the save interpreter throws rather than composing, which rejects the press.
+ * @param options.duringCheck             - What befalls the card while the connection check is in flight, ahead of anything the check answers.
+ * @param options.duringListedCheck       - What befalls the card while the listed-address rule is asked, ahead of the connection check.
+ * @param options.duringWrite             - What befalls the card while the write is in flight, once the composer has run.
+ * @param options.hold                    - What the write awaits once it has composed, so an arm can press again while the write is in flight.
+ * @param options.interpretersThrow       - Whether the interpreter holder rejects rather than answering.
+ * @param options.listed                  - Whether the listed-address rule answers that another configured controller already holds the written address.
+ * @param options.malformedStarter        - Whether the card's starter answers without the members the flow reads, which rejects a press before any check runs.
+ * @param options.onWrite                 - What runs at the moment of the write, once the composer has run.
+ * @param options.probe                   - What the connection check answers, which an arm that never reaches the check leaves out.
+ * @param options.processingThrows        - Whether the device-list decoration throws rather than answering, which reaches the save inside its composer's seed.
+ * @param options.retireDuringCatalogRead - Whether a newer act on the card retires the press while its catalog read is in flight.
+ * @param options.writes                  - The write double's script, one step per write, the natural step answering once the script runs out.
  *
  * @returns The actions and every recorder beneath them.
  */
-function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, interpretersThrow = false, listed = false, probe, write }: {
-  composerThrows?: Error; duringCheck?: CardEvent; duringListedCheck?: CardEvent; duringWrite?: CardEvent; interpretersThrow?: boolean; listed?: boolean;
-  probe?: ControllerProbe; write: ControllerWriteResult | Error; }): Stand {
+function stand({ composerRefuses = false, composerThrows, duringCheck, duringListedCheck, duringWrite, hold = Promise.resolve(), interpretersThrow = false,
+  listed = false, malformedStarter = false, onWrite, probe, processingThrows = false, retireDuringCatalogRead = false, writes = [] }: StandOptions = {}): Stand {
 
   const composed: unknown[] = [];
+  const control = { disabled: false };
   const interpreterCalls: InterpreterCall[] = [];
   const listedChecks: ListedCheck[] = [];
   const probeCalls: ProbeRequest[] = [];
   const renames: unknown[] = [];
   const renders: RenderedVerdict[] = [];
+  const script = [...writes];
   const seenDuringWrite: WriteObservation[] = [];
   const serialReads: AccessProbeSuccess[] = [];
   const toasts: Toast[] = [];
+  let catalogReads = 0;
   let closed = false;
   let current: AbortController | null = null;
   let population = 0;
   let sends = 0;
+  let starts = 0;
   let visible = true;
 
-  /* The card an action acts for, holding the page card's rules in miniature: a start retires the action before it, an edit retires whatever is current, a
-   * re-population moves the card on without retiring anything, and an action is presented while the card is open, the action stands, the card shows the
-   * population the action began under, and the card is on screen. An action's own report records only what the card presents, and the plain paint records all.
-   */
-  const card: ControllerCard = {
+  // One recorder serves the flow and the actions alike, so a delivery the flow raises and a toast the actions raise land in the one list an arm asserts whole.
+  const toast = {
 
-    values: () => ({ ...IDENTITY }),
-    verdict: {
+    error: (text: string): void => {
 
-      render: (options = {}): void => {
+      toasts.push({ channel: "error", text });
+    },
+    info: (text: string): void => {
 
-        renders.push(options);
-      },
-      retire: (): void => {
+      toasts.push({ channel: "info", text });
+    },
+    success: (text: string): void => {
 
-        current?.abort();
-        current = null;
-      },
-      start: (): ControllerAction => {
+      toasts.push({ channel: "success", text });
+    },
+    warning: (text: string): void => {
 
-        current?.abort();
-        current = new AbortController();
-
-        const { signal } = current;
-        const startedUnder = population;
-        const presented = (): boolean => !closed && !signal.aborted && (population === startedUnder) && visible;
-
-        return {
-
-          presented,
-          report: (options = {}): void => {
-
-            if(presented()) {
-
-              renders.push(options);
-            }
-          },
-          signal
-        };
-      }
+      toasts.push({ channel: "warning", text });
     }
+  };
+
+  /* The card's starter, holding the page card's rules in miniature: a start retires the action before it, an edit retires whatever is current, a re-population
+   * moves the card on without retiring anything, and an action is presented while the card is open, the action stands, the card shows the population the action
+   * began under, and the card is on screen.
+   */
+  const start = (): SaveAction => {
+
+    starts++;
+    current?.abort();
+    current = new AbortController();
+
+    // A starter that answers without the members the flow reads is how an arm rejects a press before any check runs.
+    if(malformedStarter) {
+
+      return {} as SaveAction;
+    }
+
+    const { signal } = current;
+    const startedUnder = population;
+
+    return { presented: (): boolean => !closed && !signal.aborted && (population === startedUnder) && visible, signal };
+  };
+
+  // A newer act on the card retiring the action in flight, which is what an edit to the card's fields does.
+  const retire = (): void => {
+
+    current?.abort();
   };
 
   // Each thing that can befall the card, as the page's own card meets it.
@@ -291,7 +349,7 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
 
       closed = true;
     },
-    edit: () => card.verdict.retire(),
+    edit: retire,
     hide: () => {
 
       visible = false;
@@ -302,43 +360,108 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
     }
   };
 
+  const commit: CommitConfig<AccessConfig> = async (compose, options) => {
+
+    // The rename this call declared, read as the framework reads it: absent declares none, and anything present whose from or to is not a string is refused
+    // before anything else happens, so nothing is composed or written for it.
+    const rename: unknown = options?.rename;
+
+    if(rename !== undefined) {
+
+      if((typeof rename !== "object") || (rename === null) || !("from" in rename) || !("to" in rename) || (typeof rename.from !== "string") ||
+        (typeof rename.to !== "string")) {
+
+        throw new TypeError("A declared rename names the controller's previous and current sidebar keys, each a string.");
+      }
+
+      renames.push(rename);
+    }
+
+    const step = script.shift() ?? "natural";
+
+    if(step === "failedBeforeCompose") {
+
+      return { error: new Error(WRITE_FAILURE), kind: "failed" };
+    }
+
+    if(step === "rejectedBeforeCompose") {
+
+      throw new Error(WRITE_FAILURE);
+    }
+
+    const patch = compose(PLATFORM);
+
+    // What the answers held, and which generation they were on, at the moment the write ran, read once the composer has run, which is where the page's own write
+    // runs it. This is what places the seed and the bump ahead of the write rather than behind it, which no assertion made after the save resolves could tell
+    // apart.
+    composed.push(patch);
+    seenDuringWrite.push({ atAddress: actions.answers.get(ADDRESS), atOriginal: actions.answers.get(ORIGINAL_ADDRESS),
+      generation: actions.answers.generation() });
+    onWrite?.();
+
+    if(duringWrite) {
+
+      befall[duringWrite]();
+    }
+
+    await hold;
+
+    switch(step) {
+
+      case "committed": {
+
+        return { kind: "committed" };
+      }
+
+      case "failed": {
+
+        return { error: new Error(WRITE_FAILURE), kind: "failed" };
+      }
+
+      case "failedWithString": {
+
+        return { error: "the host answered in a shape it never writes", kind: "failed" };
+      }
+
+      case "rejected": {
+
+        throw new Error(WRITE_FAILURE);
+      }
+
+      case "staged": {
+
+        return { error: new Error("the disk refused the save"), kind: "staged" };
+      }
+
+      // A kind this page does not know, which the real write never answers, cast past the union it stands outside of.
+      case "unrecognized": {
+
+        return { kind: "an outcome the page does not know" } as unknown as CommitConfigResult;
+      }
+
+      default: {
+
+        return (patch === null) ? { kind: "unchanged" } : { kind: "committed" };
+      }
+    }
+  };
+
+  const card: ControllerCard = {
+
+    flow: createSaveFlow({ commit, control, start, toast }),
+    values: () => ({ ...IDENTITY }),
+    verdict: {
+
+      render: (options = {}): void => {
+
+        renders.push(options);
+      }
+    }
+  };
+
   const actions: ControllerActions = makeControllerActions({
 
-    commitConfig: async (compose, options) => {
-
-      // The rename this call declared, read as the framework reads it: absent declares none, and anything present whose from or to is not a string is refused
-      // before anything else happens, so nothing is composed or written for it.
-      const rename: unknown = options?.rename;
-
-      if(rename !== undefined) {
-
-        if((typeof rename !== "object") || (rename === null) || !("from" in rename) || !("to" in rename) || (typeof rename.from !== "string") ||
-          (typeof rename.to !== "string")) {
-
-          throw new TypeError("A declared rename names the controller's previous and current sidebar keys, each a string.");
-        }
-
-        renames.push(rename);
-      }
-
-      // What the answers held, and which generation they were on, at the moment the write ran. This is what places the seed and the bump ahead of the write rather
-      // than behind it, which no assertion made after the save resolves could tell apart.
-      seenDuringWrite.push({ atAddress: actions.answers.get(ADDRESS), atOriginal: actions.answers.get(ORIGINAL_ADDRESS),
-        generation: actions.answers.generation() });
-      composed.push(compose(PLATFORM));
-
-      if(duringWrite) {
-
-        befall[duringWrite]();
-      }
-
-      if(write instanceof Error) {
-
-        throw write;
-      }
-
-      return write;
-    },
+    commitConfig: commit,
     controllerListedElsewhere: (config, save) => {
 
       // Each ask is kept in a list of its own, so the exact interpreter lists other arms assert stay untouched by an ask every save makes.
@@ -361,9 +484,18 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
     },
     interpreters: async () => {
 
+      // Every read of the catalog is counted, so an arm can show that a check which answered early never reached the read.
+      catalogReads++;
+
       if(interpretersThrow) {
 
         throw new Error(INTERPRETERS_FAILURE);
+      }
+
+      // A newer act on the card retiring the press while its catalog read is in flight, which the flow reads once the check answers.
+      if(retireDuringCatalogRead) {
+
+        retire();
       }
 
       return {
@@ -374,7 +506,7 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
 
           return REMOVE_PATCH;
         },
-        withControllerSaved: (config, controller): AccessConfigPatch => {
+        withControllerSaved: (config, controller): AccessConfigPatch | null => {
 
           interpreterCalls.push({ config, kind: "saved", payload: controller });
 
@@ -383,13 +515,18 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
             throw composerThrows;
           }
 
-          return SAVE_PATCH;
+          return composerRefuses ? null : SAVE_PATCH;
         }
       };
     },
-    isControllerListed,
     platformConfig: () => PAGE_CONFIG,
     processDeviceList: ({ address, devices }) => {
+
+      // A decoration that cannot read the list it is handed throws, which the save meets inside its composer's seed.
+      if(processingThrows) {
+
+        throw new Error(PROCESSING_FAILURE);
+      }
 
       for(const record of devices) {
 
@@ -424,39 +561,11 @@ function stand({ composerThrows, duringCheck, duringListedCheck, duringWrite, in
 
       sends++;
     },
-    toast: {
-
-      error: (message) => {
-
-        toasts.push({ kind: "error", message });
-      },
-      success: (message) => {
-
-        toasts.push({ kind: "success", message });
-      },
-      warning: (message) => {
-
-        toasts.push({ kind: "warning", message });
-      }
-    }
+    toast
   });
 
-  return { actions, card, composed, interpreterCalls, listedChecks, probeCalls, renames, renders, seenDuringWrite, sends: (): number => sends, serialReads,
-    toasts };
-}
-
-/* The refusal the composer throws when an arm asks it to: the real error type, so the module's injected test recognizes it exactly as it would on the page, carrying
- * a message unlike the sentence the save speaks.
- *
- * @returns The refusal.
- */
-function composerRefusal(): ControllerListedError {
-
-  const refusal = new ControllerListedError();
-
-  refusal.message = COMPOSER_REFUSAL_MESSAGE;
-
-  return refusal;
+  return { actions, card, catalogReads: (): number => catalogReads, composed, control, interpreterCalls, listedChecks, probeCalls, renames, renders, retire,
+    seenDuringWrite, sends: (): number => sends, serialReads, starts: (): number => starts, toasts };
 }
 
 /* Put an answer into the kept answers the only way a reader can, which exercises the keep rule on the way in.
@@ -492,7 +601,7 @@ function assertSpoke({ label = "", renames = [], renders = [], sends, stood, toa
 
 test("s1: a save whose connection check fails writes nothing, touches no answer, and speaks the failure once", async () => {
 
-  const stood = stand({ probe: CHECK_FAILED, write: { kind: "committed" } });
+  const stood = stand({ probe: CHECK_FAILED });
   const before = stood.actions.answers.generation();
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
@@ -506,60 +615,60 @@ test("s1: a save whose connection check fails writes nothing, touches no answer,
 
 test("s2: a committed save of a connected controller speaks its plain sentence, sends once, and answers the address", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
 
-  // The card's own retirement, made once the save has answered, aborts the signal the probe was handed. That is what shows the check ran as this card's newest
+  // The card's own retirement, made once the save has answered, aborts the signal the check was handed. That is what shows the check ran as this card's newest
   // action rather than on a signal of the save's own making.
-  stood.card.verdict.retire();
+  stood.retire();
 
   assert.deepEqual(stood.probeCalls.map(({ signal, ...identity }) => ({ identity, retiredByTheCard: signal.aborted })),
     [{ identity: IDENTITY, retiredByTheCard: true }], "the probe received the card's identity and a check running as the card's own newest action");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
 });
 
 test("s3a: a committed save of a token-only controller speaks the sentence that says what credentials would add", async () => {
 
-  const stood = stand({ probe: passed("token-only"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("token-only") });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_TOKEN_ONLY }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "success", text: SAVED_TOKEN_ONLY }] });
 });
 
 test("s3b: a committed save of a controller that refused its API token warns that the plugin runs on the credentials alone", async () => {
 
-  const stood = stand({ probe: passed("connected", true), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected", true) });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the save answers the address it wrote");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_TOKEN_REFUSED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "warning", text: SAVED_TOKEN_REFUSED }] });
 });
 
 test("s4: an address edit drops the original address before the write and declares the rename on the write", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   seed(stood, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), ADDRESS, "the save answers the address it wrote");
   assert.deepEqual(stood.seenDuringWrite.map((seen) => seen.atOriginal), [undefined], "the original address is already empty when the write runs");
   assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), undefined, "and it is still empty once the save has landed");
-  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
 });
 
 test("s5: a staged save warns that the file was not written, sends once, and declares an edited address's rename on its write", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { error: new Error("the host could not write"), kind: "staged" } });
+  const stood = stand({ probe: passed("connected"), writes: ["staged"] });
 
   seed(stood, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), ADDRESS, "the save answers the address it wrote");
-  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ kind: "warning", message: SAVED_STAGED }] });
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], sends: 1, stood, toasts: [{ channel: "warning", text: SAVED_STAGED }] });
 });
 
 test("s6a: a failed save restores what each address held and paints an Error's own message", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const stood = stand({ probe: passed("connected"), writes: ["failed"] });
   const priorAtAddress = priorAt(ADDRESS);
   const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
 
@@ -567,18 +676,18 @@ test("s6a: a failed save restores what each address held and paints an Error's o
   seed(stood, ORIGINAL_ADDRESS, priorAtOriginal);
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the save answers null");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), priorAtAddress, "the address the save wrote holds exactly what it held before");
-  assert.deepEqual(stood.actions.answers.get(ORIGINAL_ADDRESS), priorAtOriginal, "the original address holds exactly what it held before");
+  assert.equal(stood.actions.answers.get(ADDRESS), priorAtAddress, "the address the save wrote holds the very answer it held before");
+  assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), priorAtOriginal, "the original address holds the very answer it held before");
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: probeAnswer("connected"), generation: stood.seenDuringWrite[0]?.generation ?? -1 }),
     false, "a fetch issued against the seeded state loses its claim to be kept once the put-back has moved the generation");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), priorAtAddress, "so the refused fetch wrote nothing over the restored answer");
-  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE],
-    tone: "text-danger" }], sends: 1, stood });
+  assert.equal(stood.actions.answers.get(ADDRESS), priorAtAddress, "so the refused fetch wrote nothing over the restored answer");
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }],
+    sends: 1, stood });
 });
 
 test("s6b: a failed save leaves both addresses empty where it found them empty, and paints a non-Error through String", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { error: "the host answered in a shape it never writes", kind: "failed" } });
+  const stood = stand({ probe: passed("connected"), writes: ["failedWithString"] });
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the save answers null");
   assert.equal(stood.actions.answers.get(ADDRESS), undefined, "the address the save wrote is empty again");
@@ -587,60 +696,48 @@ test("s6b: a failed save leaves both addresses empty where it found them empty, 
     lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
 });
 
-test("s7a: an interpreter holder that rejects restores the map and paints the failure, without composing anything", async () => {
+test("s7a: an interpreter holder that rejects declines the check with nothing seeded, and paints the failure without composing anything", async () => {
 
-  const stood = stand({ interpretersThrow: true, probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ interpretersThrow: true, probe: passed("connected") });
   const prior = priorAt(ADDRESS);
-  const before = stood.actions.answers.generation();
 
   seed(stood, ADDRESS, prior);
 
-  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, "the address holds exactly what it held before");
-  assert.deepEqual(stood.composed, [], "the write never ran");
+  const before = stood.actions.answers.generation();
 
-  /* The write never ran here, so there is no during-the-write reading of the generation to check against. The mark one past where the save started is the
-   * same place: a save moves the generation once before the write, so a fetch holding that value is the fetch issued against the seeded state, and the
-   * put-back is the only thing that can have moved past it.
-   */
-  assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: probeAnswer("connected"), generation: before + 1 }), false,
-    "a fetch issued against the seeded state loses its claim to be kept once the put-back has moved the generation");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, "so the refused fetch wrote nothing over the restored answer");
-  assertSpoke({ renders: [{ detail: INTERPRETERS_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.equal(stood.actions.answers.get(ADDRESS), prior, "the address holds the very answer it held, because the check declined before anything was seeded");
+  assert.deepEqual(stood.serialReads.map((answer) => answer.message), [ PRIOR_MESSAGE, PROBE_MESSAGE ],
+    "the outgoing serial was read, then the probe's, before the catalog read that failed");
+  assert.deepEqual(stood.composed, [], "the write never ran");
+  assert.equal(stood.actions.answers.generation(), before, "and the generation did not move");
+  assertSpoke({ renders: [{ detail: INTERPRETERS_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
 });
 
 test("s7b: a coordinated write that throws restores the map and paints the failure", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: new Error("the write threw") });
+  const stood = stand({ probe: passed("connected"), writes: ["rejected"] });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, "the address holds exactly what it held before");
-  assertSpoke({ renders: [{ detail: "the write threw", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+  assert.equal(stood.actions.answers.get(ADDRESS), prior, "the address holds the very answer it held before");
+  assertSpoke({ renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
 });
 
 test("s8: a write this page does not recognize answers null, keeps the seed, and says nothing", async () => {
 
-  const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
+  const stood = stand({ probe: passed("connected"), writes: ["unrecognized"] });
 
-    const label = write.kind + ": ";
-    const stood = stand({ probe: passed("connected"), write });
-
-    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
-    assert.equal(stood.actions.answers.get(ADDRESS)?.devices[0]?.["processed"], PROCESSED, label + "the seed is left exactly where the save put it");
-    assertSpoke({ label, sends: 0, stood });
-  };
-
-  // The kind sits outside the declared union, which is what the default arm exists for: the cast is this arm's statement that it is reaching a case the type
-  // system says cannot arrive.
-  await assertIgnored({ kind: "a-kind-this-page-does-not-know" } as unknown as ControllerWriteResult);
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.equal(stood.actions.answers.get(ADDRESS)?.devices[0]?.["processed"], PROCESSED, "the seed is left exactly where the save put it");
+  assertSpoke({ sends: 0, stood });
 });
 
 test("s9: the address a save writes is seeded with its own processed answer before the write runs", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -654,12 +751,12 @@ test("s9: the address a save writes is seeded with its own processed answer befo
   assert.equal(atAddress.message, PROBE_MESSAGE, "the write saw this save's own answer rather than the one held before it");
   assert.deepEqual(atAddress.devices, [{ processed: PROCESSED, processedAddress: ADDRESS, serialNumber: PROBE_SERIAL }],
     "and saw it with the page's own decoration already applied");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
 });
 
 test("s10: a save moves the generation before the write, so a fetch captured earlier is refused afterwards", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
   const mark = stood.actions.answers.generation();
 
   await stood.actions.saveController({ card: stood.card, originalAddress: undefined });
@@ -672,7 +769,7 @@ test("s10: a save moves the generation before the write, so a fetch captured ear
 
 test("s11: a save hands the interpreter the card's identity with the original address, and the write the patch that came back", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS });
 
@@ -684,18 +781,18 @@ test("s11: a save hands the interpreter the card's identity with the original ad
 
 test("s12: a save that leaves the address alone seeds it before the write and declares no rename", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ADDRESS }), ADDRESS, "the save answers the address it wrote");
   assert.equal(stood.seenDuringWrite[0]?.atAddress?.message, PROBE_MESSAGE, "the address holds this save's own answer by the time the write runs");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
 });
 
 test("s13: a save reads the outgoing serial from the answer held under the address it is writing over, ahead of the seed that replaces it", async () => {
 
-  const replacing = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const replacing = stand({ probe: passed("connected") });
 
   seed(replacing, ADDRESS, priorAt(ADDRESS));
   seed(replacing, ORIGINAL_ADDRESS, priorAt(ORIGINAL_ADDRESS));
@@ -709,7 +806,7 @@ test("s13: a save reads the outgoing serial from the answer held under the addre
     "which is read from the answer this session was already holding rather than from the one the seed puts in its place");
   assert.deepEqual(replacing.renames, [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], "and the address edit declares its rename on the write");
 
-  const same = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const same = stand({ probe: passed("connected") });
 
   seed(same, ADDRESS, priorAt(ADDRESS));
 
@@ -722,7 +819,7 @@ test("s13: a save reads the outgoing serial from the answer held under the addre
 
 test("s14: a token-only answer names no serial, on whichever side of the save it sits", async () => {
 
-  const validated = stand({ probe: passed("token-only"), write: { kind: "committed" } });
+  const validated = stand({ probe: passed("token-only") });
 
   seed(validated, ADDRESS, priorAt(ADDRESS));
 
@@ -733,7 +830,7 @@ test("s14: a token-only answer names no serial, on whichever side of the save it
   "a token-only validation hands no serial, because the row it would be read from carries an address identity rather than one");
   assert.deepEqual(validated.serialReads.map((answer) => answer.message), [PRIOR_MESSAGE], "and that row goes unread");
 
-  const held = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const held = stand({ probe: passed("connected") });
 
   seed(held, ADDRESS, { ...priorAt(ADDRESS), kind: "token-only" });
 
@@ -749,11 +846,11 @@ test("s15: a save whose card closes, leaves the screen, or is re-populated durin
   const assertWritten = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ duringCheck: event, probe: passed("connected"), write: { kind: "committed" } });
+    const stood = stand({ duringCheck: event, probe: passed("connected") });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, label + "the save answers the address it wrote");
     assert.deepEqual(stood.composed, [SAVE_PATCH], label + "and the write still received the patch the interpreter composed");
-    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+    assertSpoke({ label, sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
   };
 
   await assertWritten("close");
@@ -766,11 +863,11 @@ test("s16: a save whose check fails once its card has closed, left the screen, o
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ duringCheck: event, probe: CHECK_FAILED, write: { kind: "committed" } });
+    const stood = stand({ duringCheck: event, probe: CHECK_FAILED });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assert.deepEqual(stood.composed, [], label + "nothing is composed");
-    assertSpoke({ label, sends: 0, stood, toasts: [{ kind: "error", message: CHECK_FAILURE_TOAST }] });
+    assertSpoke({ label, sends: 0, stood, toasts: [{ channel: "error", text: CHECK_FAILURE_TOAST }] });
   };
 
   await assertToasted("close");
@@ -780,63 +877,66 @@ test("s16: a save whose check fails once its card has closed, left the screen, o
 
 test("s17: a save whose write fails once its card has stopped presenting it toasts the failure and paints nothing", async () => {
 
-  const assertToasted = async ({ event, label, message, write }: { event: CardEvent; label: string; message: string;
-    write: ControllerWriteResult | Error; }): Promise<void> => {
+  const assertToasted = async ({ event, label, writes }: { event: CardEvent; label: string; writes: WriteStep[] }): Promise<void> => {
 
-    const stood = stand({ duringWrite: event, probe: passed("connected"), write });
+    const stood = stand({ duringWrite: event, probe: passed("connected"), writes });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
-    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "error", message }] });
+    assertSpoke({ label, sends: 1, stood, toasts: [{ channel: "error", text: SAVE_FAILURE_LINE + " " + WRITE_FAILURE }] });
   };
 
-  const refused = (): ControllerWriteResult => ({ error: new Error("the host refused the write"), kind: "failed" });
-  const refusedToast = "Unable to save this controller. the host refused the write";
-
-  await assertToasted({ event: "close", label: "close, failed: ", message: refusedToast, write: refused() });
-  await assertToasted({ event: "close", label: "close, thrown: ", message: "Unable to save this controller. the write threw", write: new Error("the write threw") });
-  await assertToasted({ event: "edit", label: "edit, failed: ", message: refusedToast, write: refused() });
-  await assertToasted({ event: "hide", label: "hide, failed: ", message: refusedToast, write: refused() });
-  await assertToasted({ event: "repopulate", label: "repopulate, failed: ", message: refusedToast, write: refused() });
+  await assertToasted({ event: "close", label: "close, failed: ", writes: ["failed"] });
+  await assertToasted({ event: "close", label: "close, rejected: ", writes: ["rejected"] });
+  await assertToasted({ event: "edit", label: "edit, failed: ", writes: ["failed"] });
+  await assertToasted({ event: "hide", label: "hide, failed: ", writes: ["failed"] });
+  await assertToasted({ event: "repopulate", label: "repopulate, failed: ", writes: ["failed"] });
 });
 
 test("s18: an open card's failures paint on its verdict line and toast nothing", async () => {
 
-  const checked = stand({ probe: CHECK_FAILED, write: { kind: "committed" } });
+  const checked = stand({ probe: CHECK_FAILED });
 
   assert.equal(await checked.actions.saveController({ card: checked.card, originalAddress: undefined }), null, "a failed check answers null");
   assertSpoke({ label: "check: ", renders: [CHECK_FAILURE], sends: 0, stood: checked });
 
-  const written = stand({ probe: passed("connected"), write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const written = stand({ probe: passed("connected"), writes: ["failed"] });
 
   assert.equal(await written.actions.saveController({ card: written.card, originalAddress: undefined }), null, "a failed write answers null");
-  assertSpoke({ label: "write: ", renders: [{ detail: "the host refused the write", lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1,
-    stood: written });
+  assertSpoke({ label: "write: ", renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood: written });
 });
 
-test("s19: an edit to the card's fields during a save's check cancels the save, which writes nothing and says nothing", async () => {
+test("s19: an edit or another retiring act during a save's check, its catalog read included, cancels the save, which writes nothing and says nothing", async () => {
 
-  const stood = stand({ duringCheck: "edit", probe: passed("connected"), write: { kind: "committed" } });
+  const assertCancelled = async ({ label, options }: { label: string; options: StandOptions }): Promise<void> => {
 
-  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
-  assert.deepEqual(stood.interpreterCalls, [], "no interpreter runs");
-  assert.deepEqual(stood.composed, [], "nothing is composed");
-  assertSpoke({ sends: 0, stood });
+    const stood = stand({ ...options, probe: passed("connected") });
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
+    assert.deepEqual(stood.interpreterCalls, [], label + "no interpreter runs");
+    assert.deepEqual(stood.composed, [], label + "nothing is composed");
+    assertSpoke({ label, sends: 0, stood });
+  };
+
+  await assertCancelled({ label: "an edit during the connection check: ", options: { duringCheck: "edit" } });
+
+  // A newer act on the card retiring the press while its catalog read is in flight, the last await the check makes before the flow reads the press's signal.
+  await assertCancelled({ label: "a retirement during the catalog read: ", options: { retireDuringCatalogRead: true } });
 });
 
 test("s20: a save whose original address is not a string declares no rename, and writes and speaks as any other save does", async () => {
 
-  const stood = stand({ probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ probe: passed("connected") });
 
   // A hand edit is the only way a configured address arrives as something other than a string, and the editors pass it through unconverted. Such a save still
   // replaces an address, but the framework refuses a rename whose keys are not strings, so the save declares none and writes rather than failing.
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: 42 }), ADDRESS, "the save answers the address it wrote");
   assert.deepEqual(stood.composed, [SAVE_PATCH], "and the write received the patch the interpreter composed");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "success", message: SAVED_CONNECTED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
 });
 
 test("s21: a save at an address another controller holds is refused before its connection test, writing nothing and saying the sentence on the card", async () => {
 
-  const stood = stand({ listed: true, probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ listed: true, probe: passed("connected") });
   const priorAtAddress = priorAt(ADDRESS);
   const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
 
@@ -862,12 +962,12 @@ test("s22: a listed address refused once the card has stopped presenting the sav
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ duringListedCheck: event, listed: true, probe: passed("connected"), write: { kind: "committed" } });
+    const stood = stand({ duringListedCheck: event, listed: true, probe: passed("connected") });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
     assert.equal(stood.probeCalls.length, 0, label + "the connection test never ran");
     assert.deepEqual(stood.composed, [], label + "nothing was composed or written");
-    assertSpoke({ label, sends: 0, stood, toasts: [{ kind: "warning", message: LISTED_REFUSAL }] });
+    assertSpoke({ label, sends: 0, stood, toasts: [{ channel: "warning", text: LISTED_REFUSAL }] });
   };
 
   await assertToasted("close");
@@ -875,33 +975,36 @@ test("s22: a listed address refused once the card has stopped presenting the sav
   await assertToasted("repopulate");
 });
 
-test("s23: a composer that refuses a listed address puts the answers back and says the page's sentence on the card, never the error's own message", async () => {
+test("s23: a composer that answers null for a listed address seeds nothing, puts nothing back, and says the page's sentence on the card", async () => {
 
-  const stood = stand({ composerThrows: composerRefusal(), probe: passed("connected"), write: { kind: "committed" } });
+  const stood = stand({ composerRefuses: true, probe: passed("connected") });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
 
+  const before = stood.actions.answers.generation();
+
   assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
-  assert.equal(stood.probeCalls.length, 1, "the early check passed, so the connection test ran");
-  assert.deepEqual(stood.composed, [], "the composer refused, so no patch reached the write");
-  assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, "the address holds exactly what it held before the seed");
-  assertSpoke({ renders: [{ lines: [LISTED_REFUSAL], tone: "text-warning" }], sends: 1, stood });
+  assert.equal(stood.probeCalls.length, 1, "the early check passed, so the connection check ran");
+  assert.deepEqual(stood.composed, [null], "the composer answered null, so the write composed nothing");
+  assert.equal(stood.actions.answers.get(ADDRESS), prior, "the address holds the very answer it held, because nothing was seeded");
+  assert.equal(stood.actions.answers.generation(), before, "and the generation did not move");
+  assertSpoke({ renders: [{ lines: [LISTED_REFUSAL], tone: "text-warning" }], sends: 0, stood });
 });
 
-test("s24: a composer's refusal met once the card has stopped presenting the save speaks through the warning toast and paints nothing", async () => {
+test("s24: a composer's null answer met once the card has stopped presenting the save speaks through the warning toast and paints nothing", async () => {
 
   const assertToasted = async (event: CardEvent): Promise<void> => {
 
     const label = event + ": ";
-    const stood = stand({ composerThrows: composerRefusal(), duringCheck: event, probe: passed("connected"), write: { kind: "committed" } });
+    const stood = stand({ composerRefuses: true, duringCheck: event, probe: passed("connected") });
     const prior = priorAt(ADDRESS);
 
     seed(stood, ADDRESS, prior);
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
-    assert.deepEqual(stood.actions.answers.get(ADDRESS), prior, label + "the address holds exactly what it held before the seed");
-    assertSpoke({ label, sends: 1, stood, toasts: [{ kind: "warning", message: LISTED_REFUSAL }] });
+    assert.equal(stood.actions.answers.get(ADDRESS), prior, label + "the address holds the very answer it held, because nothing was seeded");
+    assertSpoke({ label, sends: 0, stood, toasts: [{ channel: "warning", text: LISTED_REFUSAL }] });
   };
 
   await assertToasted("close");
@@ -909,26 +1012,173 @@ test("s24: a composer's refusal met once the card has stopped presenting the sav
   await assertToasted("repopulate");
 });
 
-test("s25: a composer that throws anything else keeps the failure line and its detail, even an error carrying the refusal's sentence", async () => {
+test("s25: a composer that throws rejects the press, which speaks the failure with the thrown message, even for an error carrying the listed sentence", async () => {
 
   const assertFailed = async (thrown: Error): Promise<void> => {
 
     const label = thrown.message + ": ";
-    const stood = stand({ composerThrows: thrown, probe: passed("connected"), write: { kind: "committed" } });
+    const stood = stand({ composerThrows: thrown, probe: passed("connected") });
 
     assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "the save answers null");
-    assertSpoke({ label, renders: [{ detail: thrown.message, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood });
+    assertSpoke({ label, renders: [{ detail: thrown.message, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
   };
 
   await assertFailed(new Error("the composer threw"));
 
-  // The refusal is told apart by its type alone, so an ordinary error whose message happens to be the sentence is still the failure it is.
+  // The composer refuses by answering null and never by a throw, so an ordinary error whose message happens to be the listed sentence is the failure it is, and
+  // the press never speaks the listed warning for it.
   await assertFailed(new Error(LISTED_REFUSAL));
+});
+
+test("s26: a press during a write starts nothing and says nothing, and the write is the only one, because the save writes through its card's flow", async () => {
+
+  const assertBusy = async (event?: CardEvent): Promise<void> => {
+
+    const label = (event ?? "open") + ": ";
+    const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
+    const { promise: atWrite, resolve: reached } = Promise.withResolvers<undefined>();
+    const stood = stand({ duringWrite: event, hold: held, onWrite: () => reached(undefined), probe: passed("connected") });
+    const first = stood.actions.saveController({ card: stood.card, originalAddress: undefined });
+
+    await atWrite;
+
+    assert.equal(stood.control.disabled, true, label + "the flow holds the control it was built over disabled while the write is in flight");
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, label + "a second press during the write answers null");
+    assert.equal(stood.starts(), 1, label + "and starts no action of its own, so it cannot retire the write's");
+    assert.equal(stood.probeCalls.length, 1, label + "and runs no connection check of its own");
+
+    release(undefined);
+
+    assert.equal(await first, ADDRESS, label + "the first press goes on to its own result");
+    assert.deepEqual(stood.composed, [SAVE_PATCH], label + "two presses on one card make one write");
+    assert.equal(stood.control.disabled, false, label + "and the flow gives the control back once the write settles");
+    assertSpoke({ label, sends: 1, stood, toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
+  };
+
+  await assertBusy();
+
+  // A card re-populated to another controller while the write runs keeps that write's busy state, because the state belongs to the card's flow and not to what
+  // the card is showing.
+  await assertBusy("repopulate");
+});
+
+// The write answering before its composer runs, once as a failed result and once as a rejection, each an arm of its own.
+for(const step of [ "failedBeforeCompose", "rejectedBeforeCompose" ] as const) {
+
+  test("s27: a press whose write answers before its composer (" + step + ") seeds nothing, moves nothing, and speaks the write's failure", async () => {
+
+    const stood = stand({ probe: passed("connected"), writes: [step] });
+    const priorAtAddress = priorAt(ADDRESS);
+    const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
+
+    seed(stood, ADDRESS, priorAtAddress);
+    seed(stood, ORIGINAL_ADDRESS, priorAtOriginal);
+
+    const before = stood.actions.answers.generation();
+
+    assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the press answers null");
+    assert.deepEqual(stood.composed, [], "its composer never ran");
+    assert.equal(stood.actions.answers.get(ADDRESS), priorAtAddress, "the address the save writes still holds the very answer it held");
+    assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), priorAtOriginal, "and so does the address the save started from");
+    assert.equal(stood.actions.answers.generation(), before, "and the generation did not move, because nothing was seeded");
+    assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }],
+      sends: 0, stood });
+  });
+}
+
+test("s28: a press rejected after its check delivers the save's failure through the check's own delivery, on the card or through the toast", async () => {
+
+  const open = stand({ probe: passed("connected"), writes: ["rejected"] });
+
+  assert.equal(await open.actions.saveController({ card: open.card, originalAddress: undefined }), null, "a rejected press on an open card answers null");
+  assertSpoke({ label: "open: ", renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood: open });
+
+  const closed = stand({ duringCheck: "close", probe: passed("connected"), writes: ["rejected"] });
+
+  assert.equal(await closed.actions.saveController({ card: closed.card, originalAddress: undefined }), null, "a rejected press on a closed card answers null");
+  assertSpoke({ label: "closed: ", sends: 1, stood: closed, toasts: [{ channel: "error", text: SAVE_FAILURE_LINE + " " + WRITE_FAILURE }] });
+});
+
+test("s29: a press rejected before any check ran raises the save's failure on the error toast alone", async () => {
+
+  const stood = stand({ malformedStarter: true, probe: passed("connected") });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "a rejected press answers null");
+  assert.equal(stood.toasts.length, 1, "exactly one toast is raised");
+
+  const [raised] = stood.toasts;
+
+  assert.ok(raised, "and it is read");
+  assert.equal(raised.channel, "error", "on the error channel");
+  assert.ok(raised.text.startsWith(SAVE_FAILURE_LINE + " "), "carrying the save's failure sentence followed by what the press rejected with");
+  assert.deepEqual(stood.renders, [], "and nothing is painted, because no check kept a delivery to paint through");
+  assert.equal(stood.probeCalls.length, 0, "no connection check runs");
+  assert.deepEqual(stood.composed, [], "nothing is composed");
+  assert.equal(stood.sends(), 0, "and nothing is sent");
+});
+
+test("s30: a press that seeds and commits, followed by a press that fails before its composer, keeps the first press's seed", async () => {
+
+  const stood = stand({ probe: passed("connected"), writes: [ "committed", "failedBeforeCompose" ] });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), ADDRESS, "the first press writes");
+
+  const seeded = stood.actions.answers.get(ADDRESS);
+
+  assert.ok(seeded, "and seeds the written address");
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the second press fails before its composer runs");
+  assert.deepEqual(stood.composed, [SAVE_PATCH], "so only the first press composed");
+  assert.equal(stood.actions.answers.get(ADDRESS), seeded, "and the first press's seed stands, because a put-back belongs to the press that seeded");
+  assertSpoke({ renders: [{ detail: WRITE_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 1, stood,
+    toasts: [{ channel: "success", text: SAVED_CONNECTED }] });
+});
+
+test("s31: a save at a listed address is refused before its catalog read, so the refusal is what is said even when the catalog cannot be read", async () => {
+
+  const stood = stand({ interpretersThrow: true, listed: true, probe: passed("connected") });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.equal(stood.probeCalls.length, 0, "the connection check never ran, because the listed-address check refused first");
+  assert.equal(stood.catalogReads(), 0, "and the catalog was never read");
+  assert.deepEqual(stood.composed, [], "nothing was composed or written");
+  assertSpoke({ renders: [{ lines: [LISTED_REFUSAL], tone: "text-warning" }], sends: 0, stood });
+});
+
+test("s32: a save whose connection check fails never reads the catalog, so the check's failure is what is said even when the catalog cannot be read", async () => {
+
+  const stood = stand({ interpretersThrow: true, probe: CHECK_FAILED });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.equal(stood.probeCalls.length, 1, "the connection check ran once");
+  assert.equal(stood.catalogReads(), 0, "and the catalog was never read, because the check declined before the read is reached");
+  assert.deepEqual(stood.composed, [], "nothing was composed or written");
+  assertSpoke({ renders: [CHECK_FAILURE], sends: 0, stood });
+});
+
+test("s33: a device-list processing that throws in the composer's seed rejects the press, which speaks the failure and leaves the kept answers as found", async () => {
+
+  const stood = stand({ probe: passed("connected"), processingThrows: true });
+  const priorAtAddress = priorAt(ADDRESS);
+  const priorAtOriginal = priorAt(ORIGINAL_ADDRESS);
+
+  seed(stood, ADDRESS, priorAtAddress);
+  seed(stood, ORIGINAL_ADDRESS, priorAtOriginal);
+
+  const before = stood.actions.answers.generation();
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: ORIGINAL_ADDRESS }), null, "the press answers null");
+  assert.equal(stood.interpreterCalls.length, 1, "the composer ran and answered a patch, so the press reached its seed");
+  assert.deepEqual(stood.composed, [], "and the write never received the patch, because the seed threw inside the composer");
+  assert.equal(stood.actions.answers.get(ADDRESS), priorAtAddress, "the address the save writes still holds the very answer it held");
+  assert.equal(stood.actions.answers.get(ORIGINAL_ADDRESS), priorAtOriginal, "and so does the address the save started from");
+  assert.equal(stood.actions.answers.generation(), before, "and the generation did not move, because the processing runs before the seed changes anything");
+  assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: PROCESSING_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }],
+    sends: 0, stood });
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -945,7 +1195,7 @@ test("r1: a committed removal drops the answer, sends once, and says nothing at 
 
 test("r2: a staged removal warns that the file was not written, and still drops the answer", async () => {
 
-  const stood = stand({ write: { error: new Error("the host could not write"), kind: "staged" } });
+  const stood = stand({ writes: ["staged"] });
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 
@@ -957,12 +1207,12 @@ test("r2: a staged removal warns that the file was not written, and still drops 
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: priorAt(ADDRESS), generation: mark }), false,
     "a fetch already in flight for the removed address cannot put it back");
   assert.equal(stood.actions.answers.get(ADDRESS), undefined, "so the address is still empty after the refused fetch");
-  assertSpoke({ sends: 1, stood, toasts: [{ kind: "warning", message: REMOVED_STAGED }] });
+  assertSpoke({ sends: 1, stood, toasts: [{ channel: "warning", text: REMOVED_STAGED }] });
 });
 
 test("r3: a failed removal paints the failure on the card and keeps the answer", async () => {
 
-  const stood = stand({ write: { error: new Error("the host refused the write"), kind: "failed" } });
+  const stood = stand({ writes: ["failed"] });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -970,12 +1220,12 @@ test("r3: a failed removal paints the failure on the card and keeps the answer",
   await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
 
   assert.equal(stood.actions.answers.get(ADDRESS), prior, "the answer is still held under its address");
-  assertSpoke({ renders: [{ detail: "the host refused the write", lines: [REMOVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
+  assertSpoke({ renders: [{ detail: WRITE_FAILURE, lines: [REMOVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
 });
 
 test("r4: a removal whose write throws paints the failure and keeps the answer", async () => {
 
-  const stood = stand({ write: new Error("the write threw") });
+  const stood = stand({ writes: ["rejected"] });
   const prior = priorAt(ADDRESS);
 
   seed(stood, ADDRESS, prior);
@@ -983,32 +1233,25 @@ test("r4: a removal whose write throws paints the failure and keeps the answer",
   await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
 
   assert.equal(stood.actions.answers.get(ADDRESS), prior, "the answer is still held under its address");
-  assertSpoke({ renders: [{ detail: "the write threw", lines: [REMOVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
+  assertSpoke({ renders: [{ detail: WRITE_FAILURE, lines: [REMOVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
 });
 
 test("r5: a removal this page does not recognize says nothing and keeps the answer", async () => {
 
-  const assertIgnored = async (write: ControllerWriteResult): Promise<void> => {
+  const stood = stand({ writes: ["unrecognized"] });
+  const prior = priorAt(ADDRESS);
 
-    const label = write.kind + ": ";
-    const stood = stand({ write });
-    const prior = priorAt(ADDRESS);
+  seed(stood, ADDRESS, prior);
 
-    seed(stood, ADDRESS, prior);
+  await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
 
-    await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
-
-    assert.equal(stood.actions.answers.get(ADDRESS), prior, label + "the answer is still held under its address");
-    assertSpoke({ label, sends: 0, stood });
-  };
-
-  // The kind sits outside the declared union, on the same terms the save's own arm states.
-  await assertIgnored({ kind: "a-kind-this-page-does-not-know" } as unknown as ControllerWriteResult);
+  assert.equal(stood.actions.answers.get(ADDRESS), prior, "the answer is still held under its address");
+  assertSpoke({ sends: 0, stood });
 });
 
 test("r6: a removal hands the interpreter the address and the chosen sweep, and the write the patch that came back", async () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
 
   await stood.actions.removeController({ address: ADDRESS, card: stood.card, macs: MACS });
 
@@ -1019,7 +1262,7 @@ test("r6: a removal hands the interpreter the address and the chosen sweep, and 
 
 test("a1: an answer that failed is refused, and nothing is written for it", () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
 
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer: failedAnswer(), generation: stood.actions.answers.generation() }), false,
     "a failure is never kept");
@@ -1028,7 +1271,7 @@ test("a1: an answer that failed is refused, and nothing is written for it", () =
 
 test("a2: an answer an invalidation overtook is refused, and nothing is written for it", () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
   const mark = stood.actions.answers.generation();
 
   stood.actions.answers.clear();
@@ -1039,7 +1282,7 @@ test("a2: an answer an invalidation overtook is refused, and nothing is written 
 
 test("a3: a success offered at the current generation is kept, and reads back as the same answer", () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
   const answer = priorAt(ADDRESS);
 
   assert.equal(stood.actions.answers.keep({ address: ADDRESS, answer, generation: stood.actions.answers.generation() }), true, "the answer is kept");
@@ -1048,7 +1291,7 @@ test("a3: a success offered at the current generation is kept, and reads back as
 
 test("a4: clearing empties the answers and moves the generation", () => {
 
-  const stood = stand({ write: { kind: "committed" } });
+  const stood = stand();
 
   seed(stood, ADDRESS, priorAt(ADDRESS));
 

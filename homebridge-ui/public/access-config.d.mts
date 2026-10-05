@@ -97,7 +97,7 @@ export interface AccessConfigPatch {
 /**
  * The interpreters that need the served catalog. Each is declared as a property carrying a function rather than as a method, which is what the module actually
  * builds - an object of arrow functions closed over the injected catalog - so a consumer is free to read one off the holder and call it on its own. The controller
- * save throws a {@link ControllerListedError} rather than composing a patch when another configured controller already holds the address it writes.
+ * save answers null rather than composing a patch when another configured controller already holds the address it writes.
  */
 export interface AccessConfigInterpreter {
 
@@ -105,7 +105,7 @@ export interface AccessConfigInterpreter {
   migrate: (config?: AccessConfig, macByAddress?: ReadonlyMap<string, string>) => AccessConfigPatch | null;
   withControllerRemoved: (config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }) => AccessConfigPatch;
   withControllerSaved: (config: AccessConfig | undefined,
-    controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }) => AccessConfigPatch;
+    controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }) => AccessConfigPatch | null;
 }
 
 /** The headline a controller the plugin could not reach is rendered under. */
@@ -116,12 +116,6 @@ export declare const CONTROLLER_KEYS: readonly [ "address", "name", "password", 
 
 /** What a save says when the address it writes is one another configured controller already holds, stated once for every surface that speaks the refusal. */
 export declare const CONTROLLER_LISTED_WARNING: string;
-
-/** The refusal a composer throws when the address a save writes is one another configured controller already holds; its message is the sentence above. */
-export declare class ControllerListedError extends Error {
-
-  constructor();
-}
 
 /** What to do about a UI server answering in a shape it never writes. */
 export declare const SERVER_FAILURE_GUIDANCE: string;
@@ -146,9 +140,6 @@ export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDe
 
 /** Whether a controller item describes an identity the plugin can connect with, mirroring composeConnectIdentity's verdict exactly. */
 export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
-
-/** Whether a thrown value is the listed-address refusal, as opposed to any other failure a write can meet. */
-export declare const isControllerListed: (error: unknown) => error is ControllerListedError;
 
 /**
  * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its two
@@ -181,8 +172,7 @@ export declare const readProbeRejection: (reason: unknown) => string;
 export declare const staleSelectionVerdict: () => AccessProbeFailure;
 
 /**
- * The controllers patch that writes an identity onto the primary controller, or null when the identity is not one the plugin can connect with. It throws a
- * {@link ControllerListedError} instead when a controller after the primary holds the address the identity writes and the primary does not already store
- * exactly that address.
+ * The controllers patch that writes an identity onto the primary controller, or null when the identity is not one the plugin can connect with, and null as well
+ * when a controller after the primary holds the address the identity writes and the primary does not already store exactly that address.
  */
 export declare const withPrimaryIdentity: (config: AccessConfig | undefined, identity: AccessIdentity) => { controllers: AccessControllerConfig[] } | null;
