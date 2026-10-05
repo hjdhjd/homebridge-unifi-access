@@ -15,7 +15,7 @@ import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntr
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, ControllerListedError, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE,
   classifyProbeResponse, controllerListedElsewhere, deviceListResult, hasValidIdentity, isControllerListed, makeAccessConfig, primaryListedElsewhere,
-  staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
+  readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -385,6 +385,52 @@ test("the probe verdict reads all three response kinds and refuses a shape the s
     assert.equal(verdict.kind, "error", "a response in a shape the server never writes reads as a failure rather than an empty page");
     assert.equal(verdict.headline, SERVER_FAILURE_HEADLINE, "and it names the UI server rather than the controller, because the controller is not what failed");
     assert.equal(verdict.guidance, SERVER_FAILURE_GUIDANCE, "and it says what to do about a server that answered in a shape it never writes");
+  }
+});
+
+// The detail a rejected probe request reads when it brought no readable reason of its own, transcribed rather than referenced so a sentence that drifts by a
+// character in its one home reddens a row.
+const UNRECOGNIZED_SHAPE = "The plugin's UI server answered in an unrecognized shape.";
+
+test("a probe request rejected with an error reads the error's own message as its detail", () => {
+
+  assert.equal(readProbeRejection(new Error("The UI server did not respond.")), "The UI server did not respond.", "an error's message is the detail the card shows");
+});
+
+test("a probe request rejected with the plain object the bridge sends reads that object's message as its detail", () => {
+
+  assert.equal(readProbeRejection({ message: "The plugin's UI server is not running." }), "The plugin's UI server is not running.",
+    "the bridge rejects with the plain object the UI server posts, which carries a message although it is no error");
+});
+
+test("a probe request rejected with a non-empty string reads that string as its detail", () => {
+
+  assert.equal(readProbeRejection("the bridge gave up on the request"), "the bridge gave up on the request", "a string rejection is its own detail");
+});
+
+test("a probe request rejection that carries no string message and is no non-empty string reads the unrecognized-shape sentence", () => {
+
+  for(const reason of [ "", 42, { code: 500 } ]) {
+
+    assert.equal(readProbeRejection(reason), UNRECOGNIZED_SHAPE, "a rejection of " + JSON.stringify(reason) + " reads the sentence rather than any text of its own");
+  }
+});
+
+test("a probe request rejected with an object whose message is not a string reads the unrecognized-shape sentence", () => {
+
+  assert.equal(readProbeRejection({ message: 42 }), UNRECOGNIZED_SHAPE, "a message that is no string is no message at all, and is never rendered as text");
+});
+
+test("a probe request rejected with an error whose message is empty reads the unrecognized-shape sentence", () => {
+
+  assert.equal(readProbeRejection(new Error("")), UNRECOGNIZED_SHAPE, "an empty message leaves nothing to show, so the sentence stands in for it");
+});
+
+test("a probe request rejected with undefined or null reads the unrecognized-shape sentence", () => {
+
+  for(const reason of [ undefined, null ]) {
+
+    assert.equal(readProbeRejection(reason), UNRECOGNIZED_SHAPE, "a rejection of " + String(reason) + " reads the sentence rather than nothing at all");
   }
 });
 

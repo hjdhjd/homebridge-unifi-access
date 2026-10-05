@@ -102,6 +102,9 @@ export const CONNECTION_FAILURE_HEADLINE = "Unable to connect to the UniFi Acces
 // The headline for a UI server answering in a shape it never writes, rendered on the card's result line and as the framework's error-view headline.
 export const SERVER_FAILURE_HEADLINE = "The plugin's UI server did not answer as expected.";
 
+// Why the UI server failed when nothing more specific is known: an answer in a shape it never writes, or a rejected probe request that carried no message of its own.
+const SERVER_FAILURE_MESSAGE = "The plugin's UI server answered in an unrecognized shape.";
+
 // What to do about a UI server answering in a shape it never writes, rendered beneath the headline above on the card and in the error view.
 export const SERVER_FAILURE_GUIDANCE = "Reload this page. If it keeps happening, restart Homebridge and check its log for the reason.";
 
@@ -148,9 +151,27 @@ export const classifyProbeResponse = (response) => {
 
     default:
 
-      return { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
-        message: "The plugin's UI server answered in an unrecognized shape." };
+      return { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error", message: SERVER_FAILURE_MESSAGE };
   }
+};
+
+/* Read the detail a rejected probe request carries, which is the one place such a rejection is interpreted, so every surface that runs the connection check reads
+ * it the same way.
+ *
+ * The bridge rejects with the plain object the host's UI server sends, which carries a message, and a thrown error carries one too, so the message is read off
+ * whatever was thrown rather than off an error alone. A rejection that is itself a string is its own detail. Anything that leaves no non-empty string carries the
+ * unrecognized-shape sentence instead, because rendering an object as text would show the user nothing they can act on.
+ *
+ * @param reason - What the request was rejected with.
+ *
+ * @returns The detail the connection check's failure shows beneath its sentence.
+ */
+export const readProbeRejection = (reason) => {
+
+  const message = reason?.message;
+  const detail = (typeof message === "string") ? message : ((typeof reason === "string") ? reason : "");
+
+  return detail.length ? detail : SERVER_FAILURE_MESSAGE;
 };
 
 /* The verdict of a sidebar entry whose controller left the configuration after the sidebar was built. It is composed here beside the probe verdicts because it is

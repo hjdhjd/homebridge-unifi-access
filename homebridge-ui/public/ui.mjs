@@ -5,7 +5,7 @@
 "use strict";
 
 import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsewhere, controllers, deviceListResult, hasValidIdentity, isControllerListed,
-  makeAccessConfig, primaryController, primaryListedElsewhere, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
+  makeAccessConfig, primaryController, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
 import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
@@ -180,7 +180,7 @@ const requestControllerProbe = async ({ action, address, password, tokens, usern
 
     // The UI server failing to start or respond lands here. Painting into the result line keeps the user on the form with the specific failure, while the
     // framework's toast stays the generic net for consumers without their own handling.
-    action.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to validate your controller connection."], tone: "text-danger" });
+    action.render({ detail: readProbeRejection(err), lines: ["Unable to validate your controller connection."], tone: "text-danger" });
 
     return null;
   }

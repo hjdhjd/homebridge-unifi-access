@@ -174,6 +174,9 @@ export declare const primaryController: (config?: AccessConfig) => AccessControl
 /** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
 export declare const primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
 
+/** The detail a rejected probe request carries: the message it carries, the rejection itself when it is a string, or the unrecognized-shape sentence otherwise. */
+export declare const readProbeRejection: (reason: unknown) => string;
+
 /** The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call. */
 export declare const staleSelectionVerdict: () => AccessProbeFailure;
 
