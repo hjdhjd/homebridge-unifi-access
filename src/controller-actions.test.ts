@@ -1313,6 +1313,17 @@ const SERVER_FAILURE = [ "The plugin's UI server did not answer as expected.",
   "Reload this page. If it keeps happening, restart Homebridge and check its log for the reason." ];
 const CONNECTION_UNVALIDATED = "Unable to validate your controller connection.";
 
+// The sentence the framework's deadline rejects with on expiry, for a check built with a thirty-second bound.
+const DEADLINE_EXPIRED = "The request did not complete within 30 seconds.";
+
+// What the deadline double is handed for one check.
+interface DeadlineCall {
+
+  promise: Promise<unknown>;
+  seconds: number;
+  signal?: AbortSignal;
+}
+
 // One request the bridge double is handed.
 interface BridgeRequest {
 
@@ -1320,29 +1331,45 @@ interface BridgeRequest {
   payload: unknown;
 }
 
-// A built connection check and every request its bridge double was handed.
+// What a row builds the connection check over. The bound has a default, so a row names it only where the row is about it.
+interface ProbeStandOptions {
+
+  answer: () => Promise<unknown>;
+  expiry?: Error;
+  onRequest?: () => void;
+  seconds?: number;
+}
+
+// A built connection check and everything its doubles recorded.
 interface ProbeStand {
 
   check: ReturnType<typeof makeControllerProbe>;
+  deadlines: DeadlineCall[];
   requests: BridgeRequest[];
 }
 
-/* Build the connection check over a bridge double and the real probe classifier, identity rule, and rejection reading.
+/* Build the connection check over a bridge double, a deadline double, and the real probe classifier, identity rule, and rejection reading.
  *
- * The bridge double records each request, runs the row's own step where it has one, and hands back the promise the row's answer makes, so a row decides whether
- * the request fulfills, rejects, or is retired while it is in flight.
+ * The bridge double records each request, runs the row's own step where it has one, and hands back the very promise the row's answer makes, so a row decides
+ * whether the request fulfills, rejects, or is retired while it is in flight, and the deadline can be read for receiving that promise by identity. The deadline
+ * double records what it was handed and answers the promise it was handed, unless the row scripts an expiry, which stands for the framework's deadline expiring
+ * before the bridge answers.
  *
  * @param options.answer    - What the bridge settles the request with.
+ * @param options.expiry    - What the deadline rejects with in place of the bridge's answer, for a row about a check that outlasts its bound.
  * @param options.onRequest - What befalls the check while its request is in flight.
+ * @param options.seconds   - The bound the check is built with.
  *
- * @returns The check and every request its bridge double was handed.
+ * @returns The check and every recorder beneath it.
  */
-function standProbe({ answer, onRequest }: { answer: () => Promise<unknown>; onRequest?: () => void }): ProbeStand {
+function standProbe({ answer, expiry, onRequest, seconds = 30 }: ProbeStandOptions): ProbeStand {
 
+  const deadlines: DeadlineCall[] = [];
   const requests: BridgeRequest[] = [];
   const check = makeControllerProbe({
 
     classifyProbeResponse,
+    deadline: seconds,
     hasValidIdentity,
     readProbeRejection,
     request: (path, payload) => {
@@ -1351,10 +1378,16 @@ function standProbe({ answer, onRequest }: { answer: () => Promise<unknown>; onR
       onRequest?.();
 
       return answer();
+    },
+    withDeadline: async (options) => {
+
+      deadlines.push(options);
+
+      return expiry ? Promise.reject(expiry) : options.promise;
     }
   });
 
-  return { check, requests };
+  return { check, deadlines, requests };
 }
 
 /* The card's identity and a signal no act retires, each of which a row overrides where the row is about it.
@@ -1473,4 +1506,30 @@ test("p8: a signal aborted while the request is in flight answers retired, where
 
   await assertRetired({ answer: async () => ({ devices: [], kind: "connected" }), settlement: "fulfilled" });
   await assertRetired({ answer: async () => Promise.reject(new Error("The UI server did not respond.")), settlement: "rejected" });
+});
+
+test("p9: the deadline is handed the request's own promise, the seconds the check was built with, and the caller's signal itself", async () => {
+
+  const answered = Promise.resolve({ devices: [device(PROBE_SERIAL)], kind: "connected" });
+  const s = standProbe({ answer: () => answered, seconds: 17 });
+  const request = probeRequest();
+
+  await s.check(request);
+
+  assert.equal(s.deadlines.length, 1, "the check bounds its one request once");
+
+  const [deadline] = s.deadlines;
+
+  assert.ok(deadline, "and that bound is read");
+  assert.equal(deadline.promise, answered, "around the very promise the bridge's request answered");
+  assert.equal(deadline.seconds, 17, "with the bound the check was built with");
+  assert.equal(deadline.signal, request.signal, "and with the caller's own signal, so a retired check settles at once");
+});
+
+test("p10: a deadline that expires answers failed with the validation sentence and the deadline's own sentence as detail", async () => {
+
+  const s = standProbe({ answer: async () => new Promise(() => undefined), expiry: new Error(DEADLINE_EXPIRED) });
+
+  assert.deepEqual(await s.check(probeRequest()), { kind: "failed", outcome: { detail: DEADLINE_EXPIRED, lines: [CONNECTION_UNVALIDATED] } },
+    "a UI server that never answers fails as a request that threw, with the deadline's sentence saying how long the check waited");
 });

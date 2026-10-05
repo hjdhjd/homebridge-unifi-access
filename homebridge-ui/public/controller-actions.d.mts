@@ -104,17 +104,23 @@ export declare const makeControllerActions: (injected: {
   toast: Pick<HostToast, "error" | "success" | "warning">; }) => ControllerActions;
 
 /**
- * Build the controller connection check over the UI-server bridge's request, the probe classifier, the rejection's reading, and the identity rule.
+ * Build the controller connection check over the UI-server bridge's request, the framework's deadline, the probe classifier, the rejection's reading, and the
+ * identity rule. A check that outlasts the deadline answers as a request that threw, with the deadline's own sentence as its detail, and a check whose signal
+ * aborts settles at once.
  *
  * @param injected.classifyProbeResponse - The one reading of the UI server's probe answer, which a fulfilled request's outcome is composed from.
+ * @param injected.deadline              - The bound on one check, in seconds.
  * @param injected.hasValidIdentity      - The rule that answers whether an identity is one the plugin can connect with.
  * @param injected.readProbeRejection    - The one reading of a rejected request, which a rejection's detail is composed from.
  * @param injected.request               - The UI-server bridge's request, taking a path and a payload.
+ * @param injected.withDeadline          - The framework's deadline, which races an await against the bound and the caller's signal.
  *
  * @returns The connection check.
  */
 export declare const makeControllerProbe: (injected: {
   classifyProbeResponse: typeof classifyProbeResponse;
+  deadline: number;
   hasValidIdentity: typeof hasValidIdentity;
   readProbeRejection: typeof readProbeRejection;
-  request: (path: string, payload: unknown) => Promise<unknown>; }) => ControllerProbeRequest;
+  request: (path: string, payload: unknown) => Promise<unknown>;
+  withDeadline: (options: { promise: Promise<unknown>; seconds: number; signal?: AbortSignal }) => Promise<unknown>; }) => ControllerProbeRequest;

@@ -26,11 +26,17 @@ const PROBE_DEADLINE = 5;
  * WIRING_DEADLINE settles the envelope provably inside it and a wiring step that hangs against an unresponsive host can never be what makes the settings panel
  * look broken.
  *
- * The per-probe bounds above are what keep the realistic worst case inside this outer guard; this one exists for what they cannot cover, a catalog fetch or a session
- * open that goes pathological. An outer expiry writes nothing at all and the whole pass retries at the next open. A configuration that has already converged never
- * approaches either bound, because its envelope is the catalog fetch and the session open and nothing else.
+ * The migration's per-controller probe bounds above are what keep the realistic worst case inside this outer guard; this one exists for what they cannot cover, a
+ * catalog fetch or a session open that goes pathological. An outer expiry writes nothing at all and the whole pass retries at the next open. A configuration that
+ * has already converged never approaches either bound, because its envelope is the catalog fetch and the session open and nothing else.
  */
 const WIRING_DEADLINE = 8;
+
+/* The bound in seconds on a controller connection check. A check performs a full authentication and then fetches the controller's documents, so the bound sits
+ * well past a slow connection and is reached only by a check whose answer is not coming. A check that outlasts it answers as a request that threw, carrying the
+ * deadline's own sentence, rather than leaving the card waiting on a request that never settles.
+ */
+const CONNECTION_CHECK_DEADLINE = 30;
 
 /* What a controller's details panel says when this session reached it with an API token alone. Such a controller's devices are projected into HomeKit already -
  * the official API lists them and the runtime adopts them - so what credentials add is the controller's own information document, which is the source of the
@@ -118,10 +124,10 @@ const renderVerdict = ({ detail = "", lines = [], row, tone = "" }) => {
   row.replaceChildren(...nodes);
 };
 
-// The controller connection check every card's validate control, every card's Save, and the first-run submit share. The bridge's request is reached through a
-// closure rather than handed over as a reference, because the method reads its own object.
-const requestControllerProbe = makeControllerProbe({ classifyProbeResponse, hasValidIdentity, readProbeRejection,
-  request: (path, body) => homebridge.request(path, body) });
+// The controller connection check every card's validate control, every card's Save, and the first-run submit share, bounded by CONNECTION_CHECK_DEADLINE. The
+// bridge's request is reached through a closure rather than handed over as a reference, because the method reads its own object.
+const requestControllerProbe = makeControllerProbe({ classifyProbeResponse, deadline: CONNECTION_CHECK_DEADLINE, hasValidIdentity, readProbeRejection,
+  request: (path, body) => homebridge.request(path, body), withDeadline });
 
 // Validate our Access sign-in and commit it.
 const firstRunOnSubmit = async ({ commit, config }) => {

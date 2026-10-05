@@ -9,12 +9,13 @@
  * through a small handle, so the rule deciding whether an answer is worth keeping is stated once rather than at every site that fills one, and the seed, the
  * delete, and the generation bump each action makes stay out of reach of every reader that has no business making them.
  *
- * The module takes no imports at all and names no browser global. Every reach beyond it is handed in: the UI-server bridge's request, the probe classifier, the
- * rejection's reading, and the identity rule the connection check runs over, and the connection check, the configuration interpreters, the listed-address rule and
- * its sentence, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the status-context send, and the
- * device-list decoration the save and the removal run over. A save runs through the save flow its card carries. That is what lets the whole of it run under node
- * against recording doubles and the real save flow, which puts a swapped toast severity, a put-back that restores the wrong address, a seed that lands after its
- * write, and a connection check that drops a failure's sentence in front of a gate rather than in front of a user.
+ * The module takes no imports at all and names no browser global. Every reach beyond it is handed in: the UI-server bridge's request, the framework's deadline,
+ * the probe classifier, the rejection's reading, and the identity rule the connection check runs over, and the connection check, the configuration interpreters,
+ * the listed-address rule and its sentence, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the
+ * status-context send, and the device-list decoration the save and the removal run over. A save runs through the save flow its card carries. That is what lets
+ * the whole of it run under node against recording doubles and the real save flow, which puts a swapped toast severity, a put-back that restores the wrong
+ * address, a seed that lands after its write, and a connection check that drops a failure's sentence or loses its bound in front of a gate rather than in front of
+ * a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
@@ -455,9 +456,9 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
 };
 
 /**
- * Build the controller connection check over the page's own reach into the UI-server bridge. The check validates a controller identity against the UI server and
- * answers what came of it, and every card's validate control, every card's Save, and the first-run submit share it so none of them can drift apart. The browser
- * cannot reach the Access controller directly, so the request bridges through the plugin's UI server.
+ * Build the controller connection check over the page's own reach into the UI-server bridge and the framework's deadline. The check validates a controller
+ * identity against the UI server and answers what came of it, and every card's validate control, every card's Save, and the first-run submit share it so none of
+ * them can drift apart. The browser cannot reach the Access controller directly, so the request bridges through the plugin's UI server.
  *
  * It answers an outcome and reports nothing itself: passed with the classified success, failed with the sentences and the detail that a missing address, an
  * identity the plugin would refuse, a refused connection, or a request that threw calls for, or retired when the signal it was handed aborted before the answer
@@ -468,18 +469,24 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
  * The signal is the caller's action's own, so an edit to the card's fields or a newer act on the card retires the request. Starting that action is the caller's
  * act: the caller speaks through it once this answers, so a page holding several cards speaks each answer on the card it belongs to; starting blanks the line
  * before the request rather than after it, so a check that never answers cannot leave an older verdict beside newer input; and a Save and the first-run submit
- * each ask whether the address is already listed before this check begins. The bridge offers no cancellation, so a retired request still runs to its answer at
- * the host, where that answer is dropped.
+ * each ask whether the address is already listed before this check begins.
+ *
+ * The check is bounded, because the bridge has no timeout of its own and a UI server that never answers would otherwise leave the card waiting for good. A check
+ * that outlasts the bound answers as a request that threw, with the deadline's own sentence as its detail, which the rejection's reading takes from the deadline's
+ * error. The deadline takes the caller's signal, so a retired check settles at once rather than waiting out the bound. The bridge offers no cancellation, so a
+ * retired or expired request still runs to its answer at the host, where that answer is dropped.
  *
  * @param injected.classifyProbeResponse - The one reading of the UI server's probe answer, which a fulfilled request's outcome is composed from.
+ * @param injected.deadline              - The bound on one check, in seconds.
  * @param injected.hasValidIdentity      - The rule that answers whether an identity is one the plugin can connect with.
  * @param injected.readProbeRejection    - The one reading of a rejected request, which a rejection's detail is composed from.
  * @param injected.request               - The UI-server bridge's request, taking a path and a payload.
+ * @param injected.withDeadline          - The framework's deadline, which races an await against the bound and the caller's signal.
  *
  * @returns The connection check.
  */
-export const makeControllerProbe = ({ classifyProbeResponse, hasValidIdentity, readProbeRejection, request }) => async ({ address, password, signal, tokens,
-  username, verifyTls }) => {
+export const makeControllerProbe = ({ classifyProbeResponse, deadline, hasValidIdentity, readProbeRejection, request, withDeadline }) => async ({ address,
+  password, signal, tokens, username, verifyTls }) => {
 
   if(!address?.length) {
 
@@ -494,7 +501,8 @@ export const makeControllerProbe = ({ classifyProbeResponse, hasValidIdentity, r
       "That is a local user's username and password, an Access console API token, or both." ] } };
   }
 
-  const [settled] = await Promise.allSettled([request("/getDevices", { address, password, tokens, username, verifyTls })]);
+  const [settled] = await Promise.allSettled([withDeadline({ promise: request("/getDevices", { address, password, tokens, username, verifyTls }), seconds: deadline,
+    signal })]);
 
   // An edit to this card's fields, or a newer validation or Save on it, retires this one. A retired request answers nothing to show, whether the bridge answered
   // or failed, so it never paints over what the newer input or action is showing, and a Save waiting on it writes nothing. Closing, re-populating, or hiding the
@@ -504,8 +512,8 @@ export const makeControllerProbe = ({ classifyProbeResponse, hasValidIdentity, r
     return { kind: "retired" };
   }
 
-  // The UI server failing to start or respond lands here. Answering the specific failure keeps it on the card for a user still looking at it, while the framework's
-  // toast stays the generic net for consumers without their own handling.
+  // The UI server failing to start or to respond within the bound lands here. Answering the specific failure keeps it on the card for a user still looking at it,
+  // while the framework's toast stays the generic net for consumers without their own handling.
   if(settled.status === "rejected") {
 
     return { kind: "failed", outcome: { detail: readProbeRejection(settled.reason), lines: ["Unable to validate your controller connection."] } };
