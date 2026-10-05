@@ -200,7 +200,6 @@ const firstRunOnSubmit = async ({ commit, config }) => {
   if(primaryListedElsewhere(config, identity)) {
 
     firstRunCard.verdict.render(listed);
-    homebridge.hideSpinner();
 
     return false;
   }
@@ -208,8 +207,6 @@ const firstRunOnSubmit = async ({ commit, config }) => {
   const probe = await requestControllerProbe({ ...identity, action });
 
   if(!probe) {
-
-    homebridge.hideSpinner();
 
     return false;
   }
@@ -238,7 +235,6 @@ const firstRunOnSubmit = async ({ commit, config }) => {
      */
     firstRunCard.verdict.render(isControllerListed(err) ? listed : { detail: (err instanceof Error) ? err.message : String(err),
       lines: ["Unable to complete the plugin configuration."], tone: "text-danger" });
-    homebridge.hideSpinner();
 
     return false;
   }
