@@ -11,7 +11,7 @@ import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerat
 import { TOKEN_REFUSED_WARNING, makeControllerActions } from "./controller-actions.mjs";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
-import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui-status.js";
+import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
