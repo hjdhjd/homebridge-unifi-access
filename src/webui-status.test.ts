@@ -3,7 +3,7 @@
  * webui-status.test.ts: Tests for the webUI live-status adapter - the context narrowing, the error classification, the row policy, the connect-on-view lifecycle,
  * the emit chokepoint's session guard, the frame identity convention, the resolution layer, and the connection wiring.
  *
- * The fixtures drive the library's real reducer through createStateStore rather than hand-mirroring its fold, and the client boundary is an injected stub wrapped
+ * The fixtures drive unifi-access's real reducer through createStateStore rather than hand-mirroring its fold, and the client boundary is an injected stub wrapped
  * around that real store, so what the arms assert is the behavior the plugin actually gets. The device MAC addresses are deliberately colon-bearing lowercase - the
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
@@ -31,8 +31,8 @@ const ADDRESS = "192.0.2.10";
 // The controller uptime, in seconds, that renders as "127.6 day" under the library's day tier - the row's fixed arithmetic input.
 const CONTROLLER_UPTIME = 11023200;
 
-// How many macrotask boundaries an arm crosses before reading a dispatched frame: the observe loops register and drain on the microtask and immediate queues, so
-// this constant holds as many immediates as the dispatch chain needs to settle.
+// How many macrotask boundaries an arm crosses before reading a dispatched frame. The observe loops register and drain entirely on the microtask queue, so one
+// settle turn crosses the whole cascade; the second turn is a deliberate margin against a macrotask hop the dispatch chain might gain.
 const DISPATCH_SETTLE_TURNS = 2;
 
 // A managed, online hub whose position wiring reads live and closed and whose lock reads locked - the capture corpus's plain UA Hub shape, so the topology seed
@@ -64,7 +64,9 @@ function reader(uniqueId: string, mac: string, overrides: Record<string, unknown
   return readerRecord({ configs: [], is_online: true, mac, name: "Reader " + uniqueId, unique_id: uniqueId, ...overrides });
 }
 
-// Classify one captured-shape door-state notification for dispatch, so an entry moves through the real reducer exactly as a live controller would move it.
+// Classify one captured-shape door-state notification for dispatch, so an entry moves through the real reducer exactly as a live controller would move it. The
+// packet goes through unknown because the captured payload is typed wider than the packet's JSON-value data, and classifyPacket narrows whatever it is handed at
+// runtime, as it does every packet off the wire.
 function doorEvent(doorId: string, state: Record<string, unknown>): NonNullable<ReturnType<typeof AccessClient.classifyPacket>> {
 
   const packet = {
@@ -89,7 +91,8 @@ function doorEvent(doorId: string, state: Record<string, unknown>): NonNullable<
 
 /* Classify one captured-shape device update carrying a fresh configuration row set, which is how a method being switched on or off at the controller reaches a
  * device record. The older dialect already speaks the bootstrap vocabulary, so the classifier passes this payload through untranslated and the reducer merges it
- * onto the held record, where an array member replaces wholesale - so the rows this states are the rows the record then carries.
+ * onto the held record, where an array member replaces wholesale - so the rows this states are the rows the record then carries. Its packet goes through unknown
+ * for the reason doorEvent's does.
  */
 function deviceConfigsEvent(deviceId: string, entries: Record<string, string>): NonNullable<ReturnType<typeof AccessClient.classifyPacket>> {
 
@@ -109,11 +112,12 @@ function deviceConfigsEvent(deviceId: string, entries: Record<string, string>): 
   return event;
 }
 
-/* A client stub over a real state store: the connection registrar the wiring arms fire directly, the two handle lookups the resolution layer reads, the capabilities
+/* A client stub over a real state store: the connection registrar the wiring arms fire directly, the handle lookups the resolution layer reads, the capabilities
  * a connect establishes and the controller row renders, and a counted disposal. The counters-not-booleans convention is what tells a no-op from a double call. An
  * entry marked as a port is answered by the access-point lookup alone, which is how the real client separates one door-serving port of an Enterprise hub from a hub
- * that answers for itself. The stub reaches the port through a cast, so the compiler forces none of these members: the capabilities member is spelled here
- * deliberately, and the arm that reads a controller view's API row off NON-default capabilities is what keeps its absence from passing silently.
+ * that answers for itself. An entry marked throwOnDoorId answers a handle whose doorId getter throws the ReferenceError a removal window raises, which is how an
+ * arm reaches the resolution layer's absorb path. The stub reaches the port through a cast, so the compiler forces none of these members: the capabilities member
+ * is spelled here deliberately, and the arm that reads a controller view's API row off NON-default capabilities is what keeps its absence from passing silently.
  */
 function makeClient(store: StateStore, hubs: { doorId?: string; port?: boolean; record?: AccessStateDevice; throwOnDoorId?: boolean }[] = [],
   capabilities: Pick<AccessCapabilities, "mode" | "official"> = { mode: "dual", official: true }): { client: StatusFeedClient;
@@ -162,7 +166,7 @@ function makeClient(store: StateStore, hubs: { doorId?: string; port?: boolean; 
     recordId: hub.record?.unique_id
   }));
 
-  // Both lookups are keyed on the identity of the record each handle was built from, which is the identity the real client answers them by.
+  // Each lookup is keyed on the identity of the record its handle was built from, which is the identity the real client answers them by.
   const handleFor = (id: string, port: boolean): StatusFeedHubHandle | undefined => {
 
     return hubHandles.find((entry) => (entry.port === port) && (entry.recordId === id))?.handle;
@@ -197,7 +201,8 @@ function forSerial(frames: StatusEvent[], serial: string): Exclude<StatusEvent, 
 }
 
 // The id-and-value projection of a row list, which is what most row assertions compare. A choices row states no value, so it projects its list the way the panel
-// draws it - each choice's label behind a checked or unchecked box - which keeps one projection honest across both row forms rather than casting one into the other.
+// draws it - each choice's label behind a checked or unchecked box - which keeps one projection honest across the text and choices forms rather than casting one
+// into the other.
 function idValues(rows: readonly StatusRow[]): string[][] {
 
   return rows.map((row) => (row.kind === "choices") ?
@@ -398,7 +403,7 @@ test("the row policy answers the tamper row all three ways", () => {
 
   /* The tampering alert setting gates the reading beside it: the hardware reports no tamper input while the alert is off, so its input row is stale rather than
    * quiet and the row falls back to the dash. The raised input row is deliberately the same one that renders "Detected" with the alert on, so a reading that
-   * ignores the setting renders "Detected" here where this expects the dash. Any setting value but on gates, because a spelling the controller has not been
+   * ignores the setting renders "Detected" here where this expects the dash. Any setting value but true gates, because a spelling the controller has not been
    * observed to write is not guessed at.
    */
   assert.deepEqual(rowsFor(tamperHub({ "tamper_event": "true", "tampering": "true" })), [ [ "lock", "" ], [ "door", "" ], [ "tamper", "Detected" ] ]);
@@ -457,7 +462,8 @@ test("the row policy answers a reader its access methods row alone and the API a
   assert.deepEqual(idValues(composeStatusRows({ capabilities: { mode: "dual", official: true }, kind: "controller", state })),
     [ [ "api", "Credentials + API token" ], [ "uptime", "" ] ]);
 
-  // ...and a fetched document answers the rendered uptime.
+  // ...and a fetched document answers the rendered uptime. Only host.uptime is meaningful to selectControllerUptime, and the rest of the document is shape the row
+  // policy never reads.
   store.applyRefreshDocuments({ controller: { host: { uptime: CONTROLLER_UPTIME } } as unknown as AccessControllerConfig,
     topology: doorsTopology([{ devices: [record], id: "door1" }]) });
   assert.deepEqual(idValues(composeStatusRows({ capabilities: { mode: "dual", official: true }, kind: "controller", state: store.snapshot() })),
@@ -513,7 +519,7 @@ test("the access methods row lists only the methods the hardware's capabilities 
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "pin_code" ], configs: configRows({ deviceId: "reader1", entries: enabled }) })),
     [[ "methods", "[x] PIN" ]]);
 
-  // The array-form capability names a family rather than a flag: either member offers the one Mobile switch, so either member lists it.
+  // The array-form capability names a family rather than a flag: any member of the family offers the one Mobile switch, so any member lists it.
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "mobile_unlock_ver2" ],
     configs: configRows({ deviceId: "reader1", entries: enabled }) })), [[ "methods", "[x] Mobile" ]]);
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "support_mobile_unlock" ],
@@ -769,7 +775,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   const store = createStateStore({});
 
   /* A plain hub on one door and a building-hosted Enterprise hub on the other. The Enterprise record carries the building as its location, which is the shape the
-   * library classifies as building-hosted, so what this plugin projects is the hub's port rather than the hub - and a view has to follow that split exactly.
+   * unifi-access classifies as building-hosted, so what this plugin projects is the hub's port rather than the hub - and a view has to follow that split exactly.
    */
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([
     { devices: [wiredHub("device1", MAC_ONE)], id: "door1" },
@@ -803,7 +809,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
 
   assert.deepEqual(idValues(snapshot.rows), [ [ "lock", "Locked" ], [ "door", "Closed" ] ]);
 
-  /* The port's own liveness. A port's identity is never a key in the raw devices map, so a liveness read left on that map answers undefined here and reports an
+  /* The port's own liveness. A port's identity is never a key in the raw devices map, so a liveness read against that map answers undefined here and reports an
    * online port offline - at establishment and on every reboot or recovery repush.
    */
   const truth = frameOf(establishment, 2, "availability");
@@ -818,8 +824,8 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   assert.deepEqual(forSerial(frames, SERIAL_TWO + "-PORT1"), [], "an unrelated door's change must leave a port's view silent");
 
   // The hosting hub's own serial resolves no member, because the plugin projects no device for it. The view still establishes - the panel answers whatever it can
-  // for a serial the registry knows - but it carries none of the rows the parent's own record would answer, which is what a resolution still scanning the raw
-  // devices map would hand back instead.
+  // for a serial the registry knows - but it carries none of the rows the parent's own record would answer, which is what a resolution scanning the raw devices
+  // map would hand back instead.
   frames.length = 0;
   await feed.view(SERIAL_TWO);
   await settle(DISPATCH_SETTLE_TURNS);
@@ -831,7 +837,8 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   assert.deepEqual(parent.map((frame) => frame.kind), [ "snapshot", "availability" ]);
   assert.deepEqual(idValues(frameOf(parent, 0, "snapshot").rows), []);
 
-  // The degraded shape a token-only client's views take, described rather than checked: a view holding no record answers the serving connection's own liveness.
+  // A view holding no record answers the serving connection's own liveness - the same recordless path a token-only client's views take, exercised here through
+  // the Enterprise parent.
   assert.equal(frameOf(parent, 1, "availability").online, true);
 });
 
@@ -907,7 +914,8 @@ test("a superseded establish emits nothing for its session and releases the clie
 
   feed.context(contextRequest([SERIAL_ONE]));
 
-  // The establish parks at the gated connect; a view switch supersedes it before its snapshot ever pushes.
+  // The establish parks at the gated connect; a view switch supersedes it before its snapshot ever pushes. The successor is a serial the registry does not hold,
+  // so it supersedes without connecting and the single disposal counted below belongs to the stale establish alone.
   const first = feed.view(SERIAL_ONE);
 
   await settle(DISPATCH_SETTLE_TURNS);
@@ -1312,7 +1320,7 @@ test("a UA Gate view drives the shared discovery through the live client and ass
   assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "lock", "Unlocked" ], [ "door", "Open" ], [ "sidelock", "Locked" ],
     [ "sidedoor", "Closed" ] ]);
 
-  // Both role loops are live: the side door's change surfaces on the side rows alone.
+  // The side role's loop is live: the side door's change surfaces on the side rows alone.
   frames.length = 0;
   store.dispatch(doorEvent("door2", { dps: "open", dps_connected: true, lock: "locked" }));
   await settle(DISPATCH_SETTLE_TURNS);

@@ -4,16 +4,17 @@
  */
 "use strict";
 
-/* The single home for our plugin-config shape. Every function here is a pure interpreter of the primary platform-config entry the webUI framework injects into our
- * hooks - no I/O, no global reach. The framework owns reading and writing the persisted config through its session; this module owns the Access-specific knowledge
- * of what a controller is, what counts as an identity it can connect with, and what the UI server's probe answered. Keeping that knowledge in one place means a
- * config-shape change is a single edit, and it keeps every hook in ui.mjs a declarative one-liner over these helpers.
+/* The single home for our plugin-config shape. Every function here is pure - no I/O, no global reach - and reads the primary platform-config entry the webUI
+ * framework injects into our hooks or what the UI server's probe answered. The framework owns reading and writing the persisted config through its session; this
+ * module owns the Access-specific knowledge of what a controller is, what counts as an identity it can connect with, and what the UI server's probe answered.
+ * Keeping that knowledge in one place means a config-shape change is a single edit, and it keeps the hooks in ui.mjs from reading the entry's shape themselves:
+ * they reach its controllers and its options only through these helpers.
  *
  * Two settings substrates meet here. A feature option is where a setting lives, and a set of per-controller configuration properties are a second home the plugin
- * honors so that a configuration nobody has opened the webUI on keeps working. Reconciling the two is the migration's whole job: it moves each property's value into
- * the option that supersedes it and rebuilds the item without it. The module takes no imports at all - the engine class, the served catalog index, the scope
- * enumerator, and the identifier repair are handed in - so the whole of it is exercisable under node against the real engine and the real catalog, with no network
- * and no DOM.
+ * honors so that a configuration nobody has opened the webUI on keeps working. The migration reconciles the two, moving each property's value into the option that
+ * supersedes it and rebuilding the item without it, and the same pass folds the retired 1.x per-member booleans into the lists that supersede them and carries the
+ * entries keyed by a controller's address onto its MAC address. The module takes no imports at all - the engine class, the served catalog, and every framework
+ * helper the interpreters use are handed in - so the whole of it is exercisable under Node against the real engine and the real catalog, with no network and no DOM.
  */
 
 /* The keys a controllers[] item converges to: everything the plugin's own controller options type declares, less the properties that migrate into feature
@@ -117,12 +118,13 @@ const STALE_SELECTION_MESSAGE = "Its entry left the configuration after the side
 // What to do about a sidebar entry whose controller left the configuration, rendered as the error view's guidance.
 const STALE_SELECTION_GUIDANCE = "Refresh the controller list to take it off the sidebar.";
 
-/* Read the UI server's device probe, which is the ONE place the three-state response protocol is interpreted.
+/* Read the UI server's device probe, which is the ONE place the server's kind-tagged response protocol is interpreted.
  *
- * The server answers a kind-tagged union rather than a device list the browser has to interpret, because the two successful outcomes differ in what a user can do
- * with them rather than in what they look like. Both list devices: a credentialed connect reads the topology document and leads with the controller itself, while a
- * token-only connect reads the official API's adopted inventory and has no console identity to lead with. Telling them apart is what lets the page explain that
- * door-level accessories still need credentials, without ever reporting a working controller as broken.
+ * The server answers a kind-tagged union rather than a device list the browser has to interpret, because its successful outcomes differ in what a user can do with
+ * them rather than in what they look like. Each leads with the controller's own row: a credentialed connect fills it from the controller's information document and
+ * follows it with the topology document's devices, while a token-only connect, which never reaches that document, fills it with the configured address and empty
+ * values and follows it with the official API's adopted inventory. Telling them apart is what lets the page say what a local user's credentials would add - the
+ * controller's own document, with its name, its uptime, and an Enterprise hub's ports - without ever reporting a working controller as broken.
  *
  * The verdict carries the device list, the outcome tag, and the failure text together, so each consumer reads the one field it needs without re-deriving the
  * outcome: the connection editor treats anything but a failure as a valid login, while the device view hands the list and the text straight to the framework. A
@@ -175,8 +177,8 @@ export const readProbeRejection = (reason) => {
 };
 
 /* The verdict of a sidebar entry whose controller left the configuration after the sidebar was built. It is composed here beside the probe verdicts because it is
- * one: every device-list outcome the page hands the framework goes through the one result composition below, so the copy for this failure lives with the copy for
- * every other. Fresh per call, so no two results share a device array.
+ * one: every device-list outcome the page hands the framework for a selected controller goes through the one result composition below, so the copy for this
+ * failure lives with the copy for every other. Fresh per call, so no two results share a device array.
  */
 export const staleSelectionVerdict = () => ({ devices: [], guidance: STALE_SELECTION_GUIDANCE, headline: STALE_SELECTION_HEADLINE, kind: "error",
   message: STALE_SELECTION_MESSAGE });
@@ -205,9 +207,11 @@ export const deviceListResult = (verdict) => {
   return result;
 };
 
-/* Compose one controller item from a base item and the identity an editor is writing onto it. Every key the base holds carries through, which is what keeps a
- * credential edit from discarding a token, a TLS preference, or a per-controller setting the migration has not retired yet. Each identity field the user left empty
- * is deleted rather than stored as an empty string, so a cleared field reads exactly as an absent one everywhere the configuration is consulted.
+/* Compose one controller item from a base item and the identity an editor is writing onto it. Every key the base holds that the identity does not write carries
+ * through, which is what keeps a credential edit from discarding the item's name or a per-controller setting the migration has not retired yet. The identity writes
+ * the identity fields, the tokens, and the TLS preference whole, so the base's own token and TLS preference survive an edit only as the editor carries them. Each
+ * identity field the user left empty is deleted rather than stored as an empty string, so a cleared field reads exactly as an absent one everywhere the
+ * configuration is consulted.
  *
  * The tokens and the TLS preference are written by arms of their own. Neither is a string, so the presence test the loop applies would read undefined for both and
  * delete them from every item an editor touched.
@@ -401,8 +405,8 @@ export const withPrimaryIdentity = (config, identity) => {
 };
 
 /* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, and the predicate
- * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the catalog builder, the two enumerators, the list
- * formatter, and the identifier repair is what keeps this module import-free and exercisable under node against the real engine and the real catalog, rather than
+ * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the catalog builder, the entry enumerators, the list
+ * formatter, and the identifier repair is what keeps this module import-free and exercisable under Node against the real engine and the real catalog, rather than
  * against a stand-in that could drift from either.
  *
  * @param injected.FeatureOptions              - The feature-option engine class.
@@ -418,8 +422,9 @@ export const withPrimaryIdentity = (config, identity) => {
 export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId }) => {
 
-  // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: the engine's set-option path is
-  // a pure transform that composes a fresh array and reassigns its own field, so the array it was given is never written to.
+  // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: every engine transform this
+  // module drives - the option set, the scope clear, the scope move - composes a fresh array and reassigns its own field, and where this module assigns the
+  // engine's entries itself it hands over a fresh filtered array, so the array it was given is never written to.
   const engineFor = (config) => new FeatureOptions(catalog.categories, catalog.options, Array.isArray(config?.options) ? config.options : []);
 
   /* The served catalog's options with every retired boolean added back to the category its name begins with, each as the default-on boolean it was. This is what the
@@ -444,8 +449,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
     return options;
   };
 
-  /* The served catalog's own entry for an option name, or undefined when the catalog declares no such option. Every question the migration asks of the catalog
-   * resolves through this one walk, so no two readings of it can disagree.
+  /* The served catalog's own entry for an option name, or undefined when the catalog declares no such option. An entry with an empty name is its category's own
+   * option, addressed by the bare category name exactly as the framework's expandOption composes it. Every question about one option's own declaration - its
+   * default state and its registered value - resolves through this one walk, so no two readings of a declaration can disagree.
    */
   const catalogEntry = (option) => {
 
@@ -463,12 +469,13 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
     return undefined;
   };
 
-  // The value the catalog registers as an option's default, read from the served entry's own defaultValue field. The engine exposes a same-named method that answers
-  // a different question - the boolean enabled-state default - so this reads the catalog data instead.
+  // The value the catalog registers as an option's default, read off the served entry's own defaultValue field through the walk above. The engine's same-named
+  // method answers a different question - the boolean enabled-state default - while its valueDefault reads this same declaration, rendered as a string.
   const registeredDefault = (option) => catalogEntry(option)?.defaultValue;
 
   // Whether an option is enabled by default, which is what decides whether its registered default is already the answer the user gets. A default-on value option
-  // resolves to that default when nothing is configured; a default-off one resolves to nothing at all, and the plugin falls back to a constant of its own.
+  // resolves to that default when nothing is configured; a default-off one resolves to nothing of its own, so its registered default is never the answer an
+  // unconfigured read gets.
   const defaultsOn = (option) => catalogEntry(option)?.default === true;
 
   /* Whether a per-controller legacy value composes a controller-scoped entry. Configured-ness is asked through scope() rather than exists(), because the compose
@@ -476,8 +483,8 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
    * plugin's own MQTT resolution consults, so this module's question and the runtime's stay the same question.
    *
    * A value byte-equal to the option's registered default composes nothing, but only for an option that is on by default: that is the only kind whose unconfigured
-   * read already answers the registered default, so an entry restating it would manufacture configuration out of nothing. The MQTT topic prefix is the one such
-   * option here, and reading the default off the catalog rather than naming it keeps that comparison honest if the plugin ever changes what it publishes under.
+   * read already answers the registered default, so an entry restating it would manufacture configuration out of nothing. The MQTT topic prefix is such an
+   * option, and reading the default off the catalog rather than naming it keeps that comparison honest if the plugin ever changes what it publishes under.
    */
   const composesScoped = ({ engine, mac, option, value }) => {
 
@@ -503,7 +510,8 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
    *
    * A device-scoped composition inherits from the GLOBAL scope and never from its controller's, because the configuration carries no topology: which controller a
    * device belongs to is unknowable without probing every one of them, and making every page open do that to serve a one-time move is a trade nobody would take.
-   * The reading errs only for a family carrying entries at all three scopes at once, where the controller-scoped one is passed over.
+   * The reading errs for a family carrying entries both at a controller's scope and at the scope of a device beneath it, whether or not the global scope carries
+   * one: the device's composition passes over its controller's entries and reads the global answer in their place.
    *
    * @param engine            - The served engine every composed list is written through, and whose entries the retired names are dropped from.
    * @param configuredOptions - The raw configured-options array as the user wrote it, which is what the composition reads.
@@ -518,7 +526,8 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
     const legacyEngine = new FeatureOptions(catalog.categories, options, configuredOptions);
 
     // Whether a raw entry addresses any retired name, asked through the legacy enumerator over that entry alone rather than by matching text, so every spelling the
-    // grammar accepts is caught by the same reading that composed from it.
+    // grammar accepts is caught by the same reading that composed from it. The loop is how a generator is asked whether it yields anything: it answers true on the
+    // first entry and false when there is none.
     const retired = (rawEntry) => RETIRED_FAMILIES.some((family) => family.members.some(([ , option ]) => {
 
       for(const _entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions: [rawEntry], option })) {
@@ -536,7 +545,10 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
       const members = family.members.map(([member]) => member);
       const selectionAt = (scope) => family.members.filter(([ , option ]) => legacyEngine.test(option, scope || undefined)).map(([member]) => member);
 
-      // The global scope is always composed, because a retired entry there is what every named scope's composition is measured against.
+      /* The global scope is always composed, because a retired entry there is what every named scope's composition is measured against. Its key in this set is the
+       * empty string, which becomes no scope at all wherever it is handed to the engine. Every named scope is collected in lower case: the storage format matches a
+       * scope identifier without regard to case, so every spelling of one scope composes once, and the composed entry is written in the folded spelling.
+       */
       const scopes = new Set([""]);
 
       for(const [ , option ] of family.members) {
@@ -591,9 +603,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
 
   /* The scope identifier a configured address answers by, or null for an address there is no identity to compose from. A configured item's address is typed
    * unknown because a hand-edited configuration file can carry anything under that name, and the framework's repair throws on a value that is not a string - so
-   * the string test runs first and an item with no usable address simply has no address identity. An empty string names no identity either, because the engine
-   * refuses an empty scope identifier with a throw of its own, so the repair it would refuse never runs. Every reader of that identity here asks through this one
-   * walk.
+   * the string test runs first and an item with no usable address simply has no address identity. An empty string names no identity either: the repair answers it
+   * empty, the engine reads an empty identifier as addressing nothing, and a scope move refuses one as its destination with a throw, so it is answered null here
+   * rather than handed on. Every reader of that identity here asks through this one walk.
    */
   const addressIdentity = (address) => (((typeof address === "string") && address.length) ? scopeSafeId(address) : null);
 
@@ -617,8 +629,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
      * The entry probe runs only for an item whose address is a string, on the same reading the migration's own move takes: an item with no usable address has no
      * address identity and answers on its legacy property alone.
      *
-     * A configuration we cannot parse answers the empty array rather than throwing, on the same terms the migration declines one: the caller's next move is a
-     * network probe, and there is nothing here worth probing for.
+     * A controllers field we cannot parse answers the empty array rather than throwing: the caller's next move is a network probe, and there is nothing here worth
+     * probing for. An options field we cannot parse is read as carrying no entries, so an item is named on its legacy properties alone, although the migration
+     * then declines the whole pass those probes serve.
      *
      * @param config - The platform configuration entry.
      *
@@ -760,18 +773,20 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
       return Object.keys(patch).length ? patch : null;
     },
 
-    /* Produce the patch that removes one controller, with the settings sweep the user chose.
+    /* Produce the patch that removes one controller, with the settings sweep the user chose. Every item stored at exactly the removed address leaves with it,
+     * since each of them reaches the same controller.
      *
      * The two halves are deliberately separable. Dropping the item is what removal means and always happens; stripping the entries is the user's own follow-on
      * choice, because the settings they configured for those devices are worth keeping when a controller is being re-added under a new address, and worth
-     * deleting when it is gone for good. An empty MAC set therefore carries no options array at all, which leaves every configured entry exactly where it was.
+     * deleting when it is gone for good. An empty sweep set therefore carries no options array at all, which leaves every configured entry exactly where it was.
      *
      * The engine's scope clear is the one answer to which entries address an identity - it folds case and reads every spelling the resolver reads, the bare
      * enable, the canonical value form, and the legacy dot form alike - so the plugin runs it once per swept identity rather than deciding for itself what an
      * entry addresses. The survivors come back in the engine's canonical spelling, exactly as a save through the engine already leaves them.
      *
      * @param config  - The platform configuration entry.
-     * @param removal - The address of the controller to drop, and the MAC addresses whose entries to strip with it.
+     * @param removal - The address of the controller to drop, and the scope identities whose entries to strip with it: the decorated serials the UI server
+     *                  stamped on the controller's row and on every device it listed.
      *
      * @returns The patch for the session's commit to merge onto the platform entry.
      */

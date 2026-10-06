@@ -54,10 +54,10 @@ interface AccessEventDeviceUpdateV2 {
  * option, and the topic of one input are spelled together. The label is carried in the title case a service name wants; the log lines derive the other casings they
  * need from it, so each input is spelled here exactly once.
  *
- * The member is the name this input answers to in both of the hub's pick lists and the suffix its reserved subtype is composed from, typed against the policy
+ * The member is the name this input answers to in each of the hub's pick lists and the suffix its reserved subtype is composed from, typed against the policy
  * module's own member names so a spelling that names no member is a compile error here rather than a sensor that silently never appears.
  *
- * The door position sensor is deliberately not one of them. All three of the things that shape a terminal input differ for it - where its eligibility comes from,
+ * The door position sensor is deliberately not one of them. Every one of the things that shape a terminal input differs for it - where its eligibility comes from,
  * where its state comes from, and how it reaches HomeKit - so it is configured and updated on its own rather than forced through a loop that would have to special
  * case it at every step.
  */
@@ -79,9 +79,9 @@ type AccessEventTopic = "doorbell" | "sidedoorUnlock" | "telemetry" | "unlock";
  */
 type AccessStateTopic = Exclude<keyof typeof mqttTopics & string, "availability" | AccessEventTopic>;
 
-/* The whole sensor member table, as the domain every read of the selection is taken against. It is the WHOLE table and never a per-model narrowing: a retired
- * per-sensor option answered true for a hub of any model, so reading against everything is what keeps an unconfigured hub of a model no table names carrying every
- * sensor its wiring supports and leaves the capability evidence the one thing that decides. The narrowing to a model is the settings page's job alone.
+/* The whole sensor member table, as the domain every read of the selection is taken against. It is the WHOLE table and never a per-model narrowing, so an
+ * unconfigured hub of any model - one no table names included - carries every sensor its wiring supports, and the capability evidence alone decides. The narrowing
+ * to a model is the settings page's job alone.
  */
 const HUB_SENSOR_DOMAIN = hubSensorChoices().map(choice => choice.value);
 
@@ -142,8 +142,8 @@ interface DrivenDoor { isSideDoor: boolean; locationId: string }
 // a UA Gate the way it does for other hub types, so this borrows the gate's own default travel duration as the closest available estimate of when the gate
 // has swung shut again.
 const AUTO_LOCK_DELAY_MS = 5000;
-// How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the controller
-// sees the correction as a fresh value rather than as a race against the write it just made.
+// How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the HomeKit
+// client sees the correction as a fresh value rather than as a race against the write it just made.
 const CHARACTERISTIC_REVERT_DELAY_MS = 50;
 // How long a dispatched doorbell ring or cancel waits before settling the trigger switch back onto the mirrored ring state: long enough for the controller's own
 // ring notification to arrive and win, short enough that a ring the notification stream never confirms is corrected while the user is still looking at the switch.
@@ -154,6 +154,9 @@ const GATE_TRANSITION_DURATION_MS = 5000;
 // The key the main door's transition timer is tracked under. It is stated once so the arm, the re-arm, and the cancel can never name different timers.
 const DOOR_TRANSITION_TIMER_KEY = "door-transition";
 
+/* One UniFi Access hub or reader as a HomeKit accessory: its door presentation, sensors, triggers, access method switches, doorbell, and MQTT surface, all driven
+ * from the controller's live state.
+ */
 export class AccessHub extends AccessDevice {
 
   private _hkDpsState: CharacteristicValue;
@@ -161,7 +164,10 @@ export class AccessHub extends AccessDevice {
   private _hkSideDoorDpsState: CharacteristicValue;
   private _hkSideDoorLockState: CharacteristicValue;
   private readonly doorbellGuardFilter: readonly string[];
+  // The request id of the ring that is standing, or null while the doorbell is quiet; the trigger switch and the get topic mirror it, and only a cancel naming it
+  // ends the ring.
   private doorbellRingRequestId: string | null;
+  // The configured relock hold in minutes: undefined leaves the door on the default momentary unlock, and 0 holds it unlocked indefinitely.
   private lockDelayInterval: number | undefined;
   // The tamper reading we last projected, or undefined until the record has told us anything. Holding it is what lets a genuine change be told from a first sighting.
   private tamperVerdict: boolean | undefined;
@@ -200,8 +206,9 @@ export class AccessHub extends AccessDevice {
 
     super(controller, projection, accessory, admission, hubProjection);
 
-    // The neutral readings a door is assumed to hold before anything has been heard about it. configureDevice() settles them from what the controller has actually
-    // established, so the assumption never has to be restated anywhere else.
+    // The readings a door starts from before the door-state map is consulted: the main position is assumed closed, and the locks and the side door's position are
+    // read from the record's relay and terminal rows where the hardware carries them, and secured or closed otherwise. The door-state map settles them afterwards,
+    // through configureDevice() for a single-door hub and through initializeDoorStates() for a UA Gate.
     this._hkDpsState = this.hap.Characteristic.ContactSensorState.CONTACT_DETECTED;
     this._hkLockState = this.hubLockState;
     this._hkSideDoorDpsState = this.hubSideDoorDpsState;
@@ -214,8 +221,8 @@ export class AccessHub extends AccessDevice {
     // been asked for.
     this.#accessMethodRefreshInFlight = false;
     this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
-    // A door we have not been asked to move is standing still, which is the only honest reading before anything has been commanded.
     this.#doorStateApplying = false;
+    // A door we have not been asked to move is standing still, which is the only honest reading before anything has been commanded.
     this.#doorTransition = { phase: "idle" };
     this.#doorbellTopic = undefined;
     this.#foldedConfigValues = undefined;
@@ -265,8 +272,8 @@ export class AccessHub extends AccessDevice {
 
   /* The contact sensors the user has selected, read afresh on every call against the whole member table.
    *
-   * This is never cached in a hint. The gates that consume it run on every configure pass - at adoption and again on every device update - which is what lets a
-   * sensor turned off in the settings retire on the next update with no restart, and a selection resolved once at construction would freeze that.
+   * This is never cached in a hint. The gates that consume it read it on every configure pass - at adoption and again on every device update - so there is one
+   * reading of the selection and no cached copy of it to go stale.
    *
    * @returns The selected member names, in the table's own order.
    */
@@ -445,7 +452,7 @@ export class AccessHub extends AccessDevice {
 
   /* Seed our door states from the client's door state map, which every connect mode populates. The door topology records carry no status of their own - position and
    * lock live in the door state map, keyed by the door's own identity - so this is where the answer is. A door the controller has said nothing about, or one whose
-   * entry is silent on a member, falls back to closed and secured, which is what we have always assumed before hearing otherwise.
+   * entry is silent on a member, falls back to closed and secured, the safe reading before anything has been heard.
    *
    * Every seed here reaches HomeKit rather than the backing field alone. This runs after the services are configured, and the relay rows they were built from can
    * disagree with what the door state map says - so a characteristic left holding the record's reading would render a stale door until that door next moved. The
@@ -453,7 +460,7 @@ export class AccessHub extends AccessDevice {
    * so it takes the file's own idiom for that field - the assignment followed by an explicit push. Adoption stays silent throughout, with no MQTT tail and no log
    * line, because a reading we are seeing for the first time is not a transition anyone observed.
    *
-   * It seeds exactly the doors it is handed, which is every door a gate drives at construction and the one a rebind moved afterwards.
+   * It seeds exactly the doors it is handed, which is every door a gate drives at construction and whichever doors a rebind moved afterwards.
    *
    * @param doors - The doors to seed.
    */
@@ -515,7 +522,7 @@ export class AccessHub extends AccessDevice {
     this._hkSideDoorLockState = this.hubSideDoorLockState;
 
     /* Seed our door state from what the controller has established about the door we drive, before any service is configured against it. A door the controller has
-     * said nothing about, or one whose entry is silent on a member, falls back to closed and secured...what we have always assumed before hearing otherwise. This
+     * said nothing about, or one whose entry is silent on a member, falls back to closed and secured, the safe reading before anything has been heard. This
      * is the one place that assumption is spelled out for a single-door hub.
      *
      * A UA Gate seeds through initializeDoorStates instead, from each of the two doors it drives.
@@ -584,7 +591,7 @@ export class AccessHub extends AccessDevice {
     this.registerListener("access.remote_view", handler);
     this.registerListener("access.remote_view.change", handler);
 
-    // Listen for the two webhook deliveries this plugin consumes. They go through their own rail rather than the packet handler above, because a delivery and a socket
+    // Listen for each webhook delivery this plugin consumes. Deliveries go through their own rail rather than the packet handler above, because a delivery and a socket
     // frame of the same name carry entirely different payloads.
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
@@ -744,7 +751,7 @@ export class AccessHub extends AccessDevice {
   }
 
   /* Fold the record's own configuration rows into the model, replacing it wholesale rather than merging it: a row the record has dropped must leave no entry
-   * standing, exactly as the live row read this replaces would have answered off for it.
+   * standing, so the method it named reads off.
    *
    * The memo is what makes the record's fold and the write/event fold safe together. A delivery whose rows translate to what the last applied fold already
    * produced carries no access method news, so it changes nothing, and the fresher knowledge the packet and write folds have put in the model survives it. The
@@ -774,8 +781,8 @@ export class AccessHub extends AccessDevice {
     this.#foldedConfigValues = new Map(values);
   }
 
-  // Whether a fresh translation of the configuration rows says anything the last applied fold did not. Equal is the same size and every entry matching, and it is
-  // the size half that makes a row the record has dropped read as news rather than as a match.
+  // Whether a fresh translation of the configuration rows only restates what the last applied fold produced. Equal is the same size and every entry matching, and
+  // it is the size half that makes a row the record has dropped read as news rather than as a restatement.
   #configRowsRestated(values: ReadonlyMap<AccessMethodKey, boolean>): boolean {
 
     const memo = this.#foldedConfigValues;
@@ -878,7 +885,7 @@ export class AccessHub extends AccessDevice {
   }
 
   /* Read this device's access methods from the official settings surface and translate them into the vocabulary the model is keyed by. The one fetch-and-translate
-   * statement both the startup seed and the restore refresh run through, so the two can never drift on which surface they read or on how they read it.
+   * statement every seed and refresh runs through, so they can never drift on which surface they read or on how they read it.
    *
    * The official surface is read afresh here rather than carried in by a caller, and an absent one answers undefined rather than throwing, because what that absence
    * means belongs to the caller: the seed hands the model back for a later trigger, where the refresh keeps the values it already holds.
@@ -1046,6 +1053,7 @@ export class AccessHub extends AccessDevice {
 
     const endpoint = isConfigsApi ? "/configs?is_camera=true" : "/settings";
     const keys = (isConfigsApi && ("configsApiKeys" in accessMethod)) ? accessMethod.configsApiKeys : [entry.key];
+    // The tag and the value spellings mirror the record's own configuration rows for access methods.
     const payload = keys.map(key => ({ key: key, tag: "open_door_mode", value: enabled ? "yes" : "no" }));
 
     try {
@@ -1104,7 +1112,7 @@ export class AccessHub extends AccessDevice {
   /* Configure our contact sensors for HomeKit. Eligibility is what the hardware reports as wired, taken together with the user's feature option, so a sensor is
    * created on positive evidence and one already present survives a window in which the hardware reports none. Turning the option off always removes it.
    *
-   * Re-running this is how a wiring change reaches HomeKit mid-run, so it is written to be silent on repeat: validService speaks only when a present service is
+   * Re-running this is how a wiring change reaches HomeKit mid-run, so it is written to be silent on repeat: the gate's callback speaks only when a present service is
    * being removed, the settling helper only when one is created, and a sensor is dressed only the first time this hub holds it - at adoption, or at its creation on
    * a later pass.
    */
@@ -1115,10 +1123,10 @@ export class AccessHub extends AccessDevice {
     // The selection is resolved once for the whole pass and each input tests its own membership, rather than the option being resolved again for every input.
     const selected = this.#selectedSensors();
 
-    /* The same statement for a sensor selection the user emptied, made at adoption alone. A later pass finding the list empty has already narrated what changed
-     * through the per-service line each retiring sensor writes, so a summary repeated on every device update would say nothing the user has not already read. A
-     * device that offers no sensor in the settings page has nothing to state, so the model's own list is what the line is gated on...read through the same
-     * resolver the settings page and the model characteristic read, because a record from the official API carries a device type and no display model at all.
+    /* The same statement for a sensor selection the user emptied, made at adoption alone. The settings are fixed when the plugin starts, so every later pass finds the
+     * same selection adoption already stated, and repeating the line on every device update would say nothing the user has not already read. A device that offers no
+     * sensor in the settings page has nothing to state, so the model's own list is what the line is gated on...read through the same resolver the settings page and the
+     * model characteristic read, because a record from the official API carries a device type and no display model at all.
      *
      * The list is read last in the condition, so a device update - which always carries an initialized pass - and a user on the default selection both settle the
      * gate without walking the member table.
@@ -1131,6 +1139,7 @@ export class AccessHub extends AccessDevice {
     for(const { label, member, terminal } of terminalInputs) {
 
       const facts = terminalInput(this.uda, terminal);
+      // The cast holds because every member of the terminal input table has a CONTACT_ reserved subtype of the same name.
       const reservedId = AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames];
       const gate = capabilityGate({ capability: facts.wired === true, toggle: selected.includes(member) });
 
@@ -1231,18 +1240,18 @@ export class AccessHub extends AccessDevice {
     return verdict ? this.hap.Characteristic.StatusTampered.TAMPERED : this.hap.Characteristic.StatusTampered.NOT_TAMPERED;
   }
 
-  /* Configure the door position sensor. It stands apart from the loop above because its eligibility comes from the door-state model rather than a wiring-key pair,
-   * its state is maintained by the door-state delivery rather than read off the record, and it reaches HomeKit through a manual getter that keeps its reading
-   * available to a garage door service even when the sensor itself is disabled.
+  /* Configure the door position sensor. It stands apart from the loop above because its eligibility comes from the family-by-family eligibility statement, which
+   * reads the door-state model for most families, rather than a wiring-key pair, its state is maintained by the door-state delivery rather than read off the record,
+   * and it reaches HomeKit through a manual getter that keeps its reading available to a garage door service even when the sensor itself is disabled.
    *
    * The door-state delivery calls this too, so a change in wiring evidence re-gates the sensor on that rail as well rather than waiting for a device update. Like
    * the loop above, it is a no-op on repeat by construction.
    */
   private configureDpsSensor({ initialized }: ConfigurePass): void {
 
-    /* A UA Gate offers the sensor on the strength of the hardware being a gate, exactly as it always has: that hardware drives two doors, and the library derives
-     * no topology facts for a device it cannot tell the doors of apart, so there is no evidence here to gate on and its own handlers own the state behind it.
-     * Every other family answers from the evidence read.
+    /* A UA Gate offers the sensor on the strength of the hardware being a gate: that hardware drives two doors, and the library derives no topology facts for a
+     * device it cannot tell the doors of apart, so there is no evidence here to gate on, and the door-state delivery, which reads the gate's doors as discovery
+     * resolved them, owns the state behind it. Every other family answers from the evidence read.
      */
     const capability = (this.uda.device_type === "UGT") || this.dpsEvidence;
     const gate = capabilityGate({ capability, toggle: this.#selectedSensors().includes("DPS") });
@@ -1369,12 +1378,11 @@ export class AccessHub extends AccessDevice {
 
     service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
 
-      // Check if this is just syncing state from an event (current state already matches target).
       const currentState = lockStateGetter();
       const targetLocked = value === this.hap.Characteristic.LockTargetState.SECURED;
       const currentlyLocked = currentState === this.hap.Characteristic.LockCurrentState.SECURED;
 
-      // If state already matches, this is just a sync from an event - don't send command.
+      // A write asking for the state the door already holds has nothing to command, so it returns without dispatching.
       if(targetLocked === currentlyLocked) {
 
         return;
@@ -1399,7 +1407,7 @@ export class AccessHub extends AccessDevice {
     this.#enterDoorTransition({ phase: "idle" });
 
     /* What the opener answers when HomeKit asks. A door mid-travel answers with the travel rather than with the evidence: the evidence lags the door, so answering
-     * it here would put a controller's own read straight over the transitional state the write in front of it displayed.
+     * it here would put a HomeKit read straight over the transitional state the write in front of it displayed.
      */
     const getDoorState = (): CharacteristicValue => {
 
@@ -1651,7 +1659,8 @@ export class AccessHub extends AccessDevice {
     // Configure the lock service.
     this.configureLockService(service, true);
 
-    // Initialize the lock.
+    // Initialize the lock from the relay reading. The backing value is first put where no reading can equal it, so the setter below writes the service even when the
+    // state is the one we were already in.
     this._hkSideDoorLockState = -1;
     setServiceName(service, this.#sideDoorLockName);
     this.hkSideDoorLockState = this.hubSideDoorLockState;
@@ -1883,7 +1892,7 @@ export class AccessHub extends AccessDevice {
     // MQTT lock status.
     this.mqttSubscribeGet(mqttTopics.lock, () => this.#statePayload("lock"));
 
-    // MQTT lock status.
+    // MQTT lock command: true locks and false unlocks, and anything else is refused with an error.
     this.mqttSubscribeSet(mqttTopics.lock, (value: string) => {
 
       switch(value) {
@@ -2062,7 +2071,8 @@ export class AccessHub extends AccessDevice {
    * other hub's one, applied to the doors that discovery resolved for it rather than through a second resolution of their own.
    *
    * The entries we read update live from the notification stream: the wiring keys behind them are live circuit detection, and the stream reports a wiring
-   * transition as it happens. A refresh only ever seeds a door it has never seen, so the stream is the sole corrector of an established entry once we are running.
+   * transition as it happens. A topology refresh only ever seeds a door that has never reported, while an official read merges its facts over a held entry member
+   * by member.
    */
   public refreshDoorState(): void {
 
@@ -2097,8 +2107,9 @@ export class AccessHub extends AccessDevice {
     return isSideDoor ? "relock-side" : "relock-main";
   }
 
-  /* How a gate's door announces itself: the name its own lines render it under, and the tail its lock topic hangs off. The window helpers below read their pair
-   * from here, so the name a user hears and the topic a subscriber reads can never disagree about which door they are describing.
+  /* How any door this hub drives announces itself - the main door of any hub, or a UA Gate's side door: the name its own lines render it under, and the tail its
+   * lock topic hangs off. The shared #announceLockState voice reads the pair from here, so the name a user hears and the topic a subscriber reads can never
+   * disagree about which door they are describing.
    *
    * @param isSideDoor - Whether the side door of a UA Gate is the door being announced.
    *
@@ -2241,8 +2252,8 @@ export class AccessHub extends AccessDevice {
     return isSideDoor ? "side door" : ((this.uda.device_type === "UGT") ? "gate" : "door");
   }
 
-  /* The one shape a door command's refusal takes: the verb, the door as the user hears it, and the reason the command cannot be carried. Every refusal a door
-   * command makes is spoken here, so the voice cannot drift as commands are added.
+  /* The one shape a door command's refusal takes: the verb, the door as the user hears it, and the reason the command cannot be carried. Every refusal the
+   * shared preamble and its gate form make is spoken here, so the voice cannot drift as commands are added.
    *
    * @param options - The verb the refusal names, the door's rendered name, and the reason, which carries its own terminal punctuation.
    */
@@ -2322,7 +2333,8 @@ export class AccessHub extends AccessDevice {
   /* Every failed dispatch a door command makes, reported in one sentence shape so the verb and the door read the same way whichever command sent it.
    *
    * The attribution fallback is not one of these. It stays inside #dispatchUnlock because the refusal it answers is a retry rather than a failure, and nothing
-   * arrives here until that retry has had its turn.
+   * arrives here until that retry has had its turn. Nor is the gate halt, whose failure the opener's handler says at debug, because the gate stands where its
+   * travel left it either way.
    *
    * @param target - The resolved door this command is addressed to.
    * @param send - The library call to make, given the control surface the target carries.
@@ -2376,7 +2388,7 @@ export class AccessHub extends AccessDevice {
   /* Close a UA Gate's door through the library's own close command, the verb that hardware answers for the closing direction. The unlock this hub's opening
    * direction sends opens a two-button gate whichever direction it was asked for, so every surface that asks a gate to lock arrives here instead.
    *
-   * The controller reports nothing back over the event stream for a command of ours, so an accepted close hands the door to the window helper below rather than
+   * The controller reports nothing back over the event stream for a command of ours, so an accepted close hands the door to #closeGateLockWindow rather than
    * waiting on an event that never arrives: without that, the write that asked for the close would push the door's stale unlocked state straight back at HomeKit.
    *
    * @param isSideDoor - Whether the side door is the door to close.
@@ -2479,8 +2491,8 @@ export class AccessHub extends AccessDevice {
       return true;
     }
 
-    // For hub types other than UA Gate, we use the standard device unlock API. This is the lock accessory's own path: a garage door opener on this hardware is the
-    // momentary pulse instead.
+    // For hub types other than UA Gate, this is the lock-rule path every lock surface shares: a plain momentary unlock on the default settings, and a lock rule
+    // otherwise. A garage door opener on this hardware is the momentary pulse instead.
     const target = this.#resolveDoorCommand({ action, isSideDoor });
 
     if(!target) {
@@ -2514,7 +2526,8 @@ export class AccessHub extends AccessDevice {
     return this.hubDoorLockCommand(isLocking);
   }
 
-  // Wrapper for side door lock command (for backwards compatibility).
+  // The side door's counterpart to hubLockCommand, so configureLockService's ternary and the side door's MQTT and trigger handlers select the side door's command
+  // by name.
   private async hubSideDoorLockCommand(isLocking: boolean): Promise<boolean> {
 
     return this.hubDoorLockCommand(isLocking, true);
@@ -2559,8 +2572,8 @@ export class AccessHub extends AccessDevice {
     // Update the lock state.
     this._hkLockState = value;
 
-    // For Lock service type, update the service. For GarageDoorOpener on non-UA Gate hubs, also update the service since door state is derived from lock state. For UA
-    // Gate with GarageDoorOpener, DPS events handle updates since it's a motorized gate with physical positions.
+    // For Lock service type, update the service. For GarageDoorOpener on non-UA Gate hubs, also update the service, since an opener with no wired position sensor
+    // derives its state from the lock relay. For UA Gate with GarageDoorOpener, DPS events handle updates since it's a motorized gate with physical positions.
     if((this.doorServiceType === "Lock") || (this.uda.device_type !== "UGT")) {
 
       this.updateDoorServiceState(false);
@@ -2786,6 +2799,8 @@ export class AccessHub extends AccessDevice {
       return this.hap.Characteristic.LockCurrentState.SECURED;
     }
 
+    // The gate's oper1 relay drives the main door (oper2 the side door); the relay reads off while the lock is engaged, so off is secured and anything else, an
+    // absent row included, is not.
     const lockRelay = this.uda.configs?.find(entry => entry.key === "output_oper1_relay");
 
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
@@ -2825,7 +2840,7 @@ export class AccessHub extends AccessDevice {
     return terminalInput(this.uda, "sideDps");
   }
 
-  // Utility to retrieve a contact sensor state.
+  // Utility to retrieve a contact sensor state. Its open fallback is never reached from its caller, which confirms the service exists before reading it.
   private getContactSensorState(name: AccessReservedNames): CharacteristicValue {
 
     return this.accessory.getServiceById(this.hap.Service.ContactSensor, name)?.getCharacteristic(this.hap.Characteristic.ContactSensorState).value ??
@@ -2847,9 +2862,8 @@ export class AccessHub extends AccessDevice {
 
   /* Apply a door's reported state to HomeKit: the one place a door's position and lock reach their services, their MQTT tails, and their log lines.
    *
-   * Both members are optional because the callers know different amounts. A UA Gate's location handlers carry a complete report every time; the door-state delivery
-   * carries whatever the client's model has established. An ABSENT member updates nothing at all - not established is not a state, and writing a default for it
-   * would manufacture a reading the controller never made.
+   * Both members are optional because the door-state entry carries only what the client's model has established about the door. An ABSENT member updates nothing
+   * at all - not established is not a state, and writing a default for it would manufacture a reading the controller never made.
    */
   private applyDoorState(doorState: { dps?: string; lock?: string }, isSideDoor: boolean): void {
 
@@ -2952,7 +2966,7 @@ export class AccessHub extends AccessDevice {
 
   /* Handle a device update, delivered once our own record has folded.
    *
-   * Availability is deliberately absent from here: the spine's observe loop writes it from the same delivery, to every service that reports the characteristic, so
+   * Availability is deliberately absent from here: the device base's record loop writes it from the same delivery, to every service that reports the characteristic, so
    * an arm here would be a second updater of one reading. Lock and door position are absent for the same reason - the door-state model carries both, and its
    * delivery owns them. The access method model is a reading this handler does own, under that same doctrine: the record restates its configuration rows on every
    * delivery, so this is where they reach the model, and the switches read the model rather than the rows.
@@ -2963,8 +2977,8 @@ export class AccessHub extends AccessDevice {
     // method event to announce it.
     this.#foldConfigRows();
 
-    // Process any terminal input update events if our state has changed. Keying off whether the sensor exists is what replaces a cached eligibility reading: an
-    // input with no service contributes nothing, and one created mid-run is picked up on the very next update.
+    // Process any terminal input update events if our state has changed. Keying off whether the sensor exists means eligibility is never cached: an input with
+    // no service contributes nothing, and one created mid-run is picked up on the very next update.
     for(const { label, member, terminal, topic } of terminalInputs) {
 
       const reservedId = AccessReservedNames[("CONTACT_" + member) as keyof typeof AccessReservedNames];
@@ -3060,7 +3074,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // A security condition is worth a warning, its clearing a note, and its withdrawal a note that says why the status reads normal.
+    // A raised condition, its clearing, and its withdrawal are each said once, the withdrawal with why the status reads normal.
     switch(verdict) {
 
       case undefined:

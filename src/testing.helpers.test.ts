@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { controllerIdentity } from "./policy.ts";
 import test from "node:test";
 
-// The doors a topology document carries, reached the way the library's own door-state derivation reaches them: through the building's single floor.
+// The doors a topology document carries, read off the one floor doorsTopology builds them on.
 function doorsOf(topology: AccessBootstrapConfig): AccessDoorConfig[] {
 
   return topology.floors?.[0]?.doors ?? [];
@@ -90,7 +90,6 @@ test("configRows honors a supplied device and tag on every row it yields", () =>
 
 test("configRows yields nothing at all for an empty set of entries", () => {
 
-  // Deep equality against an empty list rather than a length check: a builder answering a single row of undefined members has a length of one either way.
   assert.deepEqual(configRows({ entries: {} }), [], "a census that mentioned nothing is an empty row list");
 });
 
@@ -182,6 +181,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
   const clock = new TestClock(5);
   const engine = makePlatformDouble().featureOptions;
   const handed = { hap: { marker: "p2" } };
+  // The platform double reads an accessory by identity alone, so a stub carrying only a UUID stands in for one.
   const held = [{ UUID: "uuid-held" } as unknown as AccessAccessory];
   const lines: string[] = [];
   const listener = (): never => {
@@ -231,8 +231,9 @@ test("the accessory entry and exit of makePlatformDouble reach the api calls and
   const b = { UUID: "uuid-b" } as unknown as AccessAccessory;
   const calls: { platformName: string; pluginName: string; targets: string[]; verb: string }[] = [];
   const held: AccessAccessory[] = [];
-  /* What the list held at the moment Homebridge was told about it, rather than what it holds once the call has returned. The real platform announces an arrival
-   * after that accessory has entered the list and a departure after it has left, and only a reading taken inside the call tells that order from the reverse one.
+  /* What the list held at the moment Homebridge was told about it, rather than what it holds once the call has returned. The real platform registers an arrival,
+   * adds it to the list, and then refreshes Homebridge with the list, and a departure goes the same way - unregistered, removed, then refreshed - so only a reading
+   * taken inside the refresh tells that order from the reverse one.
    */
   const updates: { count: number; sameList: boolean }[] = [];
   const platform = makePlatformDouble({ accessories: held, api: {
@@ -300,8 +301,8 @@ test("makeControllerDouble with no options answers the members the plugin reads 
   assert.equal(controller.name, "Test Controller", "the name every suite's log prefix is composed from");
   assert.equal(controller.mqtt, null, "and there is no broker until an arm hands one over");
 
-  /* The members a device reads on its own paths, which no arm names because every arm inherits them. The model derivation and the loop spawner are read against
-   * inputs a default answering one fixed thing could not coincide with.
+  /* The members a device reads on its own paths, which no arm names because every arm inherits them. The model derivation is read against inputs a default
+   * answering one fixed thing could not coincide with, and the loop spawner check asserts the default's no-op behavior.
    */
   assert.equal(controller.signal.aborted, false, "the controller's own lifetime is live");
   assert.equal(controller.client.connection.isHealthy, true, "its client reports a healthy connection, which is half of what a device composes availability from");
@@ -320,7 +321,7 @@ test("makeControllerDouble with no options answers the members the plugin reads 
 
   assert.equal(ran, false, "a loop handed to the default spawner never runs, so no arm that asked for none has state moved under it");
 
-  /* The device name is the same string whatever record it is handed, which is the point of the default: an Enterprise port resolves to another model entirely
+  /* The device name is the same string whatever record it is handed, which is the point of the default: an Enterprise hub resolves to another model entirely
    * through the real derivation, and every arm reading a log prefix expects this one string for the record its device was stood up on.
    */
   assert.equal(controller.getDeviceName(hubRecord({ device_type: "UAH-Ent" })), "Test Hub [UA Hub]", "the device name ignores the record and answers the fixed one");

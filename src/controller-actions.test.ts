@@ -5,14 +5,17 @@
  *
  * What these arms prove is the part of a save and a removal no type can state: that each outcome speaks in exactly its sentence, on exactly its channel, and
  * exactly once; that the seed a save makes lands BEFORE its write and only once its composer has a patch; that a press whose write did not land puts back what
- * its own seed replaced and nothing else; that a send follows every write that keeps or drops an answer and follows nothing else; and that a press during a write
- * starts nothing, because the save writes through its card's flow. A swapped toast severity, a put-back that restores the wrong address, a dropped generation
- * bump, a rename declared on a save that changed no address, or missing from one that did, and a listed-address refusal spoken as a failure, or a failure spoken
- * as that refusal, each redden an arm here.
+ * its own seed replaced and nothing else; that a send follows every save and removal that lands and every put-back of a seed, and follows nothing else; and that a
+ * press during a write starts nothing, because the save writes through its card's flow. A swapped toast severity, a put-back that restores the wrong address, a
+ * dropped generation bump, a rename declared on a save that changed no address, or missing from one that did, and a listed-address refusal spoken as a failure,
+ * or a failure spoken as that refusal, each redden an arm here.
  *
- * Every arm asserts the exact toast list, the exact verdict list, the exact send count, and the exact rename list, so an arm proves the absence of the other
- * outcomes as precisely as the presence of its own. The two addresses differ, their device serials differ, and the answer already held under an address differs
- * from the one the check returns, so a restore that puts back the wrong thing cannot coincide with one that puts back the right thing.
+ * Every arm that judges what a save or a removal says asserts the exact toast list, the exact verdict list, the exact send count, and the exact rename list, so it
+ * proves the absence of the other outcomes as precisely as the presence of its own. A press rejected before any check runs is the exception: its toast ends with
+ * whatever the press rejected with, which the stand does not word, so that arm reads the toast by the save's own sentence. The arms whose subject is what an
+ * interpreter is handed, a serial read, the generation, the kept answers' own rules, or the connection check assert that subject alone. The two addresses differ,
+ * their device serials differ, and the answer already held under an address differs from the one the check returns, so a restore that puts back the wrong thing
+ * cannot coincide with one that puts back the right thing.
  *
  * The card's save flow is the framework's own, imported from the package root, which is compiled from the same source as the page's browser module, so the rules
  * a press runs under are the ones the page runs under. The arm that reads a control disabled during a write reads the flow's handling of the control the stand
@@ -54,7 +57,7 @@ const PROCESSED = "processed-by-the-page";
 const IDENTITY: AccessIdentity = { address: ADDRESS, password: "correct horse battery", tokens: { access: "an-access-console-api-token" },
   username: "access@example.com", verifyTls: true };
 
-// The MAC addresses a swept removal offers to strip settings for.
+// The scoping identities a swept removal offers to strip settings for.
 const MACS = [ "AABBCCDDEEFF", "112233445566" ];
 
 // The platform entry the write double hands the composer, and the patches each interpreter composes from it. Each is a sentinel: what matters is that exactly

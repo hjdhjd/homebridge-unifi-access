@@ -61,8 +61,8 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
    * reached both answer an empty list and the page must go on telling them apart on every later re-entry.
    *
-   * One answer serves every reader that needs it: the device view returns it on every re-entry, a removal derives from it the MAC addresses a settings sweep would
-   * strip, and the sidebar reads the controller's own name from it. A controller connection costs a user real dead air, and almost nothing about a controller
+   * One answer serves every reader that needs it: the device view returns it on every re-entry, a removal derives from it the scoping identities a settings sweep
+   * would strip, and the sidebar reads the controller's own name from it. A controller connection costs a user real dead air, and almost nothing about a controller
    * changes between one re-entry and the next, so that price is paid once per address per session and the Refresh control is how a user asks to pay it again.
    *
    * Only an answer that actually arrived is ever kept, and the gate is the outcome tag rather than the list's length: a token-only controller's empty answer is a
@@ -211,6 +211,8 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
   const saveController = async ({ card, originalAddress }) => {
 
     const { address, password, tokens, username, verifyTls } = card.values();
+    // An original address arrives only as the configured address an edit card was rendered for, which is never empty, or as nothing at all for an add, so a
+    // truthy one that differs from the written address is exactly an address change.
     const replaced = Boolean(originalAddress) && (originalAddress !== address);
 
     // This press's delivery, kept from its check so a press the write rejects still speaks under the press's own rule, and the restore its composer answers once
@@ -444,7 +446,7 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
     }
 
     // The controller is gone from the configuration, so what this session remembered about it goes with it, and the generation moves so a fetch that was already in
-    // flight for that address cannot put it back. The settings sweep read its MAC addresses long before this, when the card was populated.
+    // flight for that address cannot put it back. The settings sweep read its scoping identities long before this, when the card was populated.
     generation++;
     byAddress.delete(address);
 

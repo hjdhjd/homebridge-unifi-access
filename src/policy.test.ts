@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 /* A record carrying exactly the members every census establishes and nothing else - no configuration rows, no port extensions, no embedded door snapshot, no
- * display model, no address. This is the shape the official API's device inventory projects into, and the fixture every degrade-by-absence arm below reads.
+ * display model, no network address. This is the shape the official API's device inventory projects into, and the fixture every degrade-by-absence arm below reads.
  *
  * The values are the live capture's own: a UA Hub whose official identifier is address-shaped, so the projection restores the address form from it.
  */
@@ -46,7 +46,7 @@ function coreRecord(overrides: Record<string, unknown> = {}): AccessStateDevice 
   };
 }
 
-// Drive one refresh through a real store and hand back its resulting state.
+// Drive one refresh of a building topology carrying these devices through a real store; the caller reads the result through the store's own snapshot.
 function applyTopology(store: ReturnType<typeof createStateStore>, devices: Record<string, unknown>[]): void {
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(devices) });
@@ -151,7 +151,8 @@ test("a malformed device record reaches classification rather than crashing disc
   const store = createStateStore({});
   const selector = createMembershipIdsSelector();
 
-  // One record arrives carrying no capabilities array at all, the other a device type this plugin has never heard of. Both are managed.
+  // One record arrives carrying no capabilities array at all and another a device type this plugin has never heard of, both managed, beside an unmanaged control
+  // that membership must leave out.
   applyTopology(store, [
 
     { device_type: "UAH", is_managed: true, mac: "aabbccddee01", name: "No Capabilities", unique_id: "malformed" },
@@ -196,8 +197,8 @@ test("a reader that drives no door of its own is still hardware this plugin proj
 
   const store = createStateStore({});
 
-  /* A managed device carrying the reader capability and not the hub one. No other fixture here constructs a reader without a hub beside it, so this is the only
-   * input that tells a classification covering both roles apart from one that answers on the hub alone.
+  /* A managed device carrying the reader capability and not the hub one, which is the input that tells a classification covering both roles apart from one that
+   * answers on the hub alone.
    */
   applyTopology(store, [{ capabilities: ["is_reader"], device_type: "UA-G3-Reader", is_managed: true, mac: "aabbccddee01", name: "Reader", unique_id: "device1" }]);
 
@@ -245,7 +246,7 @@ test("the membership statement names exactly the devices this plugin projects, a
 
   const store = createStateStore({});
 
-  /* Four records, of which exactly two are devices this plugin projects: a building-hosted Enterprise hub, which answers through its one port rather than itself;
+  /* Records of which only some are devices this plugin projects: a building-hosted Enterprise hub, which answers through its one port rather than itself;
    * a plain managed hub carrying its own identity; an unmanaged record; and a managed record the census established no hardware identity for. The last of those
    * is the fixture a membership statement that dropped the hardware-identity half of its narrowing fails, because every consumer downstream composes an identity
    * for whatever the walk yields.
@@ -304,7 +305,7 @@ test("entPortSuffix identifies an Enterprise port and nothing else", () => {
 
 test("officialDeviceModel names every hub type the feature options scope on", () => {
 
-  // These four are the display models the catalog's own model scoping compares against, so a wrong answer here would change which options a user is offered.
+  // These are the display models the catalog's own model scoping compares against, so a wrong answer here would change which options a user is offered.
   assert.equal(officialDeviceModel("UAH"), "UA Hub");
   assert.equal(officialDeviceModel("UA-ULTRA"), "UA Ultra");
   assert.equal(officialDeviceModel("UA-Hub-Door-Mini"), "UA Hub Door Mini");
@@ -339,8 +340,8 @@ function retryWaits(failures: readonly unknown[]): number[] {
   return waits;
 }
 
-// Every spelling of a refusal: an identity and a privilege refusal, each as the transport's classification of a refused status and as the controller's own result
-// code answered inside a successful response.
+// One spelling of each kind of refusal: an identity and a privilege refusal, each as the transport's classification of a refused status and as the controller's
+// own result code answered inside a successful response.
 const REFUSAL_SPELLINGS = [ new AccessAuthError("Bad credentials."),
   new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" }), new AccessAuthorizationError("Not an administrator."),
   new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) ];
@@ -432,7 +433,7 @@ test("the connect retry policy reports a run's first failure, and a repeat of th
   const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
 
   /* Three distinct error instances that read identically, which is the shape a reducer fault takes when it throws afresh on every attempt. A comparison by
-   * identity or by class would report each of them, and one that remembered nothing would too.
+   * identity would report each of them, and one that remembered nothing would too.
    */
   for(let attempt = 0; attempt < 3; attempt++) {
 
@@ -493,7 +494,7 @@ test("canTransition refuses same-phase and terminal moves while permitting every
   assert.equal(canTransition({ from: "shuttingDown", to: "running" }), false);
   assert.equal(canTransition({ from: "shuttingDown", to: "connecting" }), false);
 
-  // Every legal move answers true, so a predicate stubbed to refuse everything fails here rather than passing quietly.
+  // Each legal move asserted here answers true, so a predicate stubbed to refuse everything fails here rather than passing quietly.
   assert.equal(canTransition({ from: "connecting", to: "running" }), true);
   assert.equal(canTransition({ from: "connecting", to: "shuttingDown" }), true);
   assert.equal(canTransition({ from: "running", to: "shuttingDown" }), true);
@@ -501,8 +502,8 @@ test("canTransition refuses same-phase and terminal moves while permitting every
 
 test("a wired plain hub answers the position gate from wiring facts, whatever its display model says", () => {
 
-  /* The three display models a plain hub can present: the English string an allowlist would match, a localized one it never would, and none at all. The derived
-   * facts and the gate's verdict have to be identical across all three, which is what makes eligibility a reading of the wire rather than of a label.
+  /* The display models a plain hub can present: the English string an allowlist would match, a localized one it never would, and none at all. The derived facts
+   * and the gate's verdict have to be identical across every one of them, which is what makes eligibility a reading of the wire rather than of a label.
    */
   const readings = [ "UA Hub", "Concentrateur UA", undefined ].map(displayModel => {
 
@@ -560,8 +561,9 @@ test("hardware that establishes no position at all answers the gate false", () =
 test("a Door Mini's position flows from its topology seed and is corrected by a door-state notification", () => {
 
   const store = createStateStore({});
-  /* The Door Mini of the capture corpus: the port-infixed key forms, its position wiring live throughout, and no duplicated door extras of its own. Its
-   * capabilities carry the trigger-level flag rather than the alarm one, which is what keeps this arm a genuinely different hardware family from the hub above.
+  /* The Door Mini of the capture corpus: the port-infixed key forms, its position wiring live throughout, and no duplicated door extras of its own. The
+   * port-infixed key forms are what keep this arm a genuinely different hardware family from the hub above, because the library reads them through a separate
+   * family set. Its capabilities carry the trigger-level flag rather than the alarm one only to stay faithful to the capture.
    */
   const record = hubRecord({
 
@@ -604,7 +606,8 @@ test("a Door Mini's position flows from its topology seed and is corrected by a 
   assert.ok(flipped, "the door must still hold a state once the notification is applied");
   assert.equal(flipped.dps, "open", "the notification must correct the seeded position");
 
-  // The lock comes from the same report. Nothing else carries a single-door hub's lock state, so a report that dropped it would strand the lock projection entirely.
+  // The lock comes from the same report. The location update is the realtime carrier of the lock between topology refreshes, so a report that dropped it would
+  // leave the lock at its last seeded reading until the next refresh.
   assert.equal(flipped.lock, "unlocked");
 });
 
@@ -623,8 +626,8 @@ test("lockCommandRule maps every configured interval onto the verb that expresse
   // Zero is an unlock the user wants no end to.
   assert.deepEqual(lockCommandRule({ delayInterval: 0, isLocking: false }), { kind: "rule", rule: { type: "keep_unlock" } });
 
-  /* A positive interval holds the door for exactly that many minutes. This is the one assertion that distinguishes the custom rule from the endless one by value:
-   * a mapping that answered keep_unlock regardless of the interval would satisfy every other arm above and only fail here.
+  /* A positive interval holds the door for exactly that many minutes. These are the assertions that distinguish the custom rule from the endless one by value: a
+   * mapping that answered keep_unlock regardless of the interval would satisfy every other arm above and only fail here.
    */
   assert.deepEqual(lockCommandRule({ delayInterval: 1, isLocking: false }), { kind: "rule", rule: { interval: 1, type: "custom" } });
   assert.deepEqual(lockCommandRule({ delayInterval: 15, isLocking: false }), { kind: "rule", rule: { interval: 15, type: "custom" } });
@@ -681,7 +684,7 @@ test("composeAccessMethodUpdate carries the desired state onto every named key",
 test("accessMethodWriteVerdict judges the primary key alone and reads absence as a verdict of its own", () => {
 
   // The primary key agreeing confirms the write even when a secondary key the write also carried disagrees in the read-back...the secondaries are best-effort
-  // riders, and aggregating them would turn a hardware class that lacks one into a permanent decline.
+  // extras, and aggregating them would turn a hardware class that lacks one into a permanent decline.
   assert.equal(accessMethodWriteVerdict({ enabled: "yes", primaryKey: "bt_button", readBack: { bt_button: { enabled: "yes" }, bt_tap: { enabled: "no" } } }),
     "confirmed");
 
@@ -799,8 +802,9 @@ test("projectedRecords narrows membership to what this plugin can project", () =
 
   const store = createStateStore({});
 
-  // A plain hub, a building-hosted Enterprise hub whose single port the expansion synthesizes, a managed record carrying a device type this plugin cannot project,
-  // and a managed record with no hardware identity. Membership yields the first three less the Enterprise parent; projection drops the one it cannot project.
+  // A plain hub, a building-hosted Enterprise hub whose single port the expansion synthesizes, a managed record carrying no capability this plugin projects, and
+  // a managed record with no hardware identity. Membership yields the plain and unsupported records followed by the Enterprise port; projection drops the one it
+  // cannot project.
   applyTopology(store, [
 
     { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee01", name: "Plain Hub", unique_id: "plain" },
@@ -854,14 +858,16 @@ test("discoverDoorLocations resolves the main door through each strategy in orde
 
   const doors = [ stateDoor("door1", "Utility"), stateDoor("door2", "Main Entrance") ];
 
-  // Strategy 1: a bound door wins outright, whatever the names say.
+  /* Strategy 2: a bound door wins outright, whatever the names say. The numbers follow the strategies in discoverDoorLocations, and the port binding (Strategy 1)
+   * and the controller's location binding (Strategy 3) have arms of their own in the ranking tests below.
+   */
   assert.deepEqual(discoverDoorLocations({ device: { door: { unique_id: "door9" } } as unknown as AccessStateDevice, doors, sideDoorEligible: false }),
     { mainDoorLocationId: "door9" });
 
-  // Strategy 2: an unbound device resolves the door whose name reads as the main entrance.
+  // Strategy 4: an unbound device resolves the door whose name reads as the main entrance.
   assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors, sideDoorEligible: false }), { mainDoorLocationId: "door2" });
 
-  // Strategy 3: with no name matching either way, the first door answers.
+  // Strategy 5: with no name matching either way, the first door answers.
   assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors: [ stateDoor("door1", "Alpha"), stateDoor("door2", "Beta") ],
     sideDoorEligible: false }), { mainDoorLocationId: "door1" });
 });
@@ -960,8 +966,9 @@ test("accessoryOwnership tells this controller's own accessories from every othe
   // Another controller's accessory is never ours to reclaim.
   assert.equal(accessoryOwnership({ contextKey: "5.6.7.8", currentKey: "1.2.3.4", priorKey: undefined }), "foreign");
 
-  /* An accessory carrying no key at all names no controller, so it is nobody's. This is the input a direct comparison against the controller's own key silently
-   * claimed - both sides read undefined and matched - and it is also the row an implementation ordered as "current, else prior" gets wrong, for the same reason.
+  /* An accessory carrying no key at all names no controller, so it is nobody's. This is the input a direct comparison against the controller's own key would
+   * silently claim - both sides read undefined and match - and it is also the row an implementation ordered as "current, else prior" gets wrong, for the same
+   * reason.
    */
   assert.equal(accessoryOwnership({ contextKey: undefined, currentKey: "1.2.3.4", priorKey: undefined }), "foreign");
 
@@ -1034,7 +1041,7 @@ test("the reclaim fence opens only when every configured controller reported an 
 
 test("deviceModel answers from the richest thing the record carries and reads an empty string as absent", () => {
 
-  // The topology document answers a display model, which is what a credentialed install shows today.
+  // The topology document answers a display model, which is what a credentialed install shows.
   assert.equal(deviceModel({ device_type: "UAH", display_model: "UA Hub", model: "UAH" } as AccessStateDevice), "UA Hub");
 
   // An empty display model is no display model, so the hardware model answers rather than a blank where a model belongs.
@@ -1096,7 +1103,7 @@ test("a UA Ultra whose record establishes no duty answers its position eligibili
   const open = { dps: "open", location_id: "door1" } as AccessDoorStateEntry;
   const unwired = { dps: "none", location_id: "door1" } as AccessDoorStateEntry;
 
-  /* A duty outside the two the library knows establishes nothing in either direction, so the entry is what answers. Reading both entries against it is what tells
+  /* A duty outside the ones the library knows establishes nothing in either direction, so the entry is what answers. Reading both entries against it is what tells
    * a fallback apart from a read that refused outright, which answers false whatever the entry says.
    */
   assert.equal(dpsSensorEligible({ device: multiplexed("unknown"), entry: open }), true);
@@ -1123,12 +1130,12 @@ test("discoverDoorLocations ranks the controller's own live binding above the na
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "door2" } as AccessStateDevice, doors, sideDoorEligible: false }),
     { mainDoorLocationId: "door2" });
 
-  // A binding naming no door we were handed falls through to the name heuristics exactly as before.
+  // A binding naming no door we were handed falls through to the name heuristics, as a record with no binding does.
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "elsewhere" } as AccessStateDevice, doors: [ stateDoor("door1", "Utility"),
     stateDoor("door2", "Main Entrance") ], sideDoorEligible: false }), { mainDoorLocationId: "door2" });
 
   /* The two picks move together: the side arm excludes whatever the main arm chose, so a main door resolved from the live binding rather than from a name shifts
-   * the side pick with it. Pinning the pair is what makes that coupling a stated outcome rather than an incidental one.
+   * the side pick with it. Asserting the pair is what makes that coupling a stated outcome rather than an incidental one.
    */
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "door2" } as AccessStateDevice, doors, sideDoorEligible: true }),
     { mainDoorLocationId: "door2", sideDoorLocationId: "door1" });
@@ -1188,7 +1195,8 @@ test("a record carrying only the members every census establishes degrades by ab
 
   const projected = coreRecord();
 
-  // No port extensions means no multiplex, so the position sensor answers from the door-state model in both directions.
+  // A UA Hub answers from the door-state model through hasDpsEvidence, whatever its extensions say, so the position sensor answers from that model in both
+  // directions.
   assert.equal(dpsSensorEligible({ device: projected, entry: undefined }), false);
   assert.equal(dpsSensorEligible({ device: projected, entry: { dps: "open", location_id: "door1" } }), true);
 
@@ -1216,7 +1224,8 @@ function endpointRecord(overrides: { endpoint: string; events?: readonly typeof 
 /* The live unlock delivery from the library's own capture corpus, rebuilt here from the values that capture recorded.
  *
  * The library ships its fixtures as test material rather than through its published entry point, so the values travel rather than the module. The parameter type
- * is read off the function under test, which is what keeps this fixture honest without restating the delivery's shape.
+ * is read off the function under test, so it names the fixture's target without restating the delivery's shape; the cast through unknown leaves the literal itself
+ * unchecked against that type.
  */
 function unlockDelivery(overrides: { actor?: Record<string, string> | null; object?: Record<string, unknown> } = {}): Parameters<typeof unlockAttribution>[0] {
 
@@ -1247,7 +1256,8 @@ function unlockDelivery(overrides: { actor?: Record<string, string> | null; obje
 
 test("the webhook port setting resolves to the port as written, the default when absent or off, and the default with the rejected value otherwise", () => {
 
-  // A setting nobody stated: absent, turned off, or configured as nothing at all. Each is the default, said silently, because nothing was said.
+  // A setting nobody stated: absent, turned off, or configured as nothing at all. Each is the default, said silently, because nothing was said. The default port
+  // is written as its documented literal rather than read from ACCESS_WEBHOOK_PORT, so these arms deliberately hold that default fixed.
   for(const value of [ undefined, null, "", "  " ]) {
 
     assert.deepEqual(resolveWebhookPort(value), { port: 10120, source: "default" }, "a setting of " + JSON.stringify(value) + " states no port");
@@ -1358,7 +1368,7 @@ test("orphanedWebhookRegistrations selects a leftover of ours and nothing that b
     // The same abandoned path at another authority. A second Homebridge install serving this controller looks exactly like this, so neither is ours to delete.
     endpointRecord({ endpoint: "http://10.0.0.7:10121" + abandoned, id: "otherPort" }),
     endpointRecord({ endpoint: "http://10.0.0.9:10120" + abandoned, id: "otherHost" }),
-    // Our authority, but nothing under our prefix is another application's business on the same host and port.
+    // Our authority, but a path outside our prefix is another application's business on the same host and port.
     endpointRecord({ endpoint: ours + "/some-other-plugin/9.9.9.9", id: "foreignPrefix" }),
     // A sibling controller this plugin is configured for, and this controller's own current path. Both are claimed, and a claimed path is never an orphan.
     endpointRecord({ endpoint: ours + webhookEndpointPath("5.6.7.8"), id: "sibling" }),
@@ -1457,7 +1467,7 @@ test("unlockAttribution reads the live capture's own values and treats an empty 
     time: "2026-08-15 16:03:48 -0500 CDT"
   });
 
-  // The unlock a person performed answering a doorbell call, which carries a reader and a different method and nothing else new.
+  // The unlock a person performed answering a doorbell call, which carries a reader, a different method, and a different actor.
   const answered = unlockAttribution(unlockDelivery({ actor: { id: "49dd3ea1-8320-44b4-a104-f89e4101389c", name: "H Dihu", type: "user" }, object: {
 
     authentication_type: "CALL", authentication_value: "", policy_id: "", policy_name: "", reader_id: "d8b3706bb73b", result: "Access Granted",
@@ -1559,7 +1569,7 @@ test("resolveDoorService takes an explicit service as chosen and defers everythi
     assert.equal(resolveDoorService({ choice, deviceType: "UAH" }), "Lock", "a hub defaults to a lock for " + String(choice));
   }
 
-  // The offered values are the two services and the automatic choice, spelled as the configuring log line spells the services.
+  // The offered values are the services and the automatic choice, spelled as the option value a user writes, such as Enable.Hub.Door.Service=GarageDoorOpener.
   assert.deepEqual(doorServiceChoices.map(choice => choice.value), [ "Automatic", "Lock", "GarageDoorOpener" ]);
 });
 
@@ -1597,8 +1607,8 @@ test("the hub sensor list offers every member with no device and only the ones a
   assert.deepEqual(hubSensorChoices(hardware("UA Gate")).map(choice => choice.value), [ "DPS", "SideDoorDPS" ]);
   assert.deepEqual(hubSensorChoices(hardware("UA Hub Door Mini")).map(choice => choice.value), [ "DPS", "REX" ]);
 
-  // A model no member names is offered nothing, which is exactly why the hub's own read never hands these functions a device: an Enterprise hub's port would
-  // otherwise resolve to no sensors at all.
+  // A model no member names is offered nothing, which is why the hub reads its sensor selection against the whole table rather than a device-narrowed list: an
+  // Enterprise hub's port would otherwise resolve to no sensors at all.
   assert.deepEqual(hubSensorChoices(hardware("UAH-Ent")), []);
 
   // The models the option is scoped to are the union of what the table names, deduplicated in the order the table first names each one.

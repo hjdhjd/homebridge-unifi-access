@@ -32,7 +32,8 @@ import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
 import test from "node:test";
 
-// The door this hub drives, and the reader hanging off it, in the identities the live captures use.
+// The hub's own identities, the doors it drives, and the reader hanging off it. The hub's identifier, its main door, and the reader carry the identities the live
+// captures use; the hub's MAC address and its side door are synthetic.
 const HUB_ID = "74acb9d55b9c";
 const HUB_MAC = "aabbccddee01";
 // The identity the plugin addresses this hub by, written as a literal so the assertion proves the spelling rather than agreeing with whatever the composition answers.
@@ -156,8 +157,9 @@ function makeAccessory(services: Service[]): AccessAccessory {
     services,
 
     /* Homebridge's own display-name setter, transcribed rather than inherited: the homebridge package exposes PlatformAccessory as a type alone, so the class cannot
-     * be constructed here. The transcription is the whole of that method - a truthy name writes the display name, a falsy one writes nothing - and it is what the
-     * library's accessory rename writes through, so an arm reading a renamed accessory reads what Homebridge itself would have written.
+     * be constructed here. The transcription keeps the part of that method these arms read - a truthy name writes the accessory's display name, a falsy one writes
+     * nothing - and leaves out the HAP accessory beneath it, which no arm reads. The method is what the library's accessory rename writes through, so an arm
+     * reading a renamed accessory reads what Homebridge itself would have written.
      */
     updateDisplayName(name: string): void {
 
@@ -237,6 +239,7 @@ interface HubOptions {
   options?: string[];
   record?: AccessStateDevice & { mac: string };
   reject?: string[];
+  // The 1-based position, among every command dispatched so far whatever its verb, from which a verb named in reject starts being refused.
   rejectFrom?: number;
   // The error a doorbell ring or cancel rejects with, standing in for a controller that refuses the dispatch. The ring is recorded before it is thrown.
   ringRefusal?: Error;
@@ -327,8 +330,8 @@ function makeHub(options: HubOptions = {}): HubHarness {
     unlock: async (opts?: { actor?: { id: string; name: string }; doorId?: string }): Promise<void> => dispatch({ options: opts, verb: "unlock" })
   };
 
-  /* The Access application's own endpoint, which only a credentialed client reaches. A token-only client holds none, which is what the UA Gate's location path
-   * refuses and what every library command above absorbs on the caller's behalf.
+  /* The Access application's own endpoint, which only a credentialed client reaches. The hub's raw access method write is the one path that composes a request
+   * through it, and a token-only client holds none.
    */
   const transport = options.credentials ? { request: async (endpoint: string, init: { method: string }): Promise<void> => void requests.push(init.method + " " +
     endpoint) } : null;
@@ -508,7 +511,8 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     publishes,
     /* Restate the user's settings under a hub that is already running, which is how a setting read afresh at each write is told apart from one cached at
-     * construction. The engine is swapped rather than mutated, because that is what the platform itself does when a configuration is reloaded.
+     * construction. The engine is swapped whole rather than mutated, so every read after the swap answers from the new entries alone, and the hub meets the new
+     * engine on its next read because it reaches the engine through the platform each time.
      */
     reconfigure: (entries: string[]): void => {
 
@@ -543,7 +547,8 @@ function portBinding(name: string, doorId: string): Record<string, unknown> {
     unique_id: "ext-" + name };
 }
 
-// A UA Gate with both of its doors discovered and a credentialed client behind it, which is what the location endpoint behind its opening direction needs.
+// A UA Gate with both of its doors discovered and a credentialed client behind it, so an arm can count the requests a door command composes through the transport
+// double and show there are none.
 function makeGate(options: HubOptions = {}): HubHarness {
 
   return makeHub({ credentials: true, doors: [ { name: "Main Gate", unique_id: MAIN_DOOR }, { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ],
@@ -761,8 +766,8 @@ function lockPayloads(harness: HubHarness, tail = "lock"): string[] {
   return topicPayloads(harness, tail);
 }
 
-/* The availability statement a reachable hub makes once its adoption completes, as the harness records the call. Every hub these arms stand up opens its publish
- * record with it, so an arm asserting what a later act published names it first rather than reading it as part of that act.
+/* The availability statement a reachable hub makes once its adoption completes, as the harness records the call. Every reachable hub these arms stand up opens its
+ * publish record with it, so an arm asserting what a later act published names it first rather than reading it as part of that act.
  *
  * @param harness - The hub whose statement to spell.
  *
@@ -902,6 +907,7 @@ function doorbellDelivery(options: { hub?: string; reasonCode?: number } = {}): 
       actor: null,
       device: { connected_hub_id: options.hub ?? HUB_ID, id: READER_ID, mac: "d8:b3:70:6b:b7:3b", name: "UA G2 PRO Black b73b" },
       location: { id: MAIN_DOOR, location_type: "door", name: "Door Hub", up_id: "floor1" },
+      // 105 is the controller's code for a call that timed out, which unifi-access glosses as such.
       object: { host_device_mac: "", reason_code: options.reasonCode ?? 105, request_id: "call1" }
     },
     event: ACCESS_WEBHOOK_EVENTS.doorbellCompleted,
@@ -1069,7 +1075,8 @@ test("a UA Gate whose door state map agrees with its record adopts silently and 
 
 test("a door hub adopts its own door's reading from the door state map at construction, and says nothing about it", () => {
 
-  // The record's relay row says secured while the controller's map says the door is standing unlocked, so a seed that read the record alone renders the wrong lock.
+  // A door hub's record carries no lock reading of its own, so the default reads secured, while the controller's map says the door is standing unlocked, so a seed
+  // that ignored the map renders the wrong lock.
   const hub = makeHub({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "unlock" }, options: ["Enable.Hub.Door.Service=Lock"] });
 
   assert.equal(lockService(hub).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED);
@@ -1104,7 +1111,7 @@ test("a record's configuration rows create the switches its capabilities call fo
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "a row the record carries is what the switch reads");
 
   /* Existence keys on the reader's capabilities and the user's settings rather than on what the model happens to hold for each method, so a capability the
-   * configuration rows never mentioned still gets its switch, and that switch reads off...which is exactly what the live row read this replaces answered for it.
+   * configuration rows never mentioned still gets its switch, and that switch reads off because the model holds no entry for it.
    */
   assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "a capability with no row of its own still gets a switch");
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), false);
@@ -1390,8 +1397,8 @@ test("every reader a hub wires answers while the device can be reached and refus
     return { harness, slice: registered.mock.calls.slice(from) };
   };
 
-  /* What one hub's own registrations prove, walked three times: each reader answers the value its characteristic holds while the device can be reached, each
-   * refuses once it cannot - at the handler itself and through HAP's read path in front of it - and a recovery clears the refusal with nothing rewired.
+  /* What one hub's own registrations prove: each reader answers the value its characteristic holds while the device can be reached, each refuses once it
+   * cannot - at the handler itself and through HAP's read path in front of it - and a recovery clears the refusal with nothing rewired.
    */
   const proves = async (harness: HubHarness, slice: typeof registered.mock.calls): Promise<void> => {
 
@@ -1435,8 +1442,8 @@ test("every reader a hub wires answers while the device can be reached and refus
       "and the next read after recovery answers, with nothing rewired");
   };
 
-  /* Four hubs, between them carrying every service a hub offers: a doorbell reader with both locks and a PIN switch, an opener over wired terminal inputs, a UA
-   * Gate driving two doors, and a UA Ultra whose sensors carry a tamper status.
+  /* These hubs between them carry every service a hub offers: a doorbell reader with its lock, both automation triggers, and a PIN switch; an opener over wired
+   * terminal inputs; a UA Gate driving two doors; and a UA Ultra whose sensors carry a tamper status.
    */
   const reader = wiredBy(() => makeReader({ options: [ "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger" ],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "door_bell", "pin_code" ],
@@ -1518,8 +1525,8 @@ test("a hub with no door control surface refuses every door command with the one
 
 test("a UA Gate whose door was never discovered refuses its commands for the record it has no identity from", async () => {
 
-  /* A gate holding a control surface over an empty topology. Both of the preamble's own refusals are behind it, so the only reason left is the one the door
-   * resolution could not answer.
+  /* A gate holding a control surface over an empty topology. Every refusal the preamble makes on its own account is behind it, so the only reason left is the one
+   * the door resolution could not answer.
    */
   const gate = makeHub({ credentials: true, doors: [], record: testHub({ device_type: "UGT" }) });
 
@@ -2009,7 +2016,8 @@ test("every get topic answers exactly what the session restates on it", async ()
   const gateRestated = restatedIn(restoreSession(gate.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
   const hubRestated = restatedIn(restoreSession(hub.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
 
-  // The gate restates every get topic it carries, its side door position unknown with nothing wired behind it, and the door hub its own, its position unknown too.
+  // The gate restates every held state topic it carries, its side door position unknown with nothing wired behind it, and the door hub its own, its position
+  // unknown too. The momentary doorbell is never restated, which the arm about the momentary topics covers.
   assert.deepEqual(gateRestated, [ "dps=true", "lock=false", "sidedoor/dps=unknown", "sidedoor/lock=true" ]);
   assert.deepEqual(hubRestated, [ "dps=unknown", "lock=true" ]);
 
@@ -2178,8 +2186,8 @@ test("a UA Gate's opener closes through the close command and opens through the 
   // The opening direction is the library's unlock, naming the gate's own door for the same reason the close does, and with no close sent along beside it.
   assert.deepEqual(opening.commands, [{ options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }]);
 
-  /* Both directions leave the endpoint the plugin once composed for itself untouched. The assertion is the negative control against a half-finished migration: a door
-   * command that still reached for the Access application's own endpoint would show up here rather than passing quietly.
+  /* Both directions go through the library's rail and compose no request of their own: a door command that reached for the Access application's own endpoint would
+   * show up here rather than passing quietly.
    */
   assert.equal(opening.requests.length, 0, "the opening direction goes through the library's rail rather than an endpoint composed here");
 });
@@ -2187,8 +2195,9 @@ test("a UA Gate's opener closes through the close command and opens through the 
 test("a garage door opener on a door hub closes with the momentary pulse, on a credentialed client and a token-only one alike", async () => {
 
   /* The pulse is the library's plain unlock, naming no door for hardware that drives one and asking for no lock rule of any kind, so what it carries beyond the
-   * attribution every unlock carries is nothing at all. Every client identity carries that unlock - a token-only client reaches it over the official API and a
-   * credentialed one over the Access application's own - and which of them is in hand is not a difference this plugin sees.
+   * attribution every unlock carries is nothing at all. The attributed pulse travels only on the official API: a credential-only client refuses the attribution at
+   * the library's routing gate, and this plugin resends the same unlock unattributed over the Access application's own path, which this harness's double does not
+   * distinguish.
    */
   assert.deepEqual(await openerDispatch({ credentials: true }, Characteristic.TargetDoorState.CLOSED), [{ options: { actor: UNLOCK_ACTOR }, verb: "unlock" }]);
   assert.deepEqual(await openerDispatch({ official: true }, Characteristic.TargetDoorState.CLOSED), [{ options: { actor: UNLOCK_ACTOR }, verb: "unlock" }]);
@@ -2859,7 +2868,8 @@ test("a rail-reported lock and re-unlock inside the window leave no stale relock
 
   gate.clock.advance(RELOCK_DELAY_MS);
 
-  // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
+  // A relock the rail's report failed to retire would fire here and announce a close over the controller's fresher reading, so the payloads and the count below
+  // prove none did.
   assert.deepEqual(lockPayloads(gate), [ "false", "true", "false" ]);
   assert.equal(lineCount(gate, "Gate locked."), 1, "the rail's own report of the closing is the only one anyone read");
   assert.equal(lineCount(gate, "Gate unlocked."), 2, "the window's own opening and the rail's re-unlock, each announced once");
@@ -2916,7 +2926,8 @@ test("a UA Gate's side door reported locked retires the relock its own unlock ar
 
   gate.clock.advance(RELOCK_DELAY_MS);
 
-  // A relock the rail's own report failed to retire fires here and announces a close over the controller's fresher reading.
+  // A relock the rail's report failed to retire would fire here and announce a close over the controller's fresher reading, so the payloads and the count below
+  // prove none did.
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "false", "true", "false" ]);
   assert.equal(lineCount(gate, "Side door locked."), 1, "the rail's own report of the closing is the only one anyone read");
   assert.equal(lineCount(gate, "Side door unlocked."), 2, "the window's own opening and the rail's re-unlock, each announced once");
@@ -3075,7 +3086,7 @@ test("an unlock the controller refuses says so and opens no window at all", asyn
   await gate.mqttSet("lock", "false");
   await settle();
 
-  // The refusal is the library's own sentence, inside the wrapper this command reports every failure in.
+  // The refusal is the error the command dispatch raised, carried verbatim inside the wrapper this command reports every failure in.
   assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate: The controller refused this command."]);
 
   // Nothing announced and nothing armed: a window that never opened has no state to flip and no ending to reach.
@@ -3692,7 +3703,8 @@ function inputRows(readings: Record<string, string>): AccessDeviceEntryConfig[] 
   return configRows({ deviceId: HUB_ID, entries: readings, tag: "input" });
 }
 
-// Every wiring key a terminal input is detected through across the hub families that name one, so an arm can offer a family all the evidence there is.
+// Every wiring key a terminal input is detected through on the UA Hub's fixed pairs and a single-port hub's d1-button pair, so an arm can offer a family all of
+// that evidence at once.
 const EVERY_WIRE = [ "wiring_state_d1-button-neg", "wiring_state_d1-button-pos", "wiring_state_rel-neg", "wiring_state_rel-pos", "wiring_state_ren-neg",
   "wiring_state_ren-pos", "wiring_state_rex-neg", "wiring_state_rex-pos" ];
 
@@ -3705,7 +3717,8 @@ const REL_PAIR_LIVE = wiringRows({ "wiring_state_rel-neg": "on", "wiring_state_r
 // The request to exit pair a UA Hub Door Mini reports its one input through.
 const D1_PAIR_LIVE = wiringRows({ "wiring_state_d1-button-neg": "on", "wiring_state_d1-button-pos": "on" });
 
-/* The rows a UA Hub reports every terminal input through, stated beside the record so an arm laying other rows next to them takes the same list the record does.
+/* Every wiring pair above reporting live, beside a UA Hub's reading rows, stated beside the record so an arm laying other rows next to them takes the same list the
+ * record does. It deliberately carries more than a UA Hub reports, the d1-button pair among them, so an arm can hand a family every evidence there is.
  *
  * @param reading - What each input reports.
  *
@@ -3791,7 +3804,7 @@ function tamperRows(rows: Record<string, string>): AccessDeviceEntryConfig[] {
   return configRows({ deviceId: HUB_ID, entries: rows });
 }
 
-/* A UA Ultra whose hardware detects tampering, reporting whatever tamper rows the arm names. The Ultra is the hub family carrying that capability today, and its
+/* A UA Ultra whose hardware detects tampering, reporting whatever tamper rows the arm names. The Ultra is a hub family carrying that capability, and its
  * multiplexed terminal input is what gives the record a contact sensor to carry the characteristic at all.
  *
  * @param rows    - The tamper rows the record reports.
@@ -4262,7 +4275,8 @@ test("a hub's wiring table and the option catalog's model lists agree about whic
    * agreement rather than a copy.
    *
    * The Enterprise hub is left out: its display model names no member of the sensor table, so the page offers it nothing and there is no statement to agree with.
-   * What it carries at runtime is the arm above, which reads the wiring evidence alone.
+   * What it carries at runtime is the arm "an unconfigured hub selects every sensor and every logged category, whatever model the tables name it as", which reads
+   * an Enterprise port's wiring alone.
    */
   for(const deviceType of families) {
 

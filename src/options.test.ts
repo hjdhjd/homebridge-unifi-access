@@ -2,8 +2,8 @@
  *
  * options.test.ts: Tests for the feature option catalog's metadata channel and its documentation scope hooks.
  *
- * Every arm here drives the REAL catalog rather than a fixture of its own, which is what makes the completeness sweep meaningful: a capability flag added to an
- * option without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
+ * The completeness sweep drives the REAL catalog rather than a fixture of its own, which is what makes it meaningful: a capability flag added to an option
+ * without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
  * because it is a closed union the compiler already holds the map to.
  */
 import { ALL_CHOICES, buildCatalogIndex } from "homebridge-plugin-utils";
@@ -117,6 +117,7 @@ test("a controller-scoped category names the controller in its scope sentence", 
 
 test("the generated MQTT options carry no meta and document unconditionally", () => {
 
+  // The generated category is located by its controller scope rather than by its name, because the name belongs to homebridge-plugin-utils.
   const category = featureOptionCategories.find(entry => (entry.name !== "Controller") && (entry.meta?.modelKey?.[0] === "controller"));
 
   assert.ok(category, "the generated MQTT category should be present and scoped to the controller");
@@ -144,8 +145,8 @@ test("the webhook options declare the defaults and the scope the listener and th
   const port = entryFor("Controller", "Webhooks.Port");
 
   /* One listener serves every controller, so the port is a plugin-wide deployment decision rather than a per-controller one and the entry is declared
-   * global-only. The framework admits an option to a view only where its scopes tuple names that view's kind, which is what keeps this one off a controller's
-   * own view while the option that turns the feature on stays there.
+   * global-only. The framework renders an option only on views its scopes tuple admits, and a tuple naming only global admits neither a controller's view nor a
+   * device's, which is what keeps this one off a controller's own view while the option that turns the feature on stays there.
    */
   assert.equal(port.default, true);
   assert.equal(port.defaultValue, ACCESS_WEBHOOK_PORT);
@@ -157,7 +158,8 @@ test("the door guard filter is a device-scoped picker over a page-registered sou
 
   const guards = entryFor("Hub", "Doorbell.DoorGuards");
 
-  // A picker over the guards the door in view lists, storing the selection as a list, offered only where a door is in view.
+  // A picker over the guards the door in view lists, or over every user the census carries who is not deactivated where the door's guards are unknown, storing the
+  // selection as a list, offered only where a door is in view.
   assert.equal(guards.choices, "doorGuards");
   assert.equal(guards.multiple, true);
   assert.deepEqual(guards.scopes, ["device"]);

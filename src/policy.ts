@@ -894,9 +894,9 @@ export function lockCommandRule(options: { delayInterval: number | undefined; is
   return { kind: "rule", rule: { interval: delayInterval, type: "custom" } };
 }
 
-/* How a hub's door is presented in HomeKit, as the choices the settings page offers. The service values are the HomeKit services the door is configured as,
- * spelled exactly as the configuring log line spells them, and the automatic choice defers to the hardware: a UA Gate presents as a garage door opener and every
- * other hub as a lock.
+/* How a hub's door is presented in HomeKit, as the choices the settings page offers. The service values are the HomeKit services the door is configured as, spelled as
+ * the option value a user writes, such as Enable.Hub.Door.Service=GarageDoorOpener, and the automatic choice defers to the hardware: a UA Gate presents as a garage
+ * door opener and every other hub as a lock.
  */
 export const doorServiceChoices = [
 
@@ -1210,9 +1210,10 @@ export function composeAccessMethodUpdate(options: { enabled: boolean; keys: rea
  * cannot see the method on this device at all.
  *
  * The verdict is judged on the primary key alone - the key the switch's own reads use - because any secondary keys a multi-key method also writes are best-effort
- * riders whose absence or disagreement says nothing about the switch. The read-back map is sparse: an absent key means the official surface does not offer that
- * method on this hardware, not that the method is off, so absence is a verdict of its own and the caller decides which path serves next. A present key disagreeing
- * with the written value means the controller answered success while leaving the setting as it was...the one outcome only a read-back can reveal.
+ * extras the write also carries, whose absence or disagreement says nothing about the switch. The read-back map is sparse: an absent key means the official
+ * surface does not offer that method on this hardware, not that the method is off, so absence is a verdict of its own and the caller decides which path serves
+ * next. A present key disagreeing with the written value means the controller answered success while leaving the setting as it was...the one outcome only a
+ * read-back can reveal.
  *
  * @param options - The written value, the primary key to judge on, and the read-back access-method map.
  *

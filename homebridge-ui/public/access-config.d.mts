@@ -47,9 +47,8 @@ export interface AccessIdentity {
 }
 
 /**
- * The UI server's device probe, read into the one verdict every consumer branches on. A success carries the list it answered with - the topology's devices led by
- * the controller itself, or the official API's adopted inventory - and an empty message; a failure carries no devices, the user-facing reason, the headline the
- * surfaces render it under, and a guidance line where the surfaces' own standing guidance would send the user after the wrong thing.
+ * A failure verdict: no devices, the user-facing reason, the headline the surfaces render it under, and a guidance line where the surfaces' own standing guidance
+ * would send the user after the wrong thing.
  */
 export interface AccessProbeFailure {
 
@@ -60,6 +59,10 @@ export interface AccessProbeFailure {
   message: string;
 }
 
+/**
+ * A success verdict: the list the controller answered with - the controller's own row first, then the topology's devices or, for a token-only connect, the official API's
+ * adopted inventory - and an empty message.
+ */
 export interface AccessProbeSuccess {
 
   devices: Record<string, unknown>[];
@@ -70,6 +73,7 @@ export interface AccessProbeSuccess {
   tokenRefused: boolean;
 }
 
+/** The UI server's device probe, read into the one verdict every consumer branches on. */
 export type AccessProbeVerdict = AccessProbeFailure | AccessProbeSuccess;
 
 /**
@@ -85,8 +89,11 @@ export interface AccessDeviceListResult {
 }
 
 /**
- * The commit-shaped patch the migration produces. A consumed per-controller legacy property deletes by OMISSION from the freshly rebuilt successor, which is why no
- * per-item key appears here at all: the whole array is carried instead, and only when at least one item's successor differs from the item it replaces.
+ * The commit-shaped patch the migration, the controller save, and the controller removal produce. No per-item key appears here, because a key leaves an item by
+ * OMISSION - the migration rebuilds each successor from CONTROLLER_KEYS, and an identity write deletes the fields an editor left empty - so the whole controllers
+ * array travels rather than a per-item change. The migration carries the controllers array only when at least one item's successor differs from the item it
+ * replaces, and the options array only when it changed the entries. A save and a removal always carry the controllers array; a save carries the options array
+ * only when it moved an entry, and a removal only when the user asked for the sweep.
  */
 export interface AccessConfigPatch {
 
@@ -142,8 +149,8 @@ export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDe
 export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
 
 /**
- * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its two
- * entry enumerators, its list formatter, and its scope-identifier repair.
+ * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its entry
+ * enumerators, its list formatter, and its scope-identifier repair.
  *
  * @param injected.FeatureOptions             - The feature-option engine class.
  * @param injected.buildCatalogIndex          - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
@@ -165,7 +172,10 @@ export declare const primaryController: (config?: AccessConfig) => AccessControl
 /** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
 export declare const primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
 
-/** The detail a rejected probe request carries: the message it carries, the rejection itself when it is a string, or the unrecognized-shape sentence otherwise. */
+/**
+ * The detail a rejected probe request carries: its message where that is a string, the rejection itself where it is a string, and the unrecognized-shape sentence
+ * wherever neither leaves a non-empty string.
+ */
 export declare const readProbeRejection: (reason: unknown) => string;
 
 /** The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call. */

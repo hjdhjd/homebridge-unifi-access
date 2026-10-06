@@ -6,9 +6,10 @@
  * A controllers[] item key deletes by OMISSION from the successor the migration rebuilds, never by being carried as an explicitly undefined value, so what gets
  * asserted throughout is a key's ABSENCE from the rebuilt item rather than a comparison against undefined.
  *
- * Post-migration state resolves through the engine's own instruments rather than by matching entry strings, so an assertion binds to the option grammar instead of to one
- * spelling of it. The closing round trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a
- * migrated configuration runs on the same effective values the legacy one did.
+ * Post-migration state resolves through the engine's own instruments rather than by matching entry strings, so an assertion binds to the option grammar instead of
+ * to one spelling of it. A raw entry is read only where its spelling or its order is itself the subject, or to prove an entry has left the array. The closing round
+ * trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a migrated configuration runs on the
+ * same effective values the legacy one did.
  */
 import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, mqttConnectionSettings,
   normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
@@ -62,7 +63,7 @@ const ADDRESS_TOPIC = "unifi/gate";
 const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 
 // The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index and the builder that makes one, the
-// framework's own two entry enumerators, its list formatter, and its scope-identifier repair.
+// framework's own entry enumerators, its list formatter, and its scope-identifier repair.
 const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId });
 
@@ -114,7 +115,7 @@ function migrated(config: TestConfig, macByAddress: ReadonlyMap<string, string> 
 }
 
 // The patch a controller save composes, asserted to exist so each check below reads a patch rather than a nullable one: the composer answers null only for an
-// address another controller holds, which the listed-address rows below assert on their own.
+// address another controller holds, which the listed-address arms below assert on their own.
 function saved(config: TestConfig, save: SaveRequest): AccessConfigPatch {
 
   const patch = withControllerSaved(config, save);
@@ -168,7 +169,7 @@ test("the controller allowlist accounts for every property the controller option
 
   /* The compile-time half of this check, read in both directions, is the pair of annotated assignments below - the runtime assertions after them only name what the
    * annotations already enforce. The first proves every allowlisted key is a property AccessControllerOptions declares. The second proves the only properties the
-   * allowlist omits are the two that migrate, so a controller property added to the type without joining the allowlist fails this file's typecheck rather than
+   * allowlist omits are the ones that migrate, so a controller property added to the type without joining the allowlist fails this file's typecheck rather than
    * being silently dropped from every rebuilt item at runtime.
    */
   const anyControllerKey = (): keyof AccessControllerOptions => "address";
@@ -201,7 +202,8 @@ test("a token-only controller is never probed for migration, and nothing compose
     "a token never reaches the document a MAC address comes from, so probing this item would never resolve and would repeat on every open");
 
   // The pass runs the way the wiring runs it: only the controllers the probe list named can contribute a resolved MAC address, so an item nobody asked about has
-  // nothing for its settings to land against. Handing the migration a map it could never have been given would assert a scenario that cannot occur.
+  // nothing for its settings to land against. Handing the migration a map it could never have been given would assert a scenario that cannot occur. The address
+  // is cast because the interpreter types it unknown, and this fixture's address is a string literal.
   const probed = new Map(controllersAwaitingMigration(config).map((entry) => [ entry.address as string, CONTROLLER_MAC ]));
 
   assert.equal(accessConfig.migrate(config, probed), null,
@@ -400,7 +402,7 @@ test("the probe verdict reads all three response kinds and refuses a shape the s
 });
 
 // The detail a rejected probe request reads when it brought no readable reason of its own, transcribed rather than referenced so a sentence that drifts by a
-// character in its one home reddens a row.
+// character in its one home reddens an arm.
 const UNRECOGNIZED_SHAPE = "The plugin's UI server answered in an unrecognized shape.";
 
 test("a probe request rejected with an error reads the error's own message as its detail", () => {
@@ -841,7 +843,7 @@ function assertRefused(config: TestConfig, save: SaveRequest, message: string): 
   assert.equal(withControllerSaved(config, save), null, message + ", by the composer");
 }
 
-/* Assert that a save is accepted by the early check, and answer the controllers the composer writes for it, which an arm then reads.
+/* Assert that a save is accepted, by the early check and by the composer alike, and answer the controllers the composer writes for it, which an arm then reads.
  *
  * @param config  - The configuration the save is asked of.
  * @param save    - The save.
@@ -916,7 +918,8 @@ test("the comparison folds letter case and surrounding space, and an address dif
     assertRefused(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " names a held address in another case or with surrounding space");
   }
 
-  // Each of these names the same machine in some readings, and each is accepted, because the comparison folds letter case and surrounding space and nothing else.
+  // Some of these name the same machine in another spelling and the rest are near-misses a character away, and each is accepted, because the comparison folds
+  // letter case and surrounding space and nothing else.
   for(const address of [ "unifi.local.", "unifi.local:443", "unifi-local", "unifi.locals", "[fe80::1]", "fe80:0:0:0:0:0:0:1" ]) {
 
     assert.deepEqual(accepted(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " differs in a character the form keeps")?.at(-1),
@@ -993,8 +996,8 @@ test("removal drops the item its address names, and an empty MAC set leaves the 
 test("the sweep strips every spelling the framework's own enumerator resolves to a swept MAC", () => {
 
   /* Each form below is first proven to address a MAC scope through the engine itself, so these assertions bind to the parser's grammar rather than to a reading of it:
-   * the bare enable and the bare disable, the canonical entry whose value sits behind the payload delimiter, and the legacy dot spelling the parser still accepts
-   * from configurations hand-authored before that delimiter existed.
+   * the bare enable and the bare disable, a lower-cased entry whose value sits behind the payload delimiter, which proves an entry's casing does not change the scope
+   * it addresses, and the legacy dot spelling, which the parser accepts as an alternative to the payload delimiter.
    */
   const bareDisable = "Disable.Hub.Doorbell." + DEVICE_MAC;
   const bareEnable = "Enable.Hub.Doorbell." + CONTROLLER_MAC;
@@ -1062,6 +1065,7 @@ test("every migrated setting resolves to the same effective broker and topic the
   // makes the before and the after comparable at all.
   const resolve = (state: TestConfig): ReturnType<typeof mqttConnectionSettings> => {
 
+    // The configuration types every item property unknown, and each fixture here carries its MQTT properties as strings, which is what the cast states.
     const properties = (state.controllers?.[0] ?? {}) as { mqttTopic?: string; mqttUrl?: string };
 
     return mqttConnectionSettings({ config: properties, controller: CONTROLLER_MAC, featureOptions: engineWith(state.options) });

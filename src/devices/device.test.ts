@@ -1,6 +1,7 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * device.test.ts: Tests for the per-device observe loop and the debug gate every device composes.
+ * device.test.ts: Tests for what every AccessDevice composes: the observe loop, reachability and its HomeKit and MQTT projections, the debug gate, identity capture,
+ * timers and listeners bound to the device lifetime, and name synchronization.
  */
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
@@ -29,9 +30,9 @@ const TIMER_DELAY_MS = 10;
 // The topic the shared hub record states its availability on, as the broker double records it: the device's identity and the catalog's tail, with no prefix.
 const AVAILABILITY_TOPIC = "AABBCCDDEE01/availability";
 
-/* The base carries no abstract members of its own, so a near-bare subclass is the whole harness the loop needs. The wrappers expose the protected hint configuration
- * and the protected synchronized-name derivation, which is how an arm drives the real option reads, the real deviation log, and the real derivation rather than
- * paths it wrote itself.
+/* AccessDevice supplies every abstract member AccessBase declares and adds none of its own, so a near-bare subclass is the whole harness the loop needs. The
+ * wrappers expose the protected Not Responding rule, the protected hint configuration, and the protected synchronized-name derivation, which is how an arm drives
+ * the real rule, the real option reads, the real deviation log, and the real derivation rather than paths it wrote itself.
  */
 class TestDevice extends AccessDevice {
 
@@ -123,9 +124,9 @@ interface Harness {
  * That is what lets the debug arms drive a device's own gate end to end - the composition, the scope resolution, and the channel the line lands on - rather than
  * asserting against a stub that decided the answer for them.
  *
- * The controller is the shared double, told only what this suite varies: the health holder its client reads live, the registration recorders, the identity, the
- * platform above, and the loop capture. Its device name and its own name are separate members there, so a rendered prefix an arm reads shows for itself that no
- * controller half reached it.
+ * The controller is the shared double, told only what this suite varies: the health holder its client reads live, the registration and emission recorders, the
+ * identity, the broker double an arm reads publishes from, the platform above, and the loop capture. Its device name and its own name are separate members there,
+ * so a rendered prefix an arm reads shows for itself that no controller half reached it.
  *
  * @param script - The records the projection yields, in order.
  * @param init   - The device record construction seeds this device from, the broker double the controller publishes through where an arm reads what reached
@@ -163,8 +164,9 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
 
   const controller = makeControllerDouble({
 
-    /* The client the availability composition reads its controller-wide half through. The nesting is the composition's own read path, so a double flattened to a
-     * sibling member here would leave the client undefined and throw on every tick of the loop below.
+    /* The client the availability composition reads its controller-wide half through. The nesting is the composition's own read path, and it matters because the
+     * shared double spreads this client over a default whose connection always reads healthy...a holder placed anywhere else is ignored, and the composition reads
+     * healthy whatever the arm sets.
      */
     client: {
 
@@ -665,9 +667,10 @@ test("a device's identity is captured at adoption and survives a record whose ow
 
 test("an Enterprise hub port answers the option entries that name it, and its sibling answers none of them", () => {
 
-  /* Two ports of one hub, sharing a MAC address and differing only by their qualifier. One entry names port1 by the identity the plugin addresses it with and
-   * nothing names port2, so every read below has to answer for the port it was asked about: a boolean gate reaching the engine with the bare hub serial would
-   * answer true for both, and a gate whose scope carried no qualifier while the value reads carried one would leave a per-port option addressable by neither.
+  /* Two ports of one hub, sharing a MAC address and differing only by their qualifier. The entries name port1 by the identity the plugin addresses it with, a
+   * boolean and a value, and nothing names port2, so every read below has to answer for the port it was asked about: a boolean gate reaching the engine with the
+   * bare hub serial would answer true for both, and a gate whose scope carried no qualifier while the value reads carried one would leave a per-port option
+   * addressable by neither.
    */
   const entries = [ "Enable.Device.SyncName.AABBCCDDEE02-PORT1", "Enable.Hub.LockDelayInterval.AABBCCDDEE02-PORT1.5" ];
   const portOne = makeHarness([], { construction: portRecord("port1"), options: entries });
@@ -723,7 +726,7 @@ test("one string carries a device's option scope, its MQTT topic tail, and the i
   // And the engine resolves that string at the device scope, which is what lets a device entry outrank the controller entry that would otherwise answer for it.
   assert.equal(harness.featureOptions.scope("Device.SyncName", device.id, CONTROLLER_ID), "device");
 
-  // The brand is a compile-time statement: this declaration is what the typecheck fails on if the identity ever widens back into a plain string.
+  // The brand is a compile-time statement: this declaration is what the typecheck fails on if the identity is ever widened to a plain string.
   const serial: DecoratedSerial = device.id;
 
   assert.equal(serial, "AABBCCDDEE02-PORT1");

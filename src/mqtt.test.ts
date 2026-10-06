@@ -29,8 +29,9 @@ const OPTION_TOPIC = "option/access";
 /**
  * Resolve one controller's MQTT settings through the engine the plugin runs.
  *
- * Every caller states the MAC address rather than leaning on a default, because `undefined` is a meaningful value here - it is the token-only controller - and a
- * parameter default would quietly substitute a MAC for exactly the arm that needs none, leaving that arm asserting something other than what it names.
+ * Every caller states the MAC address rather than leaning on a default, because `undefined` is a meaningful value here - it is a controller named by no scope at
+ * all, whose MQTT settings can come only from its configuration properties - and a parameter default would quietly substitute a MAC for exactly the arm that needs
+ * none, leaving that arm asserting something other than what it names.
  *
  * @param configured - The feature-option entries the user has configured.
  * @param config     - The controller's configuration properties.
@@ -54,9 +55,10 @@ test("no broker configured anywhere leaves MQTT off for the controller", () => {
 
 test("a configuration carrying only the legacy properties resolves exactly what it always resolved", () => {
 
-  /* Both properties set is the shape of every configuration running today, and this is the assertion the whole transition rests on. It is also what fails a
-   * resolution that reads the topic option's value without first asking whether the user configured it: that option defaults on, so its value answers the canonical
-   * prefix even for a user who has never opened the webUI, and a naive read would silently retopic every automation already subscribed to the legacy one.
+  /* Both properties set with no option configured must resolve exactly those properties, so a configuration that never touched the options keeps its broker and
+   * prefix. It is also what fails a resolution that reads the topic option's value without first asking whether the user configured it: that option defaults on,
+   * so its value answers the canonical prefix even for a user who has never opened the webUI, and a naive read would silently retopic every automation already
+   * subscribed to the legacy one.
    */
   assert.deepEqual(resolve([], { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, CONTROLLER_MAC), { brokerUrl: LEGACY_BROKER, topicPrefix: LEGACY_TOPIC });
 
@@ -113,8 +115,8 @@ test("a controller no entry speaks for is carried by its legacy configuration", 
 
 test("a controller reached with an API token alone is addressable by its address identity", () => {
 
-  /* Such a controller answers by its configured address with the periods repaired into hyphens, which is a scope identifier like any other - so its own broker and
-   * topic are configurable per-controller exactly as a credentialed controller's are, and the entries outrank the legacy properties sitting behind them.
+  /* Such a controller answers by its configured address with each period replaced by a hyphen, which is a scope identifier like any other - so its own broker
+   * and topic are configurable per-controller exactly as a credentialed controller's are, and the entries outrank the legacy properties sitting behind them.
    */
   assert.deepEqual(resolve([ "Enable.Mqtt.Topic.1-2-3-4=" + OPTION_TOPIC, "Enable.Mqtt.Url.1-2-3-4=" + OPTION_BROKER ],
     { mqttTopic: LEGACY_TOPIC, mqttUrl: LEGACY_BROKER }, "1-2-3-4"), { brokerUrl: OPTION_BROKER, topicPrefix: OPTION_TOPIC });
@@ -142,7 +144,7 @@ test("the catalog declares the wire topics every subscriber already relies on", 
     unlock: "unlock"
   });
 
-  // One composition through the library, so the string a nested tail puts on the wire is stated here rather than only inferred from the tail above.
+  // One composition through the library, so the identity-scoped tail a nested topic composes to is stated here rather than only inferred from the tail above.
   assert.equal(mqttTopic("AABBCCDDEEFF", mqttTopics.sidedoorLock.topic), "AABBCCDDEEFF/sidedoor/lock");
 
   // The device column travels with the entries, which is what lets the renderer print a device cell for every row at the docs build.

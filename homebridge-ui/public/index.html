@@ -10,16 +10,16 @@
     width: 33%;
   }
 
-  /* The login validation's result line. It holds its own height whether or not it is saying anything, so the card does not shift under the user's eye as a
-   * validation answers.
+  /* The connection card's verdict line, the one line every action on the card speaks through. It holds its own height whether or not it is saying anything, so
+   * the card does not shift under the user's eye as a validation answers.
    */
   .hbua-result {
     min-height: 1.25em;
   }
 
-  /* The sidebar column is held to the same fixed width the framework gives #sidebar, so the control it anchors can never float with flex pressure from the
-   * options pane or with the sidebar region's visibility. It reads the framework's own width token, which is the same value #sidebar itself resolves, so the two
-   * cannot drift apart.
+  /* The sidebar column is held to the same fixed width the homebridge-plugin-utils webUI framework gives #sidebar, so the control it anchors can never float with
+   * flex pressure from the options pane or with the sidebar region's visibility. It reads the framework's own width token, which is the same value #sidebar itself
+   * resolves, so the two cannot drift apart.
    */
   #hbuaSidebarColumn {
     max-width: var(--fo-sidebar-width);
@@ -151,15 +151,14 @@
     <p class="small text-muted mb-0 mt-3">To optimize performance and responsiveness, make this plugin a <a target="_blank" href="https://github.com/homebridge/homebridge/wiki/Child-Bridges">child bridge</a> once you've completed configuration.</p>
   </div>
 </div>
-<!-- menuHome and menuFeatureOptions are ids the shared webUI framework wires by a literal getElementById lookup, so neither may be renamed to match its visible text
-     below - Support and Settings are this plugin's own label choice over the framework's own Home and Features defaults for the same ids. -->
+<!-- menuHome and menuFeatureOptions are ids the framework wires by a literal getElementById lookup, so neither may be renamed to match its visible text below.
+     The framework leaves their labels to the page, so Support and Settings are this page's own wording. -->
 <div id="menuWrapper" class="btn-group w-100 mb-0" role="group" aria-label="UI Menu" style="display: none;">
   <button type="button" class="btn btn-primary" id="menuFeatureOptions">Settings</button>
   <button type="button" class="btn btn-primary mr-0" id="menuHome">Support</button>
 </div>
-<!-- Beyond the shared webUI framework's own skeleton for this id, which renders no tabindex, this container is made a tab stop on purpose: tabindex="0" puts the
-     settings page root itself in keyboard tab order and reachable by assistive-technology navigation, entirely through the attribute itself rather than any script
-     moving focus there. -->
+<!-- This container is made a tab stop on purpose: tabindex="0" puts the settings page root itself in keyboard tab order and reachable by assistive-technology
+     navigation, entirely through the attribute itself rather than any script moving focus there. -->
 <div id="pageFeatureOptions" class="mt-2" style="display: none;" tabindex="0">
   <div id="headerInfo" class="alert alert-info bg-transparent py-2 px-3 mb-2"></div>
   <div class="feature-main-content">

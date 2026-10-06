@@ -22,13 +22,14 @@ import { webUi } from "homebridge-plugin-utils/webUi.mjs";
  */
 const PROBE_DEADLINE = 5;
 
-/* The bound in seconds on the whole load-time wiring below. The page's own boot monitor fires its slow-boot notice and hides the spinner at ten seconds, so
- * WIRING_DEADLINE settles the envelope provably inside it and a wiring step that hangs against an unresponsive host can never be what makes the settings panel
- * look broken.
+/* The bound in seconds on the whole load-time wiring below. The page's own boot monitor fires its slow-boot notice and hides the spinner ten seconds into the
+ * page's parse, while WIRING_DEADLINE starts only once the loader has imported this module, so the envelope settles inside that watchdog whenever the loader's own
+ * startup fits in the margin between the two...and then a wiring step that hangs against an unresponsive host is not what makes the settings panel look broken.
  *
- * The migration's per-controller probe bounds above are what keep the realistic worst case inside this outer guard; this one exists for what they cannot cover, a
- * catalog fetch or a session open that goes pathological. An outer expiry writes nothing at all and the whole pass retries at the next open. A configuration that
- * has already converged never approaches either bound, because its envelope is the catalog fetch and the session open and nothing else.
+ * The catalog read carries the bound homebridge-plugin-utils gives it and each migration probe carries PROBE_DEADLINE, but the session open and its write carry
+ * none, and the bounded steps run one after another, so their bounds add up rather than overlap. This outer guard covers the unbounded steps and caps the sum. An
+ * expiry stops the pass at its next cancellation point, and the whole pass retries at the next open. A configuration that has already converged never comes near
+ * this guard, because its envelope is the catalog fetch and the session open and nothing else.
  */
 const WIRING_DEADLINE = 8;
 
@@ -129,7 +130,8 @@ const renderVerdict = ({ detail = "", lines = [], row, tone = "" }) => {
 const requestControllerProbe = makeControllerProbe({ classifyProbeResponse, deadline: CONNECTION_CHECK_DEADLINE, hasValidIdentity, readProbeRejection,
   request: (path, body) => homebridge.request(path, body), withDeadline });
 
-// Validate our Access sign-in and commit it.
+// Validate our Access sign-in and commit it. An answer of true hands the page over to the feature-options view and false keeps the user on the first-run form;
+// the framework raises the spinner around the whole submit and brings it down on every path, so no path here touches it.
 const firstRunOnSubmit = async ({ commit, config }) => {
 
   const identity = firstRunCard.values();
@@ -195,13 +197,13 @@ const isController = (device) => device.display_model === "controller";
 // decorated serial of a credentialed answer, and the address identity of a token-only one. Every read of it on the page goes through this one expression.
 const controllerSerial = (answer) => answer?.devices.find(isController)?.serialNumber;
 
-/* The platform configuration the framework last injected into one of our hooks, or null before the first of them runs.
+/* The platform configuration the feature-options hooks (getControllers and getDevices) last received, or null before the first of them runs.
  *
  * The framework re-reads the host configuration into its own session immediately before it calls these hooks, so what is held here is the configuration the page
  * itself is working from rather than a snapshot taken at load. The docked editors populate their fields from it, which is a read the framework's render path gives
  * them no other way to make: the info-panel and connection-error bags carry the selection, not the configuration behind it.
  *
- * Nothing WRITES through this copy. Every write opens a session of its own and commits against what that session reads, so a stale copy here never persists. A
+ * Nothing WRITES through this copy. Every write composes against the configuration its session holds at the write, so a stale copy here never persists. A
  * save's listed-address check does read it, ahead of the connection test, so a stale copy can refuse a save the composer would accept, which the user retries once
  * the page has caught up. It can never let a duplicate through, because the composer asks the same rule of the configuration the write composes over, and its
  * refusal is the one that decides.
@@ -210,13 +212,15 @@ let injectedConfig = null;
 
 /* Send the live-status feed its controller context: for each configured controller this session holds a kept probe answer for, the identity members exactly as the
  * configuration item spells them, the decorated serials of the answer's devices, and the decorated serial of the answer's controller record where one exists - a
- * token-only answer carries no console identity, so that member is honestly absent. A send follows every write that keeps or drops an answer, the removal's own
- * delete included, so the feed's registry tracks what this session knows; the feed rebuilds its registry wholesale from each send.
+ * token-only answer carries no console identity, so that member is honestly absent. A send follows every save and removal that lands, every put-back of a save's
+ * seed, and every fetch whose answer is kept, so the feed's registry tracks what this session knows; the feed rebuilds its registry wholesale from each send. The
+ * Refresh control's clear sends nothing and leaves the registry to the next send, and so does a write outcome the page does not recognize.
  *
- * The raw request promise feeds the shared panel's link-lost watchdog directly, on the donor discipline the family's status pages share: the watch observes the raw
- * promise so a rejection reaches its two-armed hook as a rejection, the console diagnostic runs on a separate chain off the same promise, and the panel handle is read
- * at call time because it is minted per show() and must never be captured. The settle is awaited so the one caller that must sequence behind the send - the hello
- * re-elicitation - can; every other call site voids the promise, and the swallow keeps a failure from surfacing twice.
+ * The raw request promise feeds the shared panel's link-lost watchdog directly, as the panel's own view request does: the watchdog counts a rejection as a live
+ * relay, so it must observe the raw promise rather than one the diagnostic's catch has already turned into a resolution. The console diagnostic runs on a separate
+ * chain off the same promise, and the panel handle is read at call time because it is minted per show() and must never be captured. The settle is awaited so the
+ * one caller that must sequence behind the send - the hello re-elicitation - can; every other call site voids the promise, and the swallow keeps a failure from
+ * surfacing twice.
  */
 const sendStatusContext = async () => {
 
@@ -273,9 +277,9 @@ const sidebarGroupRank = (group) => {
   return (rank === -1) ? SIDEBAR_GROUP_ORDER.length : rank;
 };
 
-/* Add the fields the webUI framework renders from, and mark the controller entry with the address the plugin reached it at. It touches the device records and
- * nothing on the page, which is what lets both writers into the map above run it: the device view's own fetch, and a save re-seeding from the answer its validation
- * just received. One helper is what keeps those two from processing the same list into two different shapes.
+/* Add the fields the webUI framework renders from, and mark every record with the configured address of the controller that listed it. It touches the device
+ * records and nothing on the page, which is what lets both writers of the kept controller answers run it: the device view's own fetch, and a save re-seeding from
+ * the answer its validation just received. One helper is what keeps those two from processing the same list into two different shapes.
  *
  * The serial number is not computed here. It arrives already decorated by the UI server, which reaches the plugin's own policy module for the Enterprise port suffix
  * that tells one port of a multi-door hub from its siblings...knowledge the browser has no way to derive for itself.
@@ -286,6 +290,8 @@ const sidebarGroupRank = (group) => {
  */
 const processDeviceList = ({ address, devices }) => {
 
+  // An Enterprise hub is listed as its ports, and unifi-access spells each port's display model as the hub's with that port's name appended, which names a port
+  // rather than a hardware model. A port is keyed by its model field instead, which carries the hub's own model and is the same on every port of that hub.
   const modelKeys = [...new Set(
     devices.filter(device => ["controller"].includes(device.display_model) || device.capabilities.includes("is_hub") || device.capabilities.includes("is_reader"))
       .map(device => (device.device_type === "UAH-Ent") ? device.model : device.display_model))];
@@ -322,7 +328,7 @@ const processDeviceList = ({ address, devices }) => {
 };
 
 /* Show a controller's own name on its sidebar entry, which is something only a controller we have connected to can tell us - the configuration records an address
- * and the sidebar has nothing else to label the entry with until then. Every device fetch runs this, whether the list came off the wire or out of the map above: a
+ * and the sidebar has nothing else to label the entry with until then. Every device fetch runs this, whether the list came off the wire or out of the kept answers: a
  * served list re-asserts the same string, and one uniform path is worth more than the assignment a divergent fast path would save.
  */
 const patchControllerLabel = ({ address, devices }) => {
@@ -351,10 +357,11 @@ const commitConfig = (compose, options) => ui.featureOptions.commitConfig(compos
 
 /* The settings page's kept controller answers and the controller save and the controller removal that write them, built once for this page copy. Everything those actions
  * reach outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
- * catalog-backed interpreters behind it, the configuration the page last received, the connection check and the status-context send, which travel over the UI-server
- * bridge, and the row shape the UI server writes a controller into, which the serial read interprets. The listed-address rule and its sentence come straight from the
- * interpretation module rather than through the interpreters, because neither needs the catalog and a save's refusal must not wait on a catalog read. What the actions
- * keep about each controller stays theirs, and the page reads it back through the handle alone.
+ * catalog-backed interpreters behind it, the configuration the page last received, the device-list decoration a save's seed runs over the answer it keeps, the
+ * connection check and the status-context send, which travel over the UI-server bridge, and the row shape the UI server writes a controller into, which the serial
+ * read interprets. The listed-address rule and its sentence come straight from the interpretation module rather than through the interpreters, because neither
+ * needs the catalog and a save's refusal must not wait on a catalog read. What the actions keep about each controller stays theirs, and the page reads it back
+ * through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
@@ -436,7 +443,9 @@ const getDevices = async (selectedController, { config }) => {
   // being kept.
   const generation = answers.generation();
 
-  // The browser cannot reach the Access controller directly, so we bridge the request through the plugin's UI server, which holds the controller's identity.
+  // The browser cannot reach the Access controller directly, so we bridge the request through the plugin's UI server, which holds the controller's identity. A
+  // request that rejects is left to reject this hook, because the framework renders a rejected fetch as the plugin's own failure rather than the controller's,
+  // which is what a UI server that did not answer is.
   const answer = classifyProbeResponse(await homebridge.request("/getDevices", { address: controller.address, password: controller.password,
     tokens: controller.tokens, username: controller.username, verifyTls: controller.verifyTls }));
 
@@ -457,6 +466,8 @@ const getDevices = async (selectedController, { config }) => {
 // both of its members are optional, so an entry that declares no scope at all reaches these tests as a chain of absent values rather than a throw.
 const validOption = (device, option) => {
 
+  // Every option shows at the global and controller level, because an entry set at either applies to every device beneath it that sets none of its own; only a
+  // device's own view is filtered to what that device can use.
   if(device && (device.display_model !== "controller") && (
     (option.meta?.hasCapability && (!device.capabilities || !option.meta.hasCapability.some(x => device.capabilities.includes(x)))) ||
     (option.meta?.modelKey && !option.meta.modelKey.includes("all") && !option.meta.modelKey.includes(device.display_model)))) {
@@ -507,7 +518,7 @@ let cardInstances = 0;
  * @param options.helper         - The card's explanatory line, on the same terms as the heading.
  * @param options.noSweepReason  - What the removal confirmation says when there are no device settings it can offer to strip.
  * @param options.onCancel       - Invoked by the Cancel control, when the caller offers one.
- * @param options.onRemove       - Invoked with the MAC addresses to strip once a removal is confirmed, when the caller offers removal.
+ * @param options.onRemove       - Invoked with the scoping identities to strip once a removal is confirmed, when the caller offers removal.
  * @param options.onSave         - Invoked by the Save control, when the caller offers one. A card offering a Save carries the save flow its presses run through.
  * @param options.signal         - The caller's own lifecycle, when it has one. The card's teardown composes with it.
  *
@@ -560,7 +571,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   // shows now from an answer about what it showed when the action began.
   let population = 0;
 
-  // The MAC addresses a removal would offer to strip settings for, as the caller's last population named them.
+  // The scoping identities (decorated serials) a removal would offer to strip settings for, as the caller's last population named them.
   let removalMacs = [];
 
   const verdict = {
@@ -746,7 +757,7 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
  * Each home differs in where it sits and in what a removal can offer, and in nothing else. The docked editor sits in a reachable controller's own stats panel
  * and can strip the settings of every device that controller answered with; the editor the connection-error view hosts reaches a controller the page has no device
  * list for, where removal is offered on its own. Both correlate to a configuration item by address, both validate before they write, and both follow the address
- * they wrote so a second save edits the same item rather than appending a duplicate beside it.
+ * they wrote so a second save edits the same item rather than looking for the address the first one replaced.
  *
  * @param options.collapsible   - Whether the card sits behind a disclosure the user opens, which the docked editor does and the error-view editor does not.
  * @param options.container     - The element this editor owns entirely, including its visibility.
@@ -791,9 +802,9 @@ const mountControllerEditor = ({ collapsible = false, container, heading, helper
       const saved = await saveController({ card, originalAddress: edited });
 
       /* The card now stands for the address it just wrote. Following it is what keeps an address change an edit: without this, a second save would look for the
-       * address the user replaced, find nothing, and append a duplicate controller beside the one it meant to edit. A save outlives a re-population, so the card
-       * follows only while it still stands for the item this save edited...once it has been pointed at another controller, following would aim that controller's
-       * next save or removal at the item this one wrote.
+       * address the user replaced and find nothing, so it would be refused as already listed, or, where it changed the address again, append a second entry for
+       * the same controller. A save outlives a re-population, so the card follows only while it still stands for the item this save edited...once it has been
+       * pointed at another controller, following would aim that controller's next save or removal at the item this one wrote.
        */
       if((saved !== null) && (configAddress === edited)) {
 
@@ -887,8 +898,8 @@ let detailsPanel = null;
 /* The plugin's content hook beneath the live status panel: the docked connection editor and the token-only notice. The identity rows and the live rows above are
  * the panel's own; what docks here is the content whose lifetime is the mount's rather than the selection's.
  *
- * The hook runs on every selection render, the mount-time no-device render included - the signal-keyed once-ness tolerates that call by construction, the same
- * guard this dock has always keyed its mount on.
+ * The hook runs on every selection render, the mount-time no-device render included - the signal-keyed once-ness the dock's mount uses tolerates that call by
+ * construction.
  */
 const showAccessDetails = ({ device, panel, signal }) => {
 
@@ -922,8 +933,8 @@ const showAccessDetails = ({ device, panel, signal }) => {
 
   const { editor, noticeRegion } = detailsPanel;
 
-  // Whether the selection is the controller's own row AND that controller answered this session with an API token alone, which is what decides both the notice
-  // below and whether the connection editor is offered on this render.
+  // Whether the selection is the controller's own row AND that controller answered this session with an API token alone, which decides whether the notice below
+  // shows. The connection editor is offered on every controller row either way.
   const tokenOnlyController = Boolean(device) && isController(device) && (answers.get(device.hbuaConfigAddress)?.kind === "token-only");
 
   /* The docked editor sits on the controller's own node and nowhere else. Every controller answers with a row of its own whichever way it was reached, so that row
@@ -964,8 +975,8 @@ const featureOptionsParams = {
     controllerLabel: "Access Controllers",
 
     /* Where each group of the device list sits: the hubs first, then the readers that hang off them. The framework hands this comparator only the names that render
-     * as sections, so neither a controller's own group nor the reserved hidden group ever reaches it, and a group the order above does not name sorts after both of
-     * the named ones by locale.
+     * as sections, so neither a controller's own group nor the reserved hidden group ever reaches it, and a group the order above does not name sorts after every
+     * named one by locale.
      */
     groupOrder: (a, b) => (sidebarGroupRank(a) - sidebarGroupRank(b)) || a.localeCompare(b),
 
@@ -985,8 +996,8 @@ const featureOptionsParams = {
   },
 
   /* The live status panel configuration. The panel component, the wire vocabulary, and the view cadence are the framework's; what is supplied here is exactly the
-   * Access projection - the identity cells the retired static grid carried (the panel's own status label owns liveness), the placeholder skeleton, the error copy
-   * whose Access wording differs from the component's credential-neutral defaults, the helper-restart re-elicitation, and the docked content hook.
+   * Access projection - the identity cells (the panel's own status label owns liveness), the placeholder skeleton, the error copy whose Access wording differs from
+   * the component's credential-neutral defaults, the helper-restart re-elicitation, and the docked content hook.
    */
   statusPanel: {
 
@@ -1133,8 +1144,8 @@ const successVerdict = (probe) => {
 };
 
 /* Validate a card's controller connection on demand. It is early feedback and nothing else: every path that commits anything - the first-run submit, a card's own
- * Save - validates through this same helper first, so a user who never presses the control is no worse off, and one who does learns whether their sign-in works
- * before committing a configuration.
+ * Save - validates through requestControllerProbe first, the same check this control runs, so a user who never presses the control is no worse off, and one who
+ * does learns whether their sign-in works before committing a configuration.
  */
 const onValidateLogin = async ({ button, card }) => {
 

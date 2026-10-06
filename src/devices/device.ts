@@ -23,11 +23,12 @@ import { mqttTopics } from "../mqtt.ts";
 // vocabulary by construction rather than by two literals happening to match.
 export type AccessConsumedWebhookEventName = typeof ACCESS_WEBHOOK_EVENTS[keyof typeof ACCESS_WEBHOOK_EVENTS];
 
-// The delivery a consumed event name carries, extracted from the library's own union so the payload type follows the name with nothing restated here.
+// The delivery a consumed event name carries, extracted from unifi-access's own union so the payload type follows the name with nothing restated here.
 export type AccessConsumedWebhookDelivery<K extends AccessConsumedWebhookEventName> = Extract<AccessWebhookEvent, { event: K }>;
 
-/* Device-specific options and settings. What lives here is the user's stated preference, resolved once at configuration time...never a cached reading of what the
- * hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory on its own.
+/* The device-specific options and settings a device holds. What lives here is the user's stated preference, resolved once at configuration time...never a cached
+ * reading of what the hardware reports, which every gate derives fresh from the evidence in hand so that a change in what the hardware says reaches the accessory
+ * on its own.
  *
  * The side door hint is the exception the UA Gate earns, because that hardware drives two doors: the hint folds the fact that the device is a gate into the user's
  * setting for its second door.
@@ -47,7 +48,7 @@ export abstract class AccessBase {
   public readonly controller: AccessController;
   public readonly platform: AccessPlatform;
 
-  // The constructor initializes key variables and calls configureDevice().
+  // The constructor derives the API and HAP handles, the controller and platform references, and this owner's prefixed, debug-gated logger.
   constructor(controller: AccessController) {
 
     this.api = controller.platform.api;
@@ -76,23 +77,19 @@ export abstract class AccessBase {
    */
   protected setInfo(accessory: AccessAccessory, device: AccessStateDevice, mac: string): boolean {
 
-    // Update the manufacturer information for this device.
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Manufacturer, "Ubiquiti Inc.");
 
     // Update the model information for this device. The resolution always answers something a user recognizes, so there is nothing to guard here.
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.Model, this.controller.resolveDeviceModel(device));
 
-    // Update the serial number for this device.
     accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.SerialNumber, serialForm(mac));
 
-    // Update the firmware revision for this device.
     if(device.firmware) {
 
       // Capture the version of the device firmware, ensuring we get major, minor, and patch levels if they exist.
       const versionRegex = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(.+))?$/;
       const match: Nullable<(string | undefined)[]> = versionRegex.exec(device.firmware);
 
-      // Update our firmware revision.
       accessory.getService(this.hap.Service.AccessoryInformation)?.updateCharacteristic(this.hap.Characteristic.FirmwareRevision,
         match ? (match[1] ?? "0") + "." + (match[2] ?? "0") + "." + (match[3] ?? "0") : device.firmware);
     }
@@ -111,7 +108,7 @@ export abstract class AccessDevice extends AccessBase {
    * cannot be reached refuses on the very next read and one that comes back answers on it. Every readable characteristic a subclass wires goes through it, which
    * leaves exactly one place that decides whether this device can answer at all, while the availability push and the gate the door commands open with read that
    * same composition, so what HomeKit is shown, what it is refused, and what a command refuses on agree by construction. The error class comes from the runtime
-   * HAP namespace the plugin holds, because the library carries no HAP dependency of its own.
+   * HAP namespace the plugin holds, because homebridge-plugin-utils carries no HAP dependency of its own.
    */
   protected readonly answering: ReturnType<typeof notResponding>;
   public hints: AccessHints;
@@ -134,7 +131,7 @@ export abstract class AccessDevice extends AccessBase {
    */
   public readonly mac: string;
   // The device's live projection into the client's reduced state, and - for lock-capable hardware - the command-bearing view of the same device. The two are separate
-  // fields because the library exports the hub view as a type alone, so there is no runtime narrowing from the base handle; adoption is the one place the concrete
+  // fields because unifi-access exports the hub view as a type alone, so there is no runtime narrowing from the base handle; adoption is the one place the concrete
   // view is known, and it hands both down.
   protected readonly hubProjection: AccessHubProjection | undefined;
   protected readonly projection: AccessDeviceProjection;
@@ -152,7 +149,8 @@ export abstract class AccessDevice extends AccessBase {
   // The controller half of the composed lifetime above. Aborted by cleanup(), which is what ends this device alone without disturbing its siblings.
   readonly #deviceController: AbortController;
 
-  /* The constructor initializes key variables and calls configureDevice().
+  /* The constructor captures this device's identity, lifetime, and projection, and starts the loop that keeps its record current. A subclass configures itself from
+   * its own constructor once this returns.
    *
    * The admission record is the narrowed record membership admitted this device on, and it exists as an argument of its own because the projection's own record
    * cannot carry that narrowing: the projection reads through to live state, where a record's hardware identity is optional. Adoption is the one moment the
@@ -161,7 +159,6 @@ export abstract class AccessDevice extends AccessBase {
   constructor(controller: AccessController, projection: AccessDeviceProjection, accessory: AccessAccessory, admission: AccessStateDevice & { mac: string },
     hubProjection?: AccessHubProjection) {
 
-    // Call the constructor of our base class.
     super(controller);
 
     this.#deviceController = new AbortController();
@@ -180,7 +177,6 @@ export abstract class AccessDevice extends AccessBase {
     this.timers = new TimerRegistry({ clock: this.platform.clock, signal: this.signal });
     this.uda = projection.config;
 
-    // Set the accessory.
     this.accessory = accessory;
 
     /* Observe our own record and keep everything downstream of it current. The loop is the only writer of uda after construction and the reducer's merge is its only
@@ -216,8 +212,7 @@ export abstract class AccessDevice extends AccessBase {
 
         /* Deliver the update to the accessory's own handlers, post-fold, through the same chokepoint the wire bridge uses. Doing it from here rather than from the raw
          * rail is what guarantees the handler sees the record as the update left it: the raw rail fires before the reducer folds, so a handler reading through to
-         * state from there would race the very change it was told about. The two trailing members are what the packet type requires, and both mirror what every
-         * captured wire frame carries.
+         * state from there would race the very change it was told about.
          */
         this.controller.events.emitPacket(this.#updatePacket());
       }
@@ -225,8 +220,8 @@ export abstract class AccessDevice extends AccessBase {
   }
 
   /* Restate this device's availability to every service that carries the characteristic, and on this device's own MQTT availability topic. The controller's
-   * connection observer pushes it whenever controller-level reachability may have moved, and this device's own record loop calls it on every delivery, so the two
-   * scopes the composition spans reach HomeKit and the broker through one statement rather than through a writer each.
+   * connection observer pushes it whenever controller-level reachability may have moved, and this device's own record loop calls it on every delivery, so every
+   * scope the composition spans reaches HomeKit and the broker through one statement rather than through a writer each.
    *
    * The characteristic's own value is the single source of what HomeKit was last shown, so nothing here shadows it with a flag that could drift from it. The MQTT
    * statement keeps no copy either: the client's change gate is what remembers the last statement it delivered.
@@ -275,9 +270,9 @@ export abstract class AccessDevice extends AccessBase {
 
     this.hints.syncName = this.hasFeature("Device.SyncName");
 
-    /* Inform the user if we've opted for something other than the defaults. The shared primitive resolves the option itself and speaks only on a deviation, so it
-     * needs no guard of its own...and the scope pair handed to it is the pair every read on this device resolves at, which is what keeps what the user is told
-     * and what the plugin does answering one question. The label is a noun phrase because the primitive composes the sentence around it.
+    /* Inform the user if we've opted for something other than the defaults. homebridge-plugin-utils' logFeature resolves the option itself and speaks only on a
+     * deviation, so it needs no guard of its own...and the scope pair handed to it is the pair every read on this device resolves at, which is what keeps what the
+     * user is told and what the plugin does answering one question. The label is a noun phrase because logFeature composes the sentence around it.
      */
     this.platform.featureOptions.logFeature("Device.SyncName", "Device name synchronization", this.log, this.id, this.controller.id);
 
@@ -298,7 +293,8 @@ export abstract class AccessDevice extends AccessBase {
     return this.setInfo(this.accessory, this.uda, this.mac);
   }
 
-  // Cleanup our event handlers and any other activities as needed.
+  // Clean up this device: release its event handlers, state it offline on its availability topic, and end its lifetime, which drains its timers and releases its
+  // MQTT registrations.
   public cleanup(): void {
 
     for(const [ eventName, handler ] of this.listeners) {
@@ -382,7 +378,7 @@ export abstract class AccessDevice extends AccessBase {
     this.controller.mqtt?.subscribeGet(mqttTopic(this.id, entry.topic), entry.label, getValue, { signal: composeSignals(this.signal, lifetime) });
   }
 
-  /* Register a setter on one of this device's own topics, under the same composition and the same lifetime as the getter above.
+  /* Register a setter on one of this device's own topics, composed exactly as the getter above and bound to this device's lifetime.
    *
    * @param entry    - The catalog entry naming the topic tail and the label.
    * @param setValue - The setter receiving the topic's incoming value.
@@ -421,8 +417,8 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.value(option, this.id, this.controller.id);
   }
 
-  /* Utility function to return the values a list-valued configuration parameter selects on a device, read through the shared engine's own list grammar. A domain
-   * narrows the read to what this device offers and answers in the domain's own spelling; without one the stored entries answer as the user named them.
+  /* Utility function to return the values a list-valued configuration parameter selects on a device, read through homebridge-plugin-utils' own list grammar. A
+   * domain narrows the read to what this device offers and answers in the domain's own spelling; without one the stored entries answer as the user named them.
    *
    * An option enabled at an explicit scope with nothing stored reads as its registered default rather than as the empty list. That is what a hand-written
    * `Enable.Hub.Sensors.<device>` means - the user turned the list on for that hub and named nothing - and reading it as an empty selection would silently
@@ -439,20 +435,20 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.test(option, this.id, this.controller.id);
   }
 
-  // Utility function for reserved identifiers for switches.
+  // Whether a name matches any reserved service subtype, compared case-insensitively.
   public isReservedName(name: string | undefined): boolean {
 
     return name === undefined ? false : Object.values(AccessReservedNames).map(x => x.toUpperCase()).includes(name.toUpperCase());
   }
 
-  /* Whether this device can be reached, composed over the two scopes that each gate it. Controller health gates every device at once: an outage freezes the record's
+  /* Whether this device can be reached, composed over the scopes that each gate it. Controller health gates every device at once: an outage freezes the record's
    * own online flags at whatever they last said, so the device-scope read below cannot be trusted on its own while the controller is unreachable. The device's own
    * state gates it from there.
    *
    * This is the plugin's single availability composition. Every StatusActive carrier reads it, every readable characteristic answers by it through the rule bound
    * above, and so does the gate the door commands open with, so what HomeKit is shown, what it is refused, and what an operation refuses on answer one question.
-   * The library deliberately ships no composition of its own, because last-known device state is all it can honestly own...composing per-operation reachability is
-   * the consumer's business, and this is where the consumer does it.
+   * unifi-access deliberately ships no composition of its own, because last-known device state is all it can honestly own...composing per-operation reachability
+   * is the consumer's business, and this is where the consumer does it.
    */
   public get isReachable(): boolean {
 
@@ -474,8 +470,8 @@ export abstract class AccessDevice extends AccessBase {
   }
 
   /* A device answers at its own identity alongside the controller's, so a Log.Debug entry suffixed with this device turns on its debug lines alone while its siblings
-   * stay quiet, and a controller-suffixed entry still reaches it. The device is handed over first because the engine walks the scopes in the order it is given them,
-   * and device-before-controller is what lets a device entry outrank the controller entry that would otherwise answer for the whole controller.
+   * stay quiet, and a controller-suffixed entry still reaches it. The engine always consults the device scope ahead of the controller's, which is what lets a device
+   * entry outrank the controller entry that would otherwise answer for the whole controller.
    */
   protected override debugEnabled(): boolean {
 
@@ -484,7 +480,8 @@ export abstract class AccessDevice extends AccessBase {
 
   /* The name the controller would have HomeKit show for this device, or nothing to synchronize at all - synchronization is off, the record carries no alias, or the
    * alias has nothing left once HomeKit's naming rules are applied to it. Every synchronization consumer reads this one derivation rather than deciding for itself,
-   * because the library refuses to write an empty name...a site deciding on its own would read that refusal as a change on every update and say so each time.
+   * because homebridge-plugin-utils refuses to write an empty name...a site deciding on its own would read that refusal as a change on every update and say so each
+   * time.
    */
   protected get syncedName(): string | undefined {
 
@@ -505,8 +502,8 @@ export abstract class AccessDevice extends AccessBase {
       this.uda.alias;
   }
 
-  /* Set the current accessory name of this device. The library owns every write a rename reaches: both display names through Homebridge's own setter, and the
-   * information service's configured name beside its name through the per-service rule. A name with nothing left once HomeKit's naming rules are applied is
+  /* Set the current accessory name of this device. homebridge-plugin-utils owns every write a rename reaches: both display names through Homebridge's own setter, and
+   * the information service's configured name beside its name through the per-service rule. A name with nothing left once HomeKit's naming rules are applied is
    * refused rather than applied blank.
    */
   public set accessoryName(name: string) {
