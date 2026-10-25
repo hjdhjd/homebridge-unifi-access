@@ -6,7 +6,7 @@
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, writesOn } from "../testing.helpers.ts";
-import { FeatureOptions, HAPStatus, mqttTopic } from "homebridge-plugin-utils";
+import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -18,6 +18,7 @@ import type { DecoratedSerial } from "../policy.ts";
 import type { TestAccessAccessory } from "../testing.helpers.ts";
 import assert from "node:assert/strict";
 import { format } from "node:util";
+import { mqttTopics } from "../mqtt.ts";
 import test from "node:test";
 
 // The controller every device below belongs to, in the casing a controller's own identity carries.
@@ -60,6 +61,17 @@ class DeliveryDevice extends AccessDevice {
   public listen(): void {
 
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.seen.push(delivery));
+  }
+}
+
+// A device that registers a get and a set on one of its own topics under a lifetime the test hands it. The registrations are protected, so a subclass is what lets
+// the test drive the real ones rather than registrations it wrote itself.
+class AnsweringDevice extends AccessDevice {
+
+  public answer(lifetime?: AbortSignal): void {
+
+    this.mqttSubscribeGet(mqttTopics.lock, () => "true", lifetime);
+    this.mqttSubscribeSet(mqttTopics.lock, () => undefined, lifetime);
   }
 }
 
@@ -423,6 +435,32 @@ test("removal states offline as the device's last word, past the end of its own 
   readopted.refreshReachability();
 
   assert.deepEqual(mqtt.published.slice(2), [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
+});
+
+test("a get and a set registered under a lifetime of their own leave with that lifetime while the device stays, and with the device whatever they were " +
+  "handed", () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+  const device = new AnsweringDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+  const topics = (): string[] => mqtt.subscriptions.map(entry => entry.topic).sort();
+  const shorter = new AbortController();
+
+  device.answer(shorter.signal);
+
+  assert.deepEqual(topics(), [ mqttGetTopic("AABBCCDDEE01/lock"), mqttSetTopic("AABBCCDDEE01/lock") ], "the get and the set register on the device's own topic");
+
+  // The shorter lifetime ending releases its registrations, the set's as well as the get's, while the device itself carries on.
+  shorter.abort();
+
+  assert.deepEqual(topics(), [], "a lifetime handed to the set releases it exactly as the get's releases the get");
+  assert.equal(device.signal.aborted, false, "and the device is untouched by it");
+
+  // Registrations made under a lifetime that never ends still leave with the device, because each is composed with the device's own.
+  device.answer(new AbortController().signal);
+  device.cleanup();
+
+  assert.deepEqual(topics(), [], "a removed device leaves no registration behind, whatever lifetime each was handed");
 });
 
 test("a present record yields exactly one update carrying the wire's own packet shape", async () => {

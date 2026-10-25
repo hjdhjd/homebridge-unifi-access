@@ -1720,13 +1720,13 @@ test("a recovery arriving after the device was torn down reads nothing, changes 
     "and teardown is not the kind of refusal that earns a note - the note belongs to a controller that would not answer");
 });
 
-test("every MQTT registration is bound to the device's lifetime and leaves with it", () => {
+test("every MQTT registration carries its topic's own lifetime composed with the device's, and leaves with the device", () => {
 
   const gate = makeGate();
 
   /* A UA Gate with a doorbell registers the whole topic surface: the doorbell, the door position, the lock in both directions, and the side door's lock in both
-   * directions and its position. The doorbell's get is the one registration with a lifetime of its own composed with the device's, because it follows the doorbell
-   * service the record can withdraw rather than the device.
+   * directions and its position. Every registration carries a lifetime of its own composed with the device's, because each follows the control its topic
+   * describes, which the record can withdraw while the device stays.
    */
   assert.deepEqual(gate.mqtt.subscriptions.map(entry => entry.topic).sort(), [ mqttGetTopic(HUB_SERIAL + "/doorbell"), mqttGetTopic(HUB_SERIAL + "/dps"),
     mqttGetTopic(HUB_SERIAL + "/lock"), mqttSetTopic(HUB_SERIAL + "/lock"), mqttGetTopic(HUB_SERIAL + "/sidedoor/dps"),
@@ -1734,17 +1734,10 @@ test("every MQTT registration is bound to the device's lifetime and leaves with 
 
   for(const entry of gate.mqtt.subscriptions) {
 
-    if(entry.topic === mqttGetTopic(HUB_SERIAL + "/doorbell")) {
-
-      assert.notEqual(entry.init.signal, gate.hub.signal, "the doorbell get registration must carry a lifetime of its own rather than the device's");
-
-      continue;
-    }
-
-    assert.equal(entry.init.signal, gate.hub.signal, "the " + entry.topic + " registration must carry the device's own lifetime signal");
+    assert.notEqual(entry.init.signal, gate.hub.signal, "the " + entry.topic + " registration must carry its topic's own lifetime rather than the device's alone");
   }
 
-  // Removing the device is what aborts its lifetime, and the broker releases every registration that signal governed.
+  // Removing the device is what aborts its lifetime, and the broker releases every registration that signal governed, each topic's own lifetime composed with it.
   gate.hub.cleanup();
 
   assert.deepEqual(gate.mqtt.subscriptions, [], "a removed device must leave no registration behind");
@@ -1813,13 +1806,21 @@ test("a broker session hears the hub's availability right behind the plugin-leve
  * wherever a family carries a pair - a door open while its lock is secured, one terminal input open while its neighbor is closed - so a payload answered from the
  * wrong source cannot pass unseen.
  */
-test("a door hub restates its position and its lock, and its position reads unknown where no sensor evidence stands behind it", () => {
+test("a door hub restates its lock, and its position wherever a sensor shows it, reading unknown once the evidence behind a kept sensor goes", () => {
 
-  assert.deepEqual(restatedIn(restoreSession(makeHub().mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ] ]);
+  // A hub with no position evidence carries no position sensor, so its position topic has no control to describe and the session restates its lock alone.
+  assert.deepEqual(restatedIn(restoreSession(makeHub().mqtt)), [[ "lock", "true", false ]]);
 
   const sensed = makeHub({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "lock" } });
 
   assert.deepEqual(restatedIn(restoreSession(sensed.mqtt)), [ [ "dps", "true", false ], [ "lock", "true", false ] ]);
+
+  // The controller then reports the sensor unwired. The sensor stands through the gap, as a sensor with no fresh evidence against it does, so its topic is
+  // restated, saying the position is unknown.
+  deliverDoorState(sensed, { dps: "none", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.ok(hasContactSensor(sensed, AccessReservedNames.CONTACT_DPS), "the sensor outlives the gap in its evidence");
+  assert.deepEqual(restatedIn(restoreSession(sensed.mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ] ]);
 });
 
 test("a UA Hub restates each terminal input whose sensor stands with its terminal wired, beside its door", () => {
@@ -1847,14 +1848,14 @@ test("a UA Gate restates both of its doors, and a gate whose side door is turned
 
 test("a UA Hub Door Mini, a UA Ultra with tamper detection, and an Enterprise hub port each restate the topics their hardware carries", () => {
 
-  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: doorMiniHub("off") }).mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ],
-    [ "rex", "true", false ] ]);
+  // None of these carries position evidence, so none carries a position sensor and none restates a position.
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: doorMiniHub("off") }).mqtt)), [ [ "lock", "true", false ], [ "rex", "true", false ] ]);
 
-  // The Ultra's tamper status is restated from the verdict it adopted, which is the raised reading its record arrived with.
-  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: tamperUltra({ "tamper_event": "true" }) }).mqtt)), [ [ "dps", "unknown", false ],
-    [ "lock", "true", false ], [ "rex", "false", false ], [ "tamper", "true", false ] ]);
+  // The Ultra's tamper status is restated from the verdict it adopted, which is the raised reading its record arrived with, carried by its one sensor.
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: tamperUltra({ "tamper_event": "true" }) }).mqtt)), [ [ "lock", "true", false ],
+    [ "rex", "false", false ], [ "tamper", "true", false ] ]);
 
-  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: familyRecord("UAH-Ent") }).mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ] ]);
+  assert.deepEqual(restatedIn(restoreSession(makeHub({ record: familyRecord("UAH-Ent") }).mqtt)), [[ "lock", "true", false ]]);
 });
 
 test("a reader restates its availability and no state topic, since none of a hub's topics are its to publish", () => {
@@ -1866,24 +1867,24 @@ test("a reader restates its availability and no state topic, since none of a hub
   assert.deepEqual(restatedIn(session), []);
 });
 
-test("the restatement follows a terminal input's sensor and its wiring from one session to the next", () => {
+test("the restatement follows a terminal input's sensor from one session to the next, and says unknown while its wiring is quiet", () => {
 
   const harness = makeHub();
 
-  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), [ "dps", "lock" ]);
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), ["lock"]);
 
   // The remote release's wiring reports live mid-run, which creates its sensor, and the next session restates the reading that sensor holds.
   restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
 
-  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)), [ [ "dps", "unknown", false ], [ "lock", "true", false ], [ "rel", "true", false ] ]);
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)), [ [ "lock", "true", false ], [ "rel", "true", false ] ]);
 
-  /* The wiring then goes quiet. The sensor stands through the gap, as a sensor with no fresh evidence against it does, but a transition would not publish its
-   * reading while its terminal reports nothing wired, so no session restates it either.
+  /* The wiring then goes quiet. The sensor stands through the gap, as a sensor with no fresh evidence against it does, so the control its topic describes still
+   * exists and the session restates it, saying unknown rather than the closed default the sensor holds for want of a reading.
    */
   restateRecord(harness, { configs: [] });
 
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the sensor outlives the gap in its evidence");
-  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), [ "dps", "lock" ]);
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)), [ [ "lock", "true", false ], [ "rel", "unknown", false ] ]);
 });
 
 test("the momentary topics are never restated, even mid-ring and after an attributed unlock", async () => {
@@ -1930,14 +1931,164 @@ test("every get topic answers exactly what the session restates on it", async ()
   const gateRestated = restatedIn(restoreSession(gate.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
   const hubRestated = restatedIn(restoreSession(hub.mqtt)).map(([ tail, payload ]) => tail + "=" + payload);
 
-  // The gate restates every held state topic it carries, its side door position unknown with nothing wired behind it, and the door hub its own, its position
-  // unknown too. The momentary doorbell is never restated, which the arm about the momentary topics covers.
+  // The gate restates every held state topic it carries, its side door position unknown with nothing wired behind it, and the door hub its lock, carrying no
+  // position sensor. The momentary doorbell is never restated, which the arm about the momentary topics covers.
   assert.deepEqual(gateRestated, [ "dps=true", "lock=false", "sidedoor/dps=unknown", "sidedoor/lock=true" ]);
-  assert.deepEqual(hubRestated, [ "dps=unknown", "lock=true" ]);
+  assert.deepEqual(hubRestated, ["lock=true"]);
 
   // Each get answers what the session restated on its topic. The gets are read after the session, so both answers describe the same held state.
   assert.deepEqual(await getAnswers(gate, gateRestated), gateRestated, "the gate's gets and its restatement read one derivation");
   assert.deepEqual(await getAnswers(hub, hubRestated), hubRestated, "and so do the door hub's");
+});
+
+/* How many get and set registrations the broker holds on each of a hub's topics, keyed by the topic as a subscriber addresses it. The client answers a request
+ * through every handler on its topic while the double's drivers run only the first match, so a count is what tells one registration from a doubled one.
+ *
+ * @param harness - The hub to read.
+ *
+ * @returns Each registered topic's tail, its get or set suffix included, beside how many registrations it holds.
+ */
+function registrationCounts(harness: HubHarness): Record<string, number> {
+
+  const counts: Record<string, number> = {};
+
+  for(const { topic } of harness.mqtt.subscriptions) {
+
+    const tail = topic.slice((HUB_SERIAL + "/").length);
+
+    counts[tail] = (counts[tail] ?? 0) + 1;
+  }
+
+  return counts;
+}
+
+test("each answered topic holds one registration per direction while its control exists and none once it goes, however many passes run over it", () => {
+
+  const harness = makeHub();
+  const doorHub = { "doorbell/get": 1, "lock/get": 1, "lock/set": 1 };
+
+  assert.deepEqual(registrationCounts(harness), doorHub, "adoption registers the doorbell and the lock, and nothing for a position no sensor shows");
+
+  restateRecord(harness, {});
+
+  assert.deepEqual(registrationCounts(harness), doorHub, "a pass over an unchanged record registers nothing a second time");
+
+  // Position evidence arriving on the door-state rail creates the position sensor there, and its topic follows it on that same rail rather than at the next update.
+  deliverDoorState(harness, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.deepEqual(registrationCounts(harness), { ...doorHub, "dps/get": 1 }, "the position topic answers from the delivery that created its sensor");
+
+  deliverDoorState(harness, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+  restateRecord(harness, {});
+
+  assert.deepEqual(registrationCounts(harness), { ...doorHub, "dps/get": 1 }, "and neither a later delivery nor a later pass registers it again");
+
+  // The record stops reporting a hub and a doorbell, which takes the door and the doorbell off the accessory and their topics with them.
+  restateRecord(harness, { capabilities: [] });
+
+  assert.deepEqual(registrationCounts(harness), { "dps/get": 1 }, "the lock and the doorbell answer nothing once their controls are gone");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "door_bell" ] });
+  restateRecord(harness, {});
+
+  assert.deepEqual(registrationCounts(harness), { ...doorHub, "dps/get": 1 }, "and the controls returning register each topic once more, and once only");
+});
+
+test("a hub carrying no doorbell publishes no ring and answers no doorbell get while its trigger switch mirrors the ring, and turning the doorbell on " +
+  "brings the topic with it", async () => {
+
+  const harness = makeHub({ options: [ "Disable.Hub.Doorbell", "Enable.Hub.Doorbell.Trigger" ] });
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
+
+  harness.emit("access.remote_view", ringPacket([]));
+
+  assert.ok(!hasDoorbell(harness), "the hub carries no doorbell");
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "while its trigger switch mirrors the ring");
+  assert.deepEqual(topicPayloads(harness, "doorbell"), [], "the trigger switch is no doorbell, so the ring is not published");
+  await assert.rejects(harness.mqttGet("doorbell"), /no get registration's topic ends with/, "and nothing answers a doorbell get");
+
+  harness.emit("access.remote_view.change", { data: { remote_call_request_id: "ring-1" }, event: "access.remote_view.change" });
+
+  assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "the cancel still settles the trigger switch");
+  assert.deepEqual(topicPayloads(harness, "doorbell"), [], "and is not published either");
+
+  // The user turns the doorbell on under the running hub, which creates the doorbell on the next update, and the topic arrives with it.
+  harness.reconfigure(["Enable.Hub.Doorbell.Trigger"]);
+  restateRecord(harness, {});
+  harness.emit("access.remote_view", ringPacket([]));
+
+  assert.ok(hasDoorbell(harness), "the doorbell is created on the next update");
+  assert.deepEqual(topicPayloads(harness, "doorbell"), ["true"], "and a ring is published from then on");
+  assert.equal(await harness.mqttGet("doorbell"), "true", "and its get answers the ring the hub is holding");
+});
+
+test("a door position nothing shows in HomeKit publishes, restates, and answers nothing, while an opener rendering from that position carries the topic", async () => {
+
+  const deselected = [listLess("Hub.Sensors", hubSensorChoices(), "DPS")];
+  const lock = makeHub({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" }, options: deselected });
+
+  deliverDoorState(lock, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.ok(!hasContactSensor(lock, AccessReservedNames.CONTACT_DPS), "the user turned the position sensor off, and a lock shows no position of its own");
+  assert.deepEqual(topicPayloads(lock, "dps"), [], "so the position moving publishes nothing");
+  assert.deepEqual(restatedIn(restoreSession(lock.mqtt)).map(([tail]) => tail), ["lock"], "and no session restates it");
+  await assert.rejects(lock.mqttGet("dps"), /no get registration's topic ends with/, "and nothing answers a position get");
+
+  // A garage door opener renders from the same position, so the topic describes what HomeKit shows on the opener even with the sensor turned off.
+  const opener = makeOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" }, options: deselected });
+
+  deliverDoorState(opener, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.ok(!hasContactSensor(opener, AccessReservedNames.CONTACT_DPS), "the opener carries no position sensor either");
+  assert.deepEqual(topicPayloads(opener, "dps"), ["true"], "while the position moving is published");
+  assert.deepEqual(restatedIn(restoreSession(opener.mqtt)), [ [ "dps", "true", false ], [ "lock", "true", false ] ], "and restated");
+  assert.equal(await opener.mqttGet("dps"), "true", "and answered");
+});
+
+test("a UA Gate whose side door position sensor is turned off publishes, restates, and answers nothing on that topic", async () => {
+
+  const gate = makeGate({ options: [listLess("Hub.Sensors", hubSensorChoices(), "SideDoorDPS")] });
+
+  deliverDoorState(gate, { dps: "open", location_id: SIDE_DOOR, lock: "lock" });
+
+  assert.ok(!hasContactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE), "the gate carries no side door position sensor");
+  assert.deepEqual(topicPayloads(gate, "sidedoor/dps"), [], "so the side door opening publishes nothing");
+  assert.ok(!restatedIn(restoreSession(gate.mqtt)).map(([tail]) => tail).includes("sidedoor/dps"), "and no session restates it");
+  await assert.rejects(gate.mqttGet("sidedoor/dps"), /no get registration's topic ends with/, "and nothing answers its get");
+});
+
+test("a terminal input whose sensor is turned off publishes and restates nothing, whatever its wiring reports", () => {
+
+  const harness = makeHub({ options: [listLess("Hub.Sensors", hubSensorChoices(), "REL")],
+    record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
+
+  restateRecord(harness, { configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] });
+
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the hub carries no remote release");
+  assert.deepEqual(topicPayloads(harness, "rel"), [], "so its input opening publishes nothing");
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), ["lock"], "and no session restates it");
+});
+
+test("a remote unlock naming a reader publishes nothing on a lock topic, since a reader carries no door", () => {
+
+  const reader = makeHub({ record: READER_RECORD });
+
+  reader.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: READER_ID });
+
+  assert.deepEqual(lockPayloads(reader), [], "the lock topic has no door to describe on a reader");
+});
+
+test("tamper-capable hardware carrying no contact sensor publishes and restates no tamper status, while its log still follows the reading", () => {
+
+  const harness = makeHub({ options: [listLess("Hub.Sensors", hubSensorChoices(), "REX")], record: tamperUltra({ "tamper_event": "false" }) });
+
+  assert.ok(!harness.services.some(service => service.UUID === Service.ContactSensor.UUID), "the Ultra's one input is turned off, so it carries no sensor");
+
+  refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
+
+  assert.equal(lineCount(harness, "Tampering detected."), 1, "the raise is still announced");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "while no characteristic carries it, so the topic says nothing");
+  assert.deepEqual(restatedIn(restoreSession(harness.mqtt)).map(([tail]) => tail), ["lock"], "and no session restates it");
 });
 
 test("a gate unlock overtaken by the device's removal announces nothing", async () => {
@@ -3328,7 +3479,8 @@ test("one delivery makes one opener update, from both of its readings and in the
     { characteristic: Characteristic.CurrentDoorState.UUID, value: Characteristic.CurrentDoorState.OPEN } ]);
 });
 
-test("a UA Gate's MQTT position topic answers the state it holds, and a hub with no sensor still answers unknown", async () => {
+test("a UA Gate's MQTT position topic answers the state it holds, a kept sensor with no evidence answers unknown, and a hub showing no position " +
+  "answers nothing", async () => {
 
   const gate = makeGate();
 
@@ -3341,8 +3493,15 @@ test("a UA Gate's MQTT position topic answers the state it holds, and a hub with
 
   assert.equal(await gate.mqttGet("dps"), "false");
 
-  // A door hub with no position evidence at all still says so rather than guessing.
-  assert.equal(await makeHub().mqttGet("dps"), "unknown");
+  // A door hub whose sensor stands through a gap in its evidence still says the position is unknown rather than repeating the reading the sensor last held.
+  const kept = makeHub({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "lock" } });
+
+  deliverDoorState(kept, { dps: "none", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(await kept.mqttGet("dps"), "unknown");
+
+  // A door hub with no position evidence at all carries no position sensor, so nothing answers on the topic that would describe one.
+  await assert.rejects(makeHub().mqttGet("dps"), /no get registration's topic ends with/, "a hub showing no position has no position topic to answer on");
 });
 
 test("a command the controller refuses leaves the machine standing and puts the characteristics back", async () => {
@@ -4129,7 +4288,7 @@ test("a UA Hub reads each terminal input from its own row, so no input can answe
   assert.deepEqual(readings(), [ open, open, closed ], "and the request to exit row alone reads on");
 });
 
-test("a terminal input whose wiring falls silent keeps its sensor, reads closed, and announces nothing", () => {
+test("a terminal input whose wiring falls silent keeps its sensor, reads closed, says unknown on its topic, and announces nothing", () => {
 
   const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "off" }) ] }) });
   const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
@@ -4145,8 +4304,35 @@ test("a terminal input whose wiring falls silent keeps its sensor, reads closed,
   assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the sensor already standing survives the silence");
   assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, Characteristic.ContactSensorState.CONTACT_DETECTED,
     "and an input with no wiring evidence reads closed whatever its row still says");
-  assert.deepEqual(topicPayloads(harness, "rel"), [], "the closed default is not a reading to publish");
+  assert.deepEqual(topicPayloads(harness, "rel"), ["unknown"], "the closed default is no reading the input made, so the topic says the reading is unknown");
   assert.equal(lineCount(harness, "Remote release is closed."), 0, "and not a change to announce");
+});
+
+test("a terminal input whose wiring goes and comes back while its reading stays put says unknown on its topic, and then the reading again", () => {
+
+  const harness = makeHub({ record: testHub({ configs: [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ] }) });
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REL);
+  const closed = Characteristic.ContactSensorState.CONTACT_DETECTED;
+
+  /* The input reads closed, which is also the default its sensor holds through a gap in its wiring, so the wiring going moves no characteristic: the evidence is
+   * the whole of the change, and it is what the topic has to follow.
+   */
+  refreshRecord(harness, inputRows({ "input_state_rel": "on" }));
+
+  assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, closed, "the sensor holds the closed reading it held before the gap");
+  assert.deepEqual(topicPayloads(harness, "rel"), ["unknown"], "while the topic says the reading is unknown once the wiring behind it goes");
+
+  // The wiring comes back onto the same reading, and again the evidence alone moves.
+  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ]);
+
+  assert.equal(sensor.getCharacteristic(Characteristic.ContactSensorState).value, closed, "the sensor still holds that reading");
+  assert.deepEqual(topicPayloads(harness, "rel"), [ "unknown", "false" ], "and the topic states the reading again once the wiring returns");
+  assert.equal(lineCount(harness, "Remote release is closed."), 0, "while nothing announces a reading that never moved");
+
+  // A record restating the same wiring and the same reading moves nothing at all, so the topic hears nothing further.
+  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ]);
+
+  assert.deepEqual(topicPayloads(harness, "rel"), [ "unknown", "false" ]);
 });
 
 /* A UA Gate carrying whatever side door terminal rows an arm names, over a topology of one door. The one-door topology is what keeps the construction seed off the
@@ -4192,6 +4378,35 @@ test("a UA Gate reads its side door position from the library's terminal read, a
   assert.equal(contactSensor(halfWired, AccessReservedNames.CONTACT_DPS_SIDE).getCharacteristic(Characteristic.ContactSensorState).value,
     Characteristic.ContactSensorState.CONTACT_DETECTED, "a half-wired terminal renders closed whatever its row says");
   assert.equal(await halfWired.mqttGet("sidedoor/dps"), "unknown", "and answers unknown for the same reason");
+});
+
+test("the door's position and a UA Gate's side door position say unknown while their evidence is gone, and their reading again once it returns", () => {
+
+  /* The door reads closed, and a door-state entry saying nothing is wired renders closed as well, so the evidence going and coming back moves no reading: the
+   * door-state delivery is what has to state the topic, since the position evidence arrives on that rail.
+   */
+  const hub = makeHub({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+
+  deliverDoorState(hub, { dps: "none", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.ok(hasContactSensor(hub, AccessReservedNames.CONTACT_DPS), "the position sensor outlives the gap in its evidence");
+  assert.deepEqual(topicPayloads(hub, "dps"), ["unknown"], "and its topic says the position is unknown once nothing reports it");
+
+  deliverDoorState(hub, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.deepEqual(topicPayloads(hub, "dps"), [ "unknown", "false" ], "and states the closed reading again once the position is reported");
+
+  // The side door's evidence is its terminal's wiring, which arrives on the device update rather than the door-state delivery, on a reading that stays closed.
+  const sidePair = wiringRows({ "wiring_state_door-dps-neg": "on", "wiring_state_door-dps-pos": "on" });
+  const gate = sideDoorGate([ ...sidePair, ...inputRows({ "input_door_dps": "on" }) ]);
+
+  refreshRecord(gate, inputRows({ "input_door_dps": "on" }));
+
+  assert.deepEqual(topicPayloads(gate, "sidedoor/dps"), ["unknown"], "the side door's topic says unknown once its terminal stops reporting wired");
+
+  refreshRecord(gate, [ ...sidePair, ...inputRows({ "input_door_dps": "on" }) ]);
+
+  assert.deepEqual(topicPayloads(gate, "sidedoor/dps"), [ "unknown", "false" ], "and the closed reading again once it reports wired");
 });
 
 test("a hub's wiring table and the option catalog's model lists agree about which family drives which terminal input", () => {
@@ -4457,8 +4672,8 @@ test("a tamper capability appearing while alerts are off dresses every standing 
   assert.deepEqual(harness.lines, [], "and says nothing");
 });
 
-test("a tamper capability withdrawn mid-run takes the characteristic off every sensor without writing it, publishes unknown, says why once, " +
-  "and a return is adopted in silence", () => {
+test("a tamper capability withdrawn mid-run takes the characteristic off every sensor without writing it, takes the topic silent with it, says why once, " +
+  "and a return is adopted in silence and heard on the topic", () => {
 
   const harness = makeHub({ record: testHub({ capabilities: [ "is_hub", "tamper_proofing" ],
     configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] }) });
@@ -4484,7 +4699,7 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
       "and nothing is written to a characteristic the pass is about to remove, which a sweep run without its capability guard would fail");
   }
 
-  assert.deepEqual(topicPayloads(harness, "tamper"), ["unknown"], "the topic carries nothing established");
+  assert.deepEqual(topicPayloads(harness, "tamper"), [], "no sensor carries the characteristic once the pass is done, so the topic has no control to describe");
   assert.equal(lineCount(harness, TAMPER_UNREPORTED), 1, "the withdrawal is said once, as the withdrawal it is");
   assert.equal(lineCount(harness, TAMPER_WITHDRAWN), 0, "rather than as the controller's alert being switched off");
 
@@ -4498,7 +4713,8 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
       [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }], "written exactly once for the return");
   }
 
-  assert.deepEqual(topicPayloads(harness, "tamper"), [ "unknown", "true" ], "and the reading is published as the first sighting a forgotten verdict makes it");
+  assert.deepEqual(topicPayloads(harness, "tamper"), ["true"],
+    "and the reading is published as the first sighting a forgotten verdict makes it, once the pass has put the characteristic back");
   assert.equal(lineCount(harness, "Tampering detected."), 0, "rather than announced");
 });
 

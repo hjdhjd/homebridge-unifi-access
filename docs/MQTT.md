@@ -108,7 +108,7 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 
 <!-- MQTT PUBLISHED:END -->
 
-Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to, and each time the plugin establishes a session with the broker, when every device restates its availability and the current value of each of its state topics. The `doorbell`, `unlock`, `sidedoor/unlock`, and `telemetry` topics report events rather than state, so they are never restated.
+Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to, and each time the plugin establishes a session with the broker, when every device restates its availability and the current value of each of its state topics whose HomeKit control is present. The `doorbell`, `unlock`, `sidedoor/unlock`, and `telemetry` topics report events rather than state, so they are never restated. A device's topic is published only while the HomeKit control it reports on is present: a control the user has turned off, or one the hardware is not reporting, publishes nothing, whether at a change, at an event, or when a session begins. Its get and set topics are subscribed only while that control is present, so an absent control answers no get and takes no set.
 
 ### <A NAME="subscribe"></A>Topics Subscribed
 

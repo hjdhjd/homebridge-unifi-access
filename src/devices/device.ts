@@ -378,14 +378,16 @@ export abstract class AccessDevice extends AccessBase {
     this.controller.mqtt?.subscribeGet(mqttTopic(this.id, entry.topic), entry.label, getValue, { signal: composeSignals(this.signal, lifetime) });
   }
 
-  /* Register a setter on one of this device's own topics, composed exactly as the getter above and bound to this device's lifetime.
+  /* Register a setter on one of this device's own topics, composed exactly as the getter above and bound to this device's lifetime, with the same optional
+   * shorter lifetime for a registration that ends with what it commands.
    *
    * @param entry    - The catalog entry naming the topic tail and the label.
    * @param setValue - The setter receiving the topic's incoming value.
+   * @param lifetime - An optional lifetime shorter than the device's own, for a registration that ends with what it commands.
    */
-  protected mqttSubscribeSet(entry: MqttTopicEntry, setValue: MqttSetHandler): void {
+  protected mqttSubscribeSet(entry: MqttTopicEntry, setValue: MqttSetHandler, lifetime?: AbortSignal): void {
 
-    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, setValue, { signal: this.signal });
+    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, setValue, { signal: composeSignals(this.signal, lifetime) });
   }
 
   /* Register a restatement the client runs each time it establishes a broker session, the first one included, bound to this device's lifetime exactly as the
