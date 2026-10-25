@@ -702,8 +702,11 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
      *
      * A blank token field still composes a tokens object here, because this reads the card rather than deciding anything about it. What an empty field means is the
      * write path's rule to state, and it states it once.
+     *
+     * The address is read trimmed, because the plugin reads a listed controller's address trimmed: the probe, the listed-elsewhere check, the write, its rename
+     * and the card's follow of what it saved all read the address the plugin connects to, and the first-run card and the edit card read it through this one method.
      */
-    values: () => ({ address: fields.address.value, password: fields.password.value, tokens: { access: fields.token.value }, username: fields.username.value,
+    values: () => ({ address: fields.address.value.trim(), password: fields.password.value, tokens: { access: fields.token.value }, username: fields.username.value,
       verifyTls: fields.verifyTls.checked }),
     verdict
   };

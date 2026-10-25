@@ -111,8 +111,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     // Loop through each configured controller and instantiate it.
     for(const controllerConfig of this.config.controllers) {
 
-      // We need an address, or there's nothing to do.
-      if(!controllerConfig.address) {
+      // We need an address, or there's nothing to do. A hand edit can leave the field any type, and a value that is not a string is no address at all.
+      if((typeof controllerConfig.address !== "string") || !controllerConfig.address) {
 
         this.log.info("No host or IP address has been configured.");
 
@@ -147,6 +147,10 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * settings page reads its controller list through, so the page and the plugin agree on which entry at an address is the first. An address the rule gives no form
    * never repeats another, so its entry is kept and meets the walk's own address check.
    *
+   * An address is read trimmed. The rule already compares addresses that way while unifi-access refuses an address with spaces around it, so an entry padded by
+   * hand is the controller its trimmed address names, and the listing form, the client, the identity, the log prefix and the webhook sweep all read that one form.
+   * The entry is listed as a copy carrying the trimmed address, because the entry itself is Homebridge's own configuration object.
+   *
    * @param controllers - The configured controllers value, in whatever shape the configuration file holds it.
    *
    * @returns The entries the plugin acts on, in their configured order.
@@ -162,13 +166,15 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     const firstEntries = new Map<string, { address: string; warned: boolean }>();
     const listed: AccessControllerOptions[] = [];
 
-    for(const controller of controllers) {
+    for(const entry of controllers) {
 
-      if(!isObject(controller)) {
+      if(!isObject(entry)) {
 
         continue;
       }
 
+      // The type cannot say that a hand edit left the address something other than a string, so the trim asks before it reads one.
+      const controller = (typeof entry.address === "string") ? { ...entry, address: entry.address.trim() } : entry;
       const form = addressListingForm(controller.address);
 
       if(form === null) {

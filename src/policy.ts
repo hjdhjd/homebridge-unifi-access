@@ -9,12 +9,13 @@
  * its client: a decision separated from the effect it drives is independently testable, and the test is the proof the separation is real. AccessController
  * transitively imports the entire device and accessory graph; a five-line set diff should never have to stand that up to be exercised.
  *
- * What this module is allowed to import is deliberately narrow, so it loads and tests in isolation: the library predicates it branches on, the shared constants
- * it reads, pure builtins - the address classifier and the WHATWG URL parser, which the endpoint composition and the path match branch on - and the library's own
- * published vocabulary, which is read through rather than restated anywhere here.
+ * What this module is allowed to import is deliberately narrow, so it loads and tests in isolation: the library predicates and error classes it branches on, the
+ * shared constants it reads, pure builtins - the address classifier and the WHATWG URL parser, which the endpoint composition and the path match branch on - and
+ * the library's own published vocabulary, which is read through rather than restated anywhere here.
  */
 import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS,
-  isEnterpriseHubRecord, isHub, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
+  AccessConfigurationError, isEnterpriseHubRecord, isHub, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings, selectAccessPoints,
+  terminalInput } from "unifi-access";
 import { ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
 import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
   AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
@@ -140,10 +141,14 @@ const RECOVERY_SCHEDULE_MS = { backoff: ACCESS_RECOVERY_BACKOFF_MS, steady: ACCE
  * refused bootstrap document read carries as its cause included, which is the same reading that chooses the library's own recovery schedule. Each schedule is
  * walked from its first rung when its class of fault begins, so a change of class restarts the new schedule rather than landing partway down it...a refusal that
  * follows a stretch of unreachability backs off from its own first refusal, and a controller that stops refusing and becomes unreachable is probed at once. Each
- * schedule settles onto a steady floor it holds for as long as the run lasts, so nothing here gives up: the decision always answers true, and the caller's
- * shutdown is the only end of a run that never connects.
+ * schedule settles onto a steady floor it holds for as long as the run lasts, so every fault a controller or a network can recover from is retried, and the
+ * caller's shutdown is what ends a run that never connects.
  *
- * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A failed attempt hands its reason to `onFailure` when the
+ * The one fault the decision refuses to retry is an address no URL can carry, which unifi-access refuses as an {@link AccessConfigurationError} before it sends
+ * anything. The same address is refused the same way on every attempt, so asking again can only repeat the refusal, and the decision answers false for it. The
+ * veto answers ahead of the report below and leaves the run's state alone, because the run ends on it and the caller says why in words of its own.
+ *
+ * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A retried attempt hands its reason to `onFailure` when the
  * run's first failure arrives and again whenever the reason changes, so a caller hears why the connect is failing and when that changes rather than hearing every
  * attempt. The comparison is on the formatted reason, the text a user reads, so two faults that read identically are one reason and a timeout giving way to a
  * different fault is two.
@@ -174,6 +179,12 @@ export function createConnectRetryPolicy({ onFailure }: { onFailure?: (reason: s
     },
 
     shouldRetry: (error: unknown): boolean => {
+
+      // An address no URL can carry ends the run before anything is counted or reported, so no retrying reason reaches the caller ahead of its own report.
+      if(error instanceof AccessConfigurationError) {
+
+        return false;
+      }
 
       const refusal = isSignInRefusal(error);
 

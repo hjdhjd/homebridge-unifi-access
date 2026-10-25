@@ -310,12 +310,43 @@ test("an address repeated more than once beside another address warns once, and 
   const harness = makeHarness();
   const platform = harness.make({ controllers: [ { address: "10.0.0.1", tokens: { access: "token" } }, { address: "10.0.0.2", tokens: { access: "token" } },
     { address: " 10.0.0.1 ", tokens: { access: "token" } }, { address: "10.0.0.1", tokens: { access: "token" } }, { tokens: { access: "token" } },
-    { address: "", tokens: { access: "token" } } ] as unknown as AccessPlatformConfig["controllers"], options: [], platform: "UniFi Access" });
+    { address: "", tokens: { access: "token" } }, { address: 10001, tokens: { access: "token" } } ] as unknown as AccessPlatformConfig["controllers"],
+  options: [], platform: "UniFi Access" });
 
   assert.deepEqual(warnings(harness), [listedAgain("10.0.0.1")], "the repeated address warns once however many entries repeat it");
   assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.address), [ "10.0.0.1", "10.0.0.2" ], "each address's first entry is built");
-  assert.equal(harness.lines.filter((line) => line === "info: No host or IP address has been configured.").length, 2,
-    "and an entry with no address has no form to repeat, so each such entry still reaches the address check");
+  assert.equal(harness.lines.filter((line) => line === "info: No host or IP address has been configured.").length, 3,
+    "and an entry with no address, or one a hand edit left a number, has no form to repeat, so each such entry still reaches the address check");
+});
+
+/* An address padded with spaces is the controller its trimmed form names, because the listed-address rule reads the padded and trimmed forms as one address while
+ * unifi-access refuses the padded one. The padded entry listed first is the case that matters: kept with its spaces, it would be the one entry the platform reads,
+ * and the clean entry behind it the one skipped.
+ */
+test("a padded entry before its clean form is one controller at the trimmed address, warned about once", () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: " 10.0.0.1 ", tokens: { access: "padded" } }, { address: "10.0.0.1", tokens: { access: "clean" } } ],
+    options: [], platform: "UniFi Access" });
+
+  assert.deepEqual(warnings(harness), [listedAgain("10.0.0.1")], "the repeat warns once, naming the address as the plugin reads it");
+  assert.deepEqual(configuredControllers(platform).map((controller) => [ controller.config.address, controller.config.tokens?.access ]), [[ "10.0.0.1", "padded" ]],
+    "and the first entry is the one constructed, at its trimmed address");
+  assert.deepEqual(platform.config.controllers.map((entry) => entry.address), ["10.0.0.1"], "and that entry is the whole of the list every reader acts on");
+});
+
+test("a padded entry alone reaches its controller trimmed, and the entry Homebridge handed over is left as it stands", () => {
+
+  const harness = makeHarness();
+  const entry = { address: "\tunifi.local  ", tokens: { access: "token" } };
+  const platform = harness.make({ controllers: [entry], options: [], platform: "UniFi Access" });
+  const [controller] = configuredControllers(platform);
+
+  assert.ok(controller, "the entry describes a whole identity, so a controller is constructed for it");
+  assert.equal(controller.config.address, "unifi.local", "the controller connects to the trimmed address, the form unifi-access can carry");
+  assert.equal(controller.name, "unifi.local", "and its lines are prefixed with that form until it connects");
+  assert.deepEqual(warnings(harness), [], "a single entry repeats nothing");
+  assert.equal(entry.address, "\tunifi.local  ", "the trim lists a copy, so Homebridge's own configuration object keeps what it was handed");
 });
 
 // A string is the shape a walk with no list check reads character by character; an object and a number are controls, which read as no controllers either way.

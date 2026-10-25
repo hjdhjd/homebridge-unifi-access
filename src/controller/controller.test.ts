@@ -3,7 +3,7 @@
  * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore,
+import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, AccessConfigurationError, createStateStore,
   selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
@@ -1181,6 +1181,118 @@ test("a login whose connect is refused on every attempt keeps retrying on the li
     "the refusal is reported once, and the shutdown that ends the run adds no line");
 });
 
+/* The sentence a refused address earns, transcribed rather than referenced so a wording that drifts by a character in its one home reddens an arm.
+ *
+ * @param prefix - The controller's log prefix.
+ * @param reason - The library's refusal, as the line carries it.
+ *
+ * @returns The line as the arm renders it.
+ */
+function addressRefused(prefix: string, reason: string): string {
+
+  return prefix + ": Unable to connect to the UniFi Access controller, and will not keep trying until its address is corrected in the plugin settings: " + reason;
+}
+
+test("a login whose connect is refused as an address no URL can carry stops after its first attempt, waits for nothing, and says so once", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+
+  let attempts = 0;
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
+
+  /* The library's refusal of an address carrying a path after its host, worded as unifi-access words it. The token in the identity is what registers this
+   * controller's teardown against the plugin's lifetime, so the only shutdown that could end this run is one this arm never fires.
+   */
+  const controller = new AccessController(platform, { address: "access.local/path", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    throw new AccessConfigurationError("The controller address \"access.local/path\" carries more than a host and a port.");
+  });
+
+  t.after(() => shutdown.abort());
+
+  // The login is started rather than awaited, so a retry that waited behind the refusal would be stepped here rather than hang the arm.
+  const login = controller.login();
+  const steps = await drainClock(clock);
+
+  assert.equal(await login, "unavailable", "a connect that can never succeed leaves this controller's identity unknown");
+  assert.equal(shutdown.signal.aborted, false, "and the run ended without a shutdown");
+  assert.equal(attempts, 1, "the address is refused on the first attempt and never asked about again");
+  assert.deepEqual(clock.requested, [], "so no wait is armed behind the refusal");
+  assert.equal(steps, 0, "and nothing comes due afterwards");
+  assert.deepEqual(errors, [addressRefused("access.local/path", "The controller address \"access.local/path\" carries more than a host and a port.")],
+    "the refusal is said once, in the line that says the retry stopped, with no retrying line ahead of it");
+});
+
+test("the line a refused address earns quotes the address as unifi-access masks it, so the credentials it carried reach no line", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
+
+  /* The real connect, which refuses an address carrying credentials before it sends anything. The configured name is the line's prefix, so what this arm reads is
+   * the message the controller composes around the library's refusal rather than the prefix a controller that never connected takes from its configuration.
+   */
+  const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", name: "Front Office", tokens: { access: "t" } });
+
+  t.after(() => shutdown.abort());
+
+  const login = controller.login();
+
+  await drainClock(clock);
+
+  assert.equal(await login, "unavailable");
+  assert.deepEqual(errors, [addressRefused("Front Office", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+    "the line carries the library's own message, the address in it masked through its last @");
+  assert.equal(errors.filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line");
+});
+
+test("a controller with no name that never connects prefixes its lines with its address as unifi-access masks it, so the credentials reach no line", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const lines: string[] = [];
+  const shutdown = new AbortController();
+
+  /* Every level is captured, debug included: the gate is turned on and a debug line arrives on the warn channel, so a line of any level that named the address
+   * raw would land here.
+   */
+  const platform = makePlatformDouble({ clock, entries: ["Enable.Log.Debug"], log: {
+
+    error: (message: string, ...parameters: unknown[]): void => {
+
+      const line = format(message, ...parameters);
+
+      errors.push(line);
+      lines.push(line);
+    },
+    info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
+    warn: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters))
+  }, signal: shutdown.signal });
+
+  // The real connect, as in the named arm above, with no name configured, so the prefix every line carries is the one this controller takes from its address.
+  const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", tokens: { access: "t" } });
+
+  t.after(() => shutdown.abort());
+
+  const login = controller.login();
+
+  await drainClock(clock);
+
+  assert.equal(await login, "unavailable");
+  assert.deepEqual(errors, [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+    "the prefix names the address masked through its last @, as the library's message does");
+  assert.equal(lines.filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
+});
+
 test("a connect that keeps failing says why once per reason, and a shutdown landing mid-attempt says nothing", async (t) => {
 
   const clock = new TestClock();
@@ -1688,6 +1800,46 @@ test("a registration this plugin holds at an address no configured controller an
   assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:abandoned" ]);
   assert.ok(harness.lines.some(line => line.includes("Removed a leftover webhook registration: " + ABANDONED_NAME +
     ". It points at an address this plugin is no longer configured for.")), "the removal must name the registration it removed");
+});
+
+/* A leftover registration named for an address that carried credentials, at the path that address claimed. The name is the controller's copy of whatever registered
+ * the record, so the password in it is what a removal line would print were the name quoted as the controller holds it.
+ */
+const CREDENTIALED_ADDRESS = "admin:hunter2@9.9.9.9";
+
+function credentialedRecord(): AccessOfficialWebhookEndpoint {
+
+  return endpointRecord({ endpoint: "http://10.0.0.7:10120/unifi-access/" + encodeURIComponent(CREDENTIALED_ADDRESS), id: "credentialed",
+    name: "Homebridge UniFi Access (" + CREDENTIALED_ADDRESS + ")" });
+}
+
+test("a leftover registration whose name carries credentials is removed under that name masked through its last @", async (t) => {
+
+  const harness = makeWebhookController({ endpoints: [credentialedRecord()] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:credentialed" ]);
+  assert.ok(harness.lines.some(line => line.startsWith("info: ") && line.includes("Removed a leftover webhook registration: ***@9.9.9.9). It points at an " +
+    "address this plugin is no longer configured for.")), "the removal names the registration as unifi-access masks it, which cuts through the last @");
+  assert.ok(!harness.lines.some(line => line.includes("hunter2")), "and the password reaches no line");
+});
+
+test("a refused removal of a leftover registration whose name carries credentials says so at debug under the masked name", async (t) => {
+
+  // Debug is turned on because the line this arm is about is a debug line, which arrives on the warn channel the harness captures.
+  const harness = makeWebhookController({ endpoints: [credentialedRecord()],
+    failures: { delete: new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) }, options: ["Enable.Log.Debug"] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:credentialed" ]);
+  assert.ok(harness.lines.some(line => line.includes("Unable to remove the webhook registration ***@9.9.9.9): ")), "the refusal names the registration masked");
+  assert.ok(!harness.lines.some(line => line.includes("hunter2")), "and the password reaches no line at any level");
 });
 
 test("a registration at a sibling controller's own path is left where it is", async (t) => {

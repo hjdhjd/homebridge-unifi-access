@@ -6,7 +6,8 @@ import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
   MembershipClaims } from "../policy.ts";
-import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, selectDoorStates, verifyWebhookSignature } from "unifi-access";
+import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, maskAddressCredentials, selectDoorStates,
+  verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
@@ -84,8 +85,8 @@ const renderWebhookFailure = (error: unknown): string => {
 export class AccessController {
 
   // The unifi-access client - the single owner of protocol truth: the reduced state, the realtime channel, recovery, and door state. Established by #connect() and
-  // torn down through its asynchronous disposal. Definite-assignment typed for the connected lifetime; it is genuinely unset only in the narrow window before the
-  // first connect resolves, and #liveClient() is the one place that window is read.
+  // torn down through its asynchronous disposal. Definite-assignment typed for the connected lifetime; it is genuinely unset until the first connect resolves, which
+  // a controller whose address can never work never reaches, and #liveClient() is the one place that unset state is read.
   public client!: AccessClient;
   public readonly config: AccessControllerOptions;
   public readonly configuredDevices: Map<string, AccessDevice>;
@@ -129,7 +130,8 @@ export class AccessController {
     this.#connectClient = connect;
     this.configuredDevices = new Map();
     this.mqtt = null;
-    this.#name = accessOptions.name ?? accessOptions.address;
+    // A controller that never connects prefixes every line it writes with this name, so the address it falls back to is named through unifi-access's mask.
+    this.#name = accessOptions.name ?? maskAddressCredentials(accessOptions.address);
     this.#membershipSelector = createMembershipIdsSelector();
     this.#phase = "connecting";
     this.platform = platform;
@@ -319,8 +321,11 @@ export class AccessController {
   /* Establish a connection to the Access controller. AccessClient.connect() is atomic - it authenticates, fetches what the identity can reach, seeds the state
    * model, and brings the realtime channel up as one ready-or-throws operation, owning recovery and the periodic refresh failsafe internally. We wrap it in a
    * startup-resilient retry that waits by the library's own recovery schedules: its slower refusal schedule while the controller refuses the identity or its
-   * privilege, and its recovery schedule for every other fault. The retry never gives up...it runs until the controller accepts us or we shut down, so a password or
-   * role corrected on the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
+   * privilege, and its recovery schedule for every other fault. The retry runs until the controller accepts us or we shut down, so a password or role corrected on
+   * the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
+   *
+   * The one exception is an address no URL can carry. The library refuses it before anything is sent, and refuses it the same way on every attempt, so the policy
+   * vetoes it, the retry ends on the first attempt, and we say once that the address needs correcting. Nothing on the controller can change that answer.
    *
    * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
    * serving it out in real seconds.
@@ -348,10 +353,19 @@ export class AccessController {
 
       this.client = await retry((signal) => this.#connectClient({ host: this.config.address, log: this.#clientLog, signal,
         verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, backoff, clock: this.platform.clock, shouldRetry, signal: this.signal });
-    } catch {
+    } catch(error) {
 
-      // The retry rejects only on the shutdown abort, because the policy never vetoes an attempt and the attempts are unbounded. That is an orderly teardown, not a
-      // failure to report.
+      /* The attempts are unbounded, so the retry rejects only on our own shutdown, which is an orderly teardown rather than a failure to report, or on the policy's
+       * veto of an address no URL can carry. The shutdown is read first, so a refused address meeting a shutdown in progress stays as quiet as every other attempt a
+       * shutdown ends. The veto is said here and nowhere else, because the policy reports nothing for it, and the library's message names the address with any
+       * credentials it held masked.
+       */
+      if(!this.#isShuttingDown()) {
+
+        this.log.error("Unable to connect to the UniFi Access controller, and will not keep trying until its address is corrected in the plugin settings: %s.",
+          formatErrorMessage(error));
+      }
+
       return false;
     }
 
@@ -566,15 +580,18 @@ export class AccessController {
       for(const record of orphanedWebhookRegistrations({ configuredAddresses: this.platform.config.controllers.map((entry) => entry.address), existing, host,
         port: this.platform.webhookPort })) {
 
+        // The name is the controller's copy of whatever registered the record, so it can carry the credentials an address held, and every line quotes it masked.
+        const name = maskAddressCredentials(record.name);
+
         try {
 
           // eslint-disable-next-line no-await-in-loop
           await official.webhooks.deleteEndpoint(record.id);
 
-          this.log.info("Removed a leftover webhook registration: %s. It points at an address this plugin is no longer configured for.", record.name);
+          this.log.info("Removed a leftover webhook registration: %s. It points at an address this plugin is no longer configured for.", name);
         } catch(error) {
 
-          this.log.debug("Unable to remove the webhook registration %s: %s.", record.name, formatErrorMessage(error));
+          this.log.debug("Unable to remove the webhook registration %s: %s.", name, formatErrorMessage(error));
         }
       }
     } catch(error) {

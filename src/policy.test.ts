@@ -7,7 +7,8 @@
  */
 /* eslint-disable camelcase */
 import { ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, AccessApiError,
-  AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, createStateStore, selectDoorStates } from "unifi-access";
+  AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessConfigurationError, AccessNetworkError,
+  createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -410,7 +411,7 @@ test("the connect retry policy starts the new class's schedule at its first rung
     [ firstRecovery, secondRecovery, thirdRecovery, firstRefusal, secondRefusal, firstRecovery, secondRecovery ]);
 });
 
-test("the connect retry policy retries every class of fault at every rung of its schedule, its steady floor included", () => {
+test("the connect retry policy retries every class of fault but a refused address at every rung of its schedule, its steady floor included", () => {
 
   const failures = [ new Error("Network unreachable."), new TypeError("Cannot read properties of undefined (reading 'doors')"), ...REFUSAL_SPELLINGS ];
   // More than one failure past the longer schedule's last staged delay, so every class is asked about on its floor as well as on each of its rungs.
@@ -422,9 +423,35 @@ test("the connect retry policy retries every class of fault at every rung of its
 
     for(let attempt = 1; attempt <= run; attempt++) {
 
-      assert.equal(shouldRetry(failure), true, "nothing gives up, so every failure of every class is retried");
+      assert.equal(shouldRetry(failure), true, "a fault the controller or the network can recover from is retried however long the run has lasted");
     }
   }
+});
+
+test("the connect retry policy stops at an address no URL can carry without reporting it, and retries a refused certificate, an unresolvable host and a " +
+  "refused sign-in", () => {
+
+  const reports: string[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+
+  // The library's own refusal of an address carrying more than a host and a port, worded as unifi-access words it.
+  assert.equal(shouldRetry(new AccessConfigurationError("The controller address \"access.local/path\" carries more than a host and a port.")), false,
+    "the same address is refused the same way on every attempt, so the run ends on the first");
+  assert.deepEqual(reports, [], "and the veto reaches no report, so no retrying reason is said ahead of the caller's own line");
+
+  /* The negative controls, each asked of the same policy, since the veto leaves the run's state alone. A refused certificate and an unresolvable host are faults an
+   * operator fixes while the process runs, and a refused sign-in is fatal to the library yet still retried here, because a password corrected on the controller is
+   * picked up by the next attempt...a veto reading the library's fatal class rather than the configuration class would stop the last of these.
+   */
+  const controls = [ new AccessCertificateError({ cause: new Error("self-signed certificate"), host: "access.local", identity: "credentials" }),
+    new AccessNetworkError("Unable to resolve access.local.", { code: "ENOTFOUND" }), new AccessAuthError("Bad credentials.") ];
+
+  for(const control of controls) {
+
+    assert.equal(shouldRetry(control), true, control.message);
+  }
+
+  assert.equal(reports.length, controls.length, "and each is reported as the retried fault it is");
 });
 
 test("the connect retry policy reports a run's first failure, and a repeat of the same reason stays silent", () => {
