@@ -179,6 +179,18 @@ export abstract class AccessDevice extends AccessBase {
 
     this.accessory = accessory;
 
+    /* Register this device's final word, its retained offline, which the client states at plugin shutdown inside its graceful end while the broker session still
+     * holds. Once that end begins, the client admits a publish only under the very signal it hands the word, so the word publishes on the client directly under
+     * that signal: this device's own publish composes its lifetime into the signal and would be refused, and the controller's chokepoint returns nothing for the
+     * end to wait on. The word skips the change gate, because the broker has to hold offline whatever this device last stated, and the publish's promise is
+     * returned so the end waits on it within its grace. The registration lives as long as this device does, so a device removed mid-run, whose removal already
+     * stated offline, says nothing more at shutdown.
+     */
+    const mqtt = this.controller.mqtt;
+
+    mqtt?.onEnd(async (signal: AbortSignal): Promise<void> => mqtt.publish(mqttTopic(this.id, mqttTopics.availability.topic), MQTT_AVAILABILITY_OFFLINE,
+      { retain: true, signal }), { signal: this.signal });
+
     /* Observe our own record and keep everything downstream of it current. The loop is the only writer of uda after construction and the reducer's merge is its only
      * source, so a partial update from either notification dialect lands as a merge rather than as a truncating whole-record assignment.
      *

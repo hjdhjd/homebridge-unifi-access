@@ -290,7 +290,7 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
  * place rather than a silent fallback at every site that stands one up.
  */
 type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "registerAccessory" |
-  "signal" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
+  "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
 
 // What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
 export interface PlatformDoubleOptions {
@@ -340,6 +340,8 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
       api.updatePlatformAccessories(accessories);
     },
     signal: options.signal ?? new AbortController().signal,
+    // A double never begins a shutdown of its own, so an arm ends the platform it stands up by aborting the signal it handed over.
+    stopping: false,
     unregisterAccessory: (accessory: AccessAccessory): void => {
 
       const index = accessories.indexOf(accessory);

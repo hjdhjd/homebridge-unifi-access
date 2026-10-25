@@ -50,10 +50,14 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * against, unlike a controller or a device, each of which composes its own gate over its own name.
    */
   readonly #debugLog: HomebridgePluginLogging;
-  /* The plugin's lifetime, aborted when Homebridge tells us it is going away. This is the one root every controller's own terminal signal composes from, so the
-   * shutdown event is registered exactly once for the plugin rather than once per controller.
+  /* The plugin's lifetime, aborted once Homebridge has told us it is going away and every controller's MQTT client has stated its final words. This is the one root
+   * every controller's own terminal signal composes from, so the shutdown event is registered exactly once for the plugin rather than once per controller.
    */
   readonly #shutdownController: AbortController;
+  /* The one shutdown this plugin runs, null until Homebridge announces it. It is recorded before any of its work begins, so its presence is the plugin's stopping
+   * state from the moment the event arrives, through the grace in which the lifetime above still holds while the final words are stated.
+   */
+  #shutdownRun: Nullable<Promise<void>>;
   /* The delayed removals of accessories no configured controller answers for, keyed by accessory UUID. An empty registry costs a map, a set, and one listener on a
    * signal we already hold, so it is built with the platform rather than by the first reclaim that needs one...which is what puts its drain in the constructor
    * instead of in a branch someone has to remember to wire.
@@ -74,6 +78,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.log = log;
     this.#debugLog = debugGatedLog(log, () => this.featureOptions.test("Log.Debug"));
     this.#shutdownController = new AbortController();
+    this.#shutdownRun = null;
     this.#strandedRemovals = new TimerRegistry({ clock: this.clock, signal: this.signal });
     this.#webhookListener = null;
     // The port is a plugin-wide deployment decision, read once here; a setting that is not a port is said once, here, and the default stands in for it.
@@ -86,8 +91,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     this.#webhookPort = webhookPort.port;
 
-    // Arm the plugin's lifetime before anything below can return early, so the signal every controller and every listener composes against always exists.
-    api.on(APIEvent.SHUTDOWN, () => this.#shutdownController.abort());
+    // Arm the plugin's shutdown before anything below can return early, so the signal every controller and every listener composes against always reaches its end.
+    api.on(APIEvent.SHUTDOWN, () => void this.#shutdown());
 
     // Plugin options into our config variables. The controllers are the one list every reader of them acts on - the walk below, the reclaim fence, and each
     // controller's webhook sweep - so a controller listed more than once is skipped and counted alike everywhere.
@@ -306,8 +311,10 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     // Every report resolves by construction, since a rejecting login is mapped to an unavailable identity at its own pair, so this can never reject.
     const settled = await Promise.all(reports);
 
-    // A shutdown that resolved these logins is not an occasion to act on them.
-    if(this.signal.aborted) {
+    /* A shutdown that resolved these logins is not an occasion to act on them. The stopping state answers from the moment Homebridge announces the shutdown, the
+     * final words' grace included, where a login can still settle while the lifetime signal holds.
+     */
+    if(this.stopping || this.signal.aborted) {
 
       this.debug("Not looking for accessories to reclaim: the plugin is shutting down.");
 
@@ -440,6 +447,49 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.unregisterAccessory(accessory);
   }
 
+  /* Run the plugin's one shutdown, answering every later call with the first one's run. The run is recorded before any of its work begins, and that record is the
+   * plugin's stopping state, so the state is raised ahead of the first end() the shutdown starts and a second shutdown event is handed the run already under way.
+   */
+  async #shutdown(): Promise<void> {
+
+    if(this.#shutdownRun) {
+
+      return this.#shutdownRun;
+    }
+
+    const { promise, resolve }: PromiseWithResolvers<void> = Promise.withResolvers();
+
+    this.#shutdownRun = promise;
+    resolve(this.#stop());
+
+    return promise;
+  }
+
+  /* The shutdown sequence, in the order homebridge-plugin-utils' graceful MQTT end asks for. Homebridge emits its shutdown without awaiting any listener and exits a
+   * few seconds later, so this runs inside that window, with the stopping state already raised.
+   *
+   *   1. End every controller's MQTT client gracefully, all at once. Each device registered its retained offline as a final word, and each client states its words
+   *      while its broker session still holds, waits for them within a bounded grace, and then tears itself down, which fires its will for the plugin-level topic.
+   *   2. Abort the plugin's lifetime, which tears every controller down through its own terminal signal. It comes only once every end has finished, because an abort
+   *      ahead of an end releases each word's registration with the lifetime it lives under and leaves the word unsaid.
+   *
+   * The rest of the plugin is not quieted for the grace: a connect retry, an adoption, a removal timer, and HomeKit and webhook traffic run for at most the grace and
+   * are cut short by the abort, because gating each of them would add machinery for a second the abort already ends. The stopping state stops what would outlast
+   * the grace or act on it: a connect resolving inside it builds no MQTT client the ends above never reached, and the reclaim stands down.
+   */
+  async #stop(): Promise<void> {
+
+    const ends = this.controllers.flatMap(({ mqtt }) => mqtt ? [mqtt.end()] : []);
+
+    // With no client holding words there is nothing to wait for, and awaiting nothing would still carry the abort past the shutdown event, so it runs at once.
+    if(ends.length) {
+
+      await Promise.all(ends);
+    }
+
+    this.#shutdownController.abort();
+  }
+
   // Debug logging for lines that have no owner identity to name - the platform's own, and anything else that speaks for the plugin as a whole. They resolve at global
   // scope, so a plugin-wide debug entry turns them on while a device- or controller-suffixed one does not.
   public debug(message: string, ...parameters: unknown[]): void {
@@ -461,13 +511,25 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * The plugin's lifetime signal, aborted once when Homebridge shuts down. Every controller composes its own terminal signal from this one.
+   * The plugin's lifetime signal, aborted once when Homebridge shuts down, after every controller's MQTT client has stated its final words. Every controller
+   * composes its own terminal signal from this one.
    *
    * @returns The signal.
    */
   public get signal(): AbortSignal {
 
     return this.#shutdownController.signal;
+  }
+
+  /**
+   * Whether the plugin's shutdown has begun. It reads true from the moment Homebridge announces its shutdown, through the grace in which the final words are stated
+   * while the lifetime signal above still holds, so whatever must not start once a shutdown has begun reads this beside that signal.
+   *
+   * @returns Whether the shutdown has begun.
+   */
+  public get stopping(): boolean {
+
+    return this.#shutdownRun !== null;
   }
 
   // The port the webhook listener binds, and the port the registered endpoint URL names - one port by construction, because the setting refuses 0 and the listener

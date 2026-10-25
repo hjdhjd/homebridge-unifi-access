@@ -112,8 +112,8 @@ export class AccessController {
    * controller's terminal signal, so no deferred removal can survive the controller it belonged to.
    */
   readonly #removals: TimerRegistry;
-  // The terminal plugin-shutdown abort, fired exactly once in transition("shuttingDown"). Every loop and every per-device controller composes against it, so shutdown
-  // tears the whole tree down as one cascade.
+  // The terminal plugin-shutdown abort, fired exactly once in transition("shuttingDown") when the plugin's lifetime ends, after its final words. Every loop and every
+  // per-device controller composes against it, so shutdown tears the whole tree down as one cascade.
   readonly #shutdownController: AbortController;
   #unsupportedDevices: Record<string, boolean>;
   /* This controller's webhook registration, or null when it holds none. The registration is active exactly when this is non-null, and it is set and cleared as one
@@ -276,7 +276,8 @@ export class AccessController {
     /* Initialize MQTT, if configured. The library resolves both settings in one place, and the rule it applies is that a configured option answers in every state
      * it can be in: an option the user turned off, or enabled without giving it a value, is the user saying MQTT is off for this controller. The controller's own
      * configuration properties answer only where no option speaks. A null answer means there is nothing to connect to, so no client is constructed at all. The
-     * client binds to our terminal shutdown signal, so its connection ends on plugin shutdown rather than leaking past it.
+     * platform ends the client gracefully at shutdown, so each device states its final word while the session still holds, and the client binds to our terminal
+     * shutdown signal as well, so its connection can never outlive the plugin.
      *
      * A controller reached with an API token alone answers by its address identity, so a per-controller option entry addresses it exactly as it addresses a
      * credentialed controller and its broker and topic resolve at controller scope like any other's. The configuration properties answer only where no option
@@ -369,8 +370,9 @@ export class AccessController {
       return false;
     }
 
-    // A connect that resolves after shutdown must not resurrect this controller's lifecycle. The freshly-established client is otherwise orphaned, so dispose it and
-    // bail before anything else reads it.
+    /* A connect that resolves once shutdown has begun, the final words' grace included, must not resurrect this controller's lifecycle, nor build an MQTT client the
+     * platform's shutdown never reached to end. The freshly-established client is otherwise orphaned, so dispose it and bail before anything else reads it.
+     */
     if(this.#isShuttingDown()) {
 
       await this.client[Symbol.asyncDispose]();
@@ -404,8 +406,8 @@ export class AccessController {
   }
 
   /* Tear this controller down. Called from the shutdown handler after the phase has already moved, so the abort cascade has fired and every loop is unwinding by the
-   * time we get here. Neither the MQTT client nor the removal registry needs an explicit call: both were constructed against our terminal signal and end with it,
-   * which is what makes the abort the one act that tears this controller down.
+   * time we get here. The removal registry needs no explicit call, since it was constructed against our terminal signal and ends with it. Neither does the MQTT
+   * client: the platform's shutdown ended it gracefully ahead of the abort that brought us here, and its own binding to our terminal signal ends it regardless.
    */
   async #disconnect(): Promise<void> {
 
@@ -773,10 +775,14 @@ export class AccessController {
     }
   }
 
-  // Whether the terminal shutdown signal has fired. Read through a method so each caller re-reads the live signal rather than a snapshot an earlier bail captured.
+  /* Whether this controller is shutting down: the plugin's shutdown has begun, or our own terminal signal has fired. The platform's stopping state is what answers
+   * inside the final words' grace, where our signal still holds while each MQTT client states its words. Reading the signal as well keeps the answer true of
+   * whatever ends this controller's lifetime, rather than resting on the platform raising its stopping state first. Read through a method so each caller re-reads
+   * the live state rather than a snapshot an earlier bail captured.
+   */
   #isShuttingDown(): boolean {
 
-    return this.signal.aborted;
+    return this.platform.stopping || this.signal.aborted;
   }
 
   /* The one place the client's definite-assignment typing is widened. The field is genuinely unset until the first connect resolves, and the getters and the

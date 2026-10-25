@@ -6,7 +6,7 @@
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, writesOn } from "../testing.helpers.ts";
-import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
+import { FeatureOptions, HAPStatus, MqttOfflineError, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -435,6 +435,105 @@ test("removal states offline as the device's last word, past the end of its own 
   readopted.refreshReachability();
 
   assert.deepEqual(mqtt.published.slice(2), [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
+});
+
+/* Each final-word arm reads only what the client's end adds, sliced from the record as it stood before the end began, so a word the end never stated cannot pass on
+ * the strength of an availability statement the device made earlier.
+ */
+test("a device's final word is its retained offline, stated through the client's end under the signal the end hands it", async () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.refreshReachability();
+
+  const before = mqtt.published.length;
+
+  // A word published under any signal but the one the end handed it, or through a chokepoint that supplies another, is refused, and the end resolves the refusal.
+  assert.deepEqual(await mqtt.end(), [], "the end records no refusal");
+  assert.deepEqual(mqtt.published.slice(before), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "the word states offline, retained");
+  assert.equal(mqtt.aborted, true, "and the end tears the client down once the word is said");
+});
+
+test("an unreachable device that has already stated offline states it again as its final word, because the word is never weighed against its last " +
+  "statement", async () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  harness.health.isHealthy = false;
+  device.refreshReachability();
+
+  assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "the unreachable device has stated offline already");
+
+  const before = mqtt.published.length;
+
+  assert.deepEqual(await mqtt.end(), [], "the end records no refusal");
+  assert.deepEqual(mqtt.published.slice(before), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }],
+    "the word goes out all the same, where a change-gated word would find offline remembered and send nothing");
+});
+
+test("a final word the broker cannot take is the refusal the end resolves with, because the word hands the end its publish to wait on", async () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+
+  new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  // The client holds no broker session, so it refuses the word. A word that issued its publish without returning it would leave the end nothing to wait on, and the
+  // end would resolve as though the word had been said.
+  mqtt.connected = false;
+
+  const refusals = await mqtt.end();
+
+  assert.equal(refusals.length, 1, "the one word is the one refusal");
+  assert.ok(refusals[0] instanceof MqttOfflineError, "and it is the client's own refusal of a publish it holds no session for");
+  assert.deepEqual(mqtt.publishedTo(AVAILABILITY_TOPIC), [], "nothing reaches the broker");
+});
+
+test("a device removed before shutdown states no final word, because its removal released the registration with its lifetime", async () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.refreshReachability();
+  device.cleanup();
+  await settle();
+
+  const before = mqtt.published.length;
+
+  assert.deepEqual(await mqtt.end(), [], "the end records no refusal");
+  assert.deepEqual(mqtt.published.slice(before), [], "the removal stated offline already, and the end says nothing more for a device that is gone");
+});
+
+/* A contract arm over the client's own quieting, which is what keeps the word the device's last statement: once the end begins, a publish carrying any signal but the
+ * one the end handed out is refused. On this side it goes red for a shutdown that states the words some way other than through the client's end. The device starts
+ * unreachable, so the online its refresh would state is a change the change gate lets through rather than one it suppresses.
+ */
+test("a reachability change while the end states the word records no online behind it", async () => {
+
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([], { mqtt });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  harness.health.isHealthy = false;
+  device.refreshReachability();
+
+  const before = mqtt.published.length;
+  // The word is held mid-flight, which holds the end inside its grace while the device's reachability comes back.
+  const release = mqtt.holdPublishes();
+  const ended = mqtt.end();
+
+  harness.health.isHealthy = true;
+  device.refreshReachability();
+  release();
+
+  assert.deepEqual(await ended, [], "the end records no refusal");
+  assert.deepEqual(mqtt.published.slice(before), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }],
+    "the word is the only statement the end records, with no online behind it");
 });
 
 test("a get and a set registered under a lifetime of their own leave with that lifetime while the device stays, and with the device whatever they were " +

@@ -3,16 +3,18 @@
  * platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, and its reclaim of accessories nothing answers for.
  */
 import type { API, Logging } from "homebridge";
+import { APIEvent, onAbort } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
+import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
+import { TestMqttClient, freePort, settle, settleUntil } from "homebridge-plugin-utils/testing";
 import { accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi } from "./testing.helpers.ts";
-import { freePort, settle } from "homebridge-plugin-utils/testing";
 import { mock, test } from "node:test";
-import { APIEvent } from "homebridge-plugin-utils";
-import type { AccessController } from "./controller/controller.ts";
+import type { AccessClient } from "unifi-access";
+import { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
-import type { TestHomebridgeApi } from "homebridge-plugin-utils/testing";
+import type { MqttClient } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { serialForm } from "./policy.ts";
@@ -573,6 +575,143 @@ test("a disabled controller contributes its keys and is never asked for claims",
     Promise.resolve({ controller: disabled, outcome: "disabled" }) ]);
 
   assert.deepEqual(harness.unregistered, [accessoryUuid("stranded")], "every configured controller's keys spare an accessory, and only the unclaimed one leaves");
+});
+
+// The availability topic the final words below are stated on, as the broker double records it.
+const WORD_TOPIC = "AABBCCDDEE01/availability";
+
+/* Hand a controller the MQTT double in place of the client its login would build, with a final word registered on it the way a device registers its own: under a
+ * lifetime descending from the platform's, so an abort that ran ahead of the end would release the word before it was said. The double has no parent signal, so the
+ * platform's abort never reaches it and it aborts only through its own end...which is what lets an arm read whether the platform's shutdown ran that end.
+ *
+ * @param controller - The controller to hand the double to.
+ *
+ * @returns The double.
+ */
+function clientWithWord(controller: AccessController): TestMqttClient {
+
+  const mqtt = new TestMqttClient();
+
+  controller.mqtt = mqtt as unknown as MqttClient;
+  mqtt.onEnd(async (signal: AbortSignal): Promise<void> => mqtt.publish(WORD_TOPIC, "offline", { retain: true, signal }), { signal: controller.signal });
+
+  return mqtt;
+}
+
+test("a clean shutdown ends each controller's MQTT client before the plugin's lifetime, so every final word is said while that lifetime still holds", async (t) => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const [controller] = configuredControllers(platform);
+
+  assert.ok(controller, "the entry describes a whole identity, so a real controller is constructed for it");
+
+  const mqtt = clientWithWord(controller);
+  // What the broker had received at the moment the plugin's lifetime ended, which is the order this arm is about.
+  const atAbort: TestMqttPublish[][] = [];
+  // What the stopping state read as the end began, which the shutdown's order decides: the state is raised before the first end() starts.
+  const stoppingAtEnd: boolean[] = [];
+
+  onAbort(platform.signal, () => void atAbort.push([...mqtt.published]));
+  mqtt.onEnd((): void => void stoppingAtEnd.push(platform.stopping));
+
+  // The word is held mid-flight, which holds the end in its grace, so the window between the shutdown event and the abort stays open for the arm to read.
+  const release = mqtt.holdPublishes();
+
+  t.after(release);
+  harness.api.emit(APIEvent.SHUTDOWN);
+  await settle();
+
+  assert.equal(platform.stopping, true, "the shutdown event begins the shutdown");
+  assert.deepEqual(stoppingAtEnd, [true], "and the stopping state was already raised when the end began");
+  assert.equal(platform.signal.aborted, false, "but the plugin's lifetime holds while the end waits on the word");
+  assert.equal(controller.signal.aborted, false, "and so does the controller's, which the word's registration lives under");
+
+  release();
+  await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the word is said" });
+
+  assert.deepEqual(atAbort, [[{ payload: "offline", retain: true, topic: WORD_TOPIC }]], "the broker held the word before the lifetime ended");
+  assert.equal(mqtt.aborted, true, "and the client's end tore it down, which is what fires its will for the plugin-level topic");
+});
+
+test("a controller whose first connect resolves inside the final words' grace builds no MQTT client, because the shutdown has already begun", async (t) => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const [holding] = configuredControllers(platform);
+
+  assert.ok(holding, "the entry describes a whole identity, so a real controller is constructed for it");
+
+  // The held word keeps the grace open while the second controller's connect resolves inside it.
+  const release = clientWithWord(holding).holdPublishes();
+
+  t.after(release);
+
+  /* A second controller whose connect is still outstanding when the shutdown event arrives, configured for a broker, so a login that carried on past its connect
+   * would build an MQTT client the shutdown's end never reached. The client its connect answers with counts its disposals, which is what a connect landing once
+   * the shutdown has begun still owes it.
+   */
+  const connect = Promise.withResolvers<AccessClient>();
+  const disposals: string[] = [];
+  const late = new AccessController(platform, { address: "5.6.7.8", mqttUrl: "mqtt://127.0.0.1:1", tokens: { access: "token" } },
+    async (): Promise<AccessClient> => connect.promise);
+
+  platformInternals(platform).controllers.push(late);
+
+  const login = late.login();
+
+  harness.api.emit(APIEvent.SHUTDOWN);
+  connect.resolve({ [Symbol.asyncDispose]: async (): Promise<void> => void disposals.push("disposed") } as unknown as AccessClient);
+
+  assert.equal(await login, "unavailable", "a connect that resolves once the shutdown has begun serves nothing");
+  assert.equal(platform.signal.aborted, false, "and it resolved inside the grace, with the plugin's lifetime still holding");
+  assert.equal(late.mqtt, null, "so no MQTT client is built");
+  assert.deepEqual(disposals, ["disposed"], "the client the connect resolved with is disposed rather than left orphaned");
+  assert.equal(harness.lines.filter((line) => line.includes("Connected to")).length, 0, "and the controller never announces a connection");
+
+  release();
+  await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the held word is said" });
+});
+
+test("a reclaim whose logins settle inside the final words' grace removes nothing, because the shutdown has already begun", async (t) => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: "1.2.3.4", tokens: { access: "token" } }, { address: "5.6.7.8", tokens: { access: "token" } } ],
+    options: [ "Disable.Controller.DelayDeviceRemoval", "Enable.Log.Debug" ], platform: "UniFi Access" });
+
+  /* The window in which the reclaim's own stopping read decides: one controller's client holds the end in its grace with a word held mid-flight, and the other
+   * controller's login, the user having turned it off in HomeKit, settles inside that grace. A disabled login settles its report without closing the fence, so a
+   * reclaim reading the lifetime signal alone would find every report in and remove the stranded accessory while the plugin was shutting down.
+   */
+  const mqtt = new TestMqttClient();
+
+  mqtt.onEnd(async (signal: AbortSignal): Promise<void> => mqtt.publish(WORD_TOPIC, "offline", { retain: true, signal }));
+
+  const release = mqtt.holdPublishes();
+
+  t.after(release);
+
+  const disabledLogin = Promise.withResolvers<AccessLoginOutcome>();
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" }, mqtt });
+  const disabled = makeControllerDouble({ config: { address: "5.6.7.8" }, login: async (): Promise<AccessLoginOutcome> => disabledLogin.promise });
+
+  harness.restore(platform, cachedAccessory("stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+
+  const inner = platformInternals(platform);
+
+  inner.controllers.splice(0, inner.controllers.length, reporting, disabled);
+  inner.launchControllers();
+
+  harness.api.emit(APIEvent.SHUTDOWN);
+  disabledLogin.resolve("disabled");
+  await settle();
+
+  assert.equal(platform.signal.aborted, false, "every login settled inside the grace, with the plugin's lifetime still holding");
+  assert.deepEqual(harness.unregistered, [], "and the reclaim removes nothing once the shutdown has begun");
+  assert.ok(harness.lines.some((line) => line.includes("the plugin is shutting down")), "the pass says that is why it stood down");
+
+  release();
+  await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the held word is said" });
 });
 
 test("a webhook port setting that is not a port is said once and the default is used, and one that is a port is used as written", () => {
