@@ -1108,8 +1108,12 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  // Configure the doorbell service for HomeKit. A repeat pass finds the doorbell dressed and leaves it, which is what keeps its primary marking exactly as the pass
-  // that created it left it.
+  /* Configure the doorbell service for HomeKit. The door is the accessory's primary service and the doorbell never is: the lock configure path is the one place a
+   * service is marked primary. A doorbell restored from the accessory cache can still carry the marking an earlier run gave it, and HAP never records a restored
+   * service as the accessory's primary, so the door's marking demotes nothing and the door and the doorbell would each serialize as primary. The dressing pass
+   * therefore takes the marking off a doorbell that carries one, and leaves a doorbell that carries none untouched, because a marking change is a configuration
+   * change HomeKit is told about. A repeat pass finds the doorbell dressed and leaves it.
+   */
   private configureDoorbell({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
@@ -1131,7 +1135,10 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    service.setPrimaryService(true);
+    if(service.isPrimaryService) {
+
+      service.setPrimaryService(false);
+    }
   }
 
   /* Configure our contact sensors for HomeKit. Eligibility is what the hardware reports as wired, taken together with the user's feature option, so a sensor is

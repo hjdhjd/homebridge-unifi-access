@@ -11,11 +11,11 @@
  */
 /* eslint-disable camelcase */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
-import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
+import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import { AccessApiError, AccessCapabilityError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory,
+import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, runtime,
   writesOn } from "../testing.helpers.ts";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
@@ -3665,10 +3665,7 @@ test("a UA Gate switched to the lock presentation beside the side door lock it c
 
   assert.doesNotThrow(() => {
 
-    /* HAP keeps one primary service on an accessory, the last one marked, and the hub marks its door service and then its doorbell. This gate carries no
-     * doorbell, so the main door's lock is the primary service the last assertion reads.
-     */
-    gate = makeGate({ existing, options: [ "Enable.Hub.Door.Service=Lock", "Disable.Hub.Doorbell" ] });
+    gate = makeGate({ existing, options: ["Enable.Hub.Door.Service=Lock"] });
   }, "the gate stands up as a lock beside its side door lock");
 
   assert.ok(gate);
@@ -3676,6 +3673,38 @@ test("a UA Gate switched to the lock presentation beside the side door lock it c
   assert.equal(gate.services.filter(service => service.UUID === Service.LockMechanism.UUID).length, 2, "and it carries exactly two locks");
   assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), sideDoorLock, "one of them the side door's, the same service it arrived with");
   assert.ok(lockService(gate).isPrimaryService, "and the other the main door's, with no subtype, as the primary service");
+});
+
+/* An earlier run marked the doorbell primary, and Homebridge's accessory cache keeps each service's marking. HAP restores the services without recording any of
+ * them as the accessory's primary, so a door marked primary at adoption demotes nothing on its own, and the cache would carry more than one primary service. The row
+ * reaches that state the way Homebridge does, through a serialize and deserialize round trip, because an accessory built here records its primary as HAP adds it.
+ */
+test("a hub restored from the cache with its doorbell marked primary leaves its door as the one primary service", () => {
+
+  const cached = makeAccessory([ new Service.LockMechanism("Test Hub"), new Service.Doorbell("Test Hub") ]);
+  const cachedDoorbell = cached.getService(Service.Doorbell);
+
+  assert.ok(cachedDoorbell, "the cached accessory carries its doorbell");
+  cachedDoorbell.setPrimaryService(true);
+
+  // The plugin and the platform are what Homebridge's cache stamps on an accessory, and what its serialization requires.
+  cached._associatedPlugin = PLUGIN_NAME;
+  cached._associatedPlatform = PLATFORM_NAME;
+
+  const restored = runtime.PlatformAccessory.deserialize(runtime.PlatformAccessory.serialize(cached)) as TestAccessAccessory;
+
+  assert.ok(restored.getService(Service.Doorbell)?.isPrimaryService, "the restored doorbell carries the marking the earlier run gave it");
+
+  const harness = makeHub({ accessory: restored });
+
+  assert.deepEqual(harness.services.filter(service => service.isPrimaryService), [lockService(harness)],
+    "the door's lock is the one primary service, the doorbell's cached marking taken off");
+  assert.ok(hasDoorbell(harness), "while the doorbell itself stays");
+
+  // A doorbell created on a hub with no cache behind it is never marked at all.
+  const fresh = makeHub();
+
+  assert.deepEqual(fresh.services.filter(service => service.isPrimaryService), [lockService(fresh)], "a fresh hub's door is its one primary service too");
 });
 
 /* An accessory restored from the cache can carry the side door's lock ahead of the main door's. A lookup by type alone answers whichever lock comes first, so the
