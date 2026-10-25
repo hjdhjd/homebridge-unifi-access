@@ -6,10 +6,11 @@
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore,
   selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import type { API, Logging } from "homebridge";
+import { APIEvent, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
 import { EventEmitter, on } from "node:events";
-import { HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
 import { ROOT_ID, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
@@ -19,6 +20,7 @@ import { AccessController } from "./controller.ts";
 import type { AccessControllerConnect } from "./controller.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
+import { AccessPlatform } from "../platform.ts";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import { format } from "node:util";
@@ -1468,8 +1470,8 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
 
   const listener = new TestHttpListener({ signal: shutdown.signal });
 
-  // A path this arm claims before the controller can, which is what two controller entries configured with one address collide over. Registered through the
-  // double's own method ahead of the recording below, because claiming it is the arm's act rather than one of the controller's.
+  // A path this arm claims before the controller can, which is the collision the listener refuses a second route over. Registered through the double's own
+  // method ahead of the recording below, because claiming it is the arm's act rather than one of the controller's.
   if(options.duplicatePath === true) {
 
     listener.route(WEBHOOK_PATH, () => ({ status: 200 }));
@@ -1701,6 +1703,32 @@ test("a registration at a sibling controller's own path is left where it is", as
   assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH ]);
 });
 
+test("the sweep reads the platform's list, so a repeated spelling's registration is removed and an entry that is not an object costs nothing", async (t) => {
+
+  /* The configuration lists this controller twice, the second time padded with space, beside an entry a hand edit left as null. The platform reads the padded
+   * spelling as the same controller and skips it, and passes over the null, so the list it acts on holds one entry, and that list is what the sweep reads: the
+   * path only the skipped spelling would claim is claimed by nothing, and nothing in the list is read as an address that is not there.
+   */
+  const api = makeTestApi();
+  const quiet = (): void => undefined;
+  const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+  const platform = new AccessPlatform(log as unknown as Logging, { controllers: [ null, { address: "1.2.3.4", tokens: { access: "t" } },
+    { address: " 1.2.3.4 ", tokens: { access: "t" } } ] as unknown as AccessControllerOptions[], platform: "UniFi Access" }, api as unknown as API);
+
+  t.after(() => void api.emit(APIEvent.SHUTDOWN));
+
+  const padded = "/unifi-access/" + encodeURIComponent(" 1.2.3.4 ");
+  const harness = makeWebhookController({ controllers: platform.config.controllers,
+    endpoints: [endpointRecord({ endpoint: "http://10.0.0.7:10120" + padded, id: "padded", name: "Homebridge UniFi Access ( 1.2.3.4 )" })] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  assert.deepEqual(platform.config.controllers.map((entry) => entry.address), ["1.2.3.4"], "the platform acts on the first entry at the address alone");
+  assert.deepEqual(harness.calls, [ "fetch", "create", "route:" + WEBHOOK_PATH, "delete:padded" ], "and the repeated spelling's registration is an orphan");
+});
+
 test("a controller that refuses the sweep keeps the webhooks it just configured", async (t) => {
 
   const harness = makeWebhookController({ endpoints: [abandonedRecord()],
@@ -1721,7 +1749,7 @@ test("a controller that refuses the sweep keeps the webhooks it just configured"
 
 test("a controller refused its route removes the registration its own attempt created", async (t) => {
 
-  // Two controller entries configured with one address collide on the path, which is the unsupported configuration this arm stands for.
+  // The path is already routed when this controller asks for it, which is the refusal this arm stands for.
   const harness = makeWebhookController({ duplicatePath: true });
 
   t.after(() => harness.shutdown.abort());

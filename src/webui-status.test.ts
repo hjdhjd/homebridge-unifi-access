@@ -8,8 +8,9 @@
  * spelling live controllers report - so every frame-identity assertion exercises the decoration convention rather than assuming it.
  */
 /* eslint-disable camelcase */
-import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessNetworkError,
-  AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore, noopLog, selectAccessPoints, selectDoorStates } from "unifi-access";
+import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCapabilityError, AccessCertificateError, AccessClient,
+  AccessNetworkError, AccessProtocolError, AccessRequestError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore, noopLog,
+  selectAccessPoints, selectDoorStates } from "unifi-access";
 import type { AccessCapabilities, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -270,10 +271,10 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
   assert.equal(classifyStatusError(new AccessAuthorizationError("Not an administrator.")), "auth-invalid");
 
   // A refusal the controller answers as a result code inside a successful response reads as the refused status it stands for, whether it refuses the identity or
-  // a privilege, and a result code that refuses neither is a failure like any other.
+  // a privilege, and a result code that refuses neither is the controller answering with an error of its own.
   assert.equal(classifyStatusError(new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" })), "auth-invalid");
   assert.equal(classifyStatusError(new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" })), "auth-invalid");
-  assert.equal(classifyStatusError(new AccessApiError("The controller reported a system error.", { code: "CODE_SYSTEM_ERROR" })), "unreachable");
+  assert.equal(classifyStatusError(new AccessApiError("The controller reported a system error.", { code: "CODE_SYSTEM_ERROR" })), "faulted");
   assert.equal(classifyStatusError(new AccessTimeoutError("The request timed out.", { elapsedMs: 5000 })), "timeout");
   assert.equal(classifyStatusError(new AccessStallError("The channel went silent.", { silentForMs: 5000 })), "timeout");
   assert.equal(classifyStatusError(new AccessCertificateError({ cause: new Error("unable to verify"), host: "hubble:12445", identity: "token" })),
@@ -281,19 +282,39 @@ test("classifyStatusError maps every typed failure onto the wire vocabulary", ()
   assert.equal(classifyStatusError(new AccessNetworkError("The connection failed.")), "unreachable");
   assert.equal(classifyStatusError(new AccessThrottledError("The controller is throttled.", { cooldownMs: 1000 })), "unreachable");
 
-  // The default arm: an unclassified throw is connectivity to a user, so it answers the same honest reason.
+  // The default arm: a throw none of the readings names answers the default reason.
   assert.equal(classifyStatusError(new Error("Anything else.")), "unreachable");
 });
 
-test("classifyStatusError reads a refusal a bootstrap error carries as its cause as a refused sign-in, and any other wrapped fault as unreachable", () => {
+test("classifyStatusError reads a controller that answered with something the feed cannot use as faulted, and one with no official API as unsupported", () => {
+
+  // An error status the library does not classify further, and a response it could not make sense of, are the controller answering rather than failing to.
+  assert.equal(classifyStatusError(new AccessRequestError("The controller answered 422.", { statusCode: 422 })), "faulted");
+  assert.equal(classifyStatusError(new AccessProtocolError("The controller answered with a body that is not an envelope.")), "faulted");
+
+  // The codes the library names as capability signals rather than faults: no official API at all, and a device below an endpoint's firmware floor.
+  assert.equal(classifyStatusError(new AccessApiError("The official API is not supported.", { code: "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" })), "unsupported");
+  assert.equal(classifyStatusError(new AccessApiError("The device is below the firmware floor.", { code: "CODE_DEVICE_API_NOT_SUPPORTED" })), "unsupported");
+
+  // A gap in the client's own paths is no answer from the controller at all, so it keeps the default reason.
+  assert.equal(classifyStatusError(new AccessCapabilityError("No path carries this operation.")), "unreachable");
+});
+
+test("classifyStatusError reads a bootstrap error's refused cause as a refused sign-in, an unusable document as faulted, and a failed fetch as unreachable", () => {
 
   // The credential path's bootstrap wraps a refused document read as the cause of a fetch-stage bootstrap error, and the panel reads the refusal it carries.
   assert.equal(classifyStatusError(new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.",
     { cause: new AccessAuthorizationError("Not an administrator."), stage: "fetch" })), "auth-invalid");
 
-  // A document that arrived and could not be read carries no refusal, so its wrapper answers the default.
+  // A document that arrived and could not be read, or could not be folded into the state model, is the controller answering with something the feed cannot use.
   assert.equal(classifyStatusError(new AccessBootstrapError("Unable to parse the UniFi Access controller configuration.",
-    { cause: new TypeError("The topology endpoint answered with no document."), stage: "parse" })), "unreachable");
+    { cause: new TypeError("The topology endpoint answered with no document."), stage: "parse" })), "faulted");
+  assert.equal(classifyStatusError(new AccessBootstrapError("Unable to apply the UniFi Access controller configuration.",
+    { cause: new TypeError("The topology document named a door twice."), stage: "apply" })), "faulted");
+
+  // A fetch that failed for any reason but a refusal keeps the default reason, the stage carrying no answer of its own.
+  assert.equal(classifyStatusError(new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.",
+    { cause: new AccessNetworkError("The connection failed."), stage: "fetch" })), "unreachable");
 });
 
 test("the row policy answers a wired hub's rows from the entry the store established", () => {

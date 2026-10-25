@@ -4,15 +4,22 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, FeatureOptions, HttpListener, TimerRegistry, debugGatedLog, formatErrorMessage, guardedDispatch, localAddressFor,
+import { APIEvent, FeatureOptions, HttpListener, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch, localAddressFor,
   systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
+import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
 import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen, resolveWebhookPort } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { AccessController } from "./controller/controller.ts";
-import type { AccessOptions } from "./options.ts";
+
+// Whether a configured entry is an object, which an entry has to be before anything in it can be read. A hand edit can leave anything in the list, and the type the
+// configuration is read through cannot say so, so the check takes the entry as unknown.
+function isObject(entry: unknown): entry is object {
+
+  return (typeof entry === "object") && (entry !== null);
+}
 
 /* What one controller's startup settled: the controller itself, and what its login established about its identity. The two are paired at the moment the login is
  * started, so nothing downstream has to match an outcome back to a controller by its position in an array.
@@ -82,10 +89,11 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     // Arm the plugin's lifetime before anything below can return early, so the signal every controller and every listener composes against always exists.
     api.on(APIEvent.SHUTDOWN, () => this.#shutdownController.abort());
 
-    // Plugin options into our config variables.
+    // Plugin options into our config variables. The controllers are the one list every reader of them acts on - the walk below, the reclaim fence, and each
+    // controller's webhook sweep - so a controller listed more than once is skipped and counted alike everywhere.
     this.config = {
 
-      controllers: config?.controllers ?? [],
+      controllers: this.#listedControllers(config?.controllers),
       options: config?.options ?? []
     };
 
@@ -128,6 +136,67 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     // Avoid a prospective race condition by waiting to configure our controllers until Homebridge is done loading all the cached accessories it knows about, and calling
     // configureAccessory() on each.
     api.on(APIEvent.DID_FINISH_LAUNCHING, this.launchControllers.bind(this));
+  }
+
+  /**
+   * The configured controllers the plugin acts on, one entry per listed address. A hand edit can leave anything under controllers, so a value that is not a list
+   * names no controller, and an entry that is not an object is passed over, since nothing in it can be read.
+   *
+   * A controller is reached by its address, so the first entry at an address is the one we read, and every later entry there is left out with one warning per
+   * address however many entries repeat it. Whether one address names the same controller as another is homebridge-plugin-utils' listed-address rule, the one the
+   * settings page reads its controller list through, so the page and the plugin agree on which entry at an address is the first. An address the rule gives no form
+   * never repeats another, so its entry is kept and meets the walk's own address check.
+   *
+   * @param controllers - The configured controllers value, in whatever shape the configuration file holds it.
+   *
+   * @returns The entries the plugin acts on, in their configured order.
+   */
+  #listedControllers(controllers: AccessPlatformConfig["controllers"]): AccessControllerOptions[] {
+
+    if(!Array.isArray(controllers)) {
+
+      return [];
+    }
+
+    // The first entry at each listing form, and whether a later entry repeating it has been reported.
+    const firstEntries = new Map<string, { address: string; warned: boolean }>();
+    const listed: AccessControllerOptions[] = [];
+
+    for(const controller of controllers) {
+
+      if(!isObject(controller)) {
+
+        continue;
+      }
+
+      const form = addressListingForm(controller.address);
+
+      if(form === null) {
+
+        listed.push(controller);
+
+        continue;
+      }
+
+      const first = firstEntries.get(form);
+
+      if(first) {
+
+        if(!first.warned) {
+
+          first.warned = true;
+          this.log.warn("The controller %s is listed more than once in the plugin configuration. Only its first entry is used. Saving that controller in the " +
+            "plugin settings removes the extra entries.", first.address);
+        }
+
+        continue;
+      }
+
+      firstEntries.set(form, { address: controller.address, warned: false });
+      listed.push(controller);
+    }
+
+    return listed;
   }
 
   // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic

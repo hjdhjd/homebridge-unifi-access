@@ -595,9 +595,9 @@ export class AccessController {
           "plugin will use it.", renderWebhookFailure(error), url);
       } else if((error instanceof TypeError) || isHbpuAbortError(error)) {
 
-        /* The listener refused, and its own message names the cause. A TypeError is the path already routed - two controllers configured with one address - or
-         * the listener refusing an option it was constructed with, an out-of-range port among them, and it names the collision or the option. An abort error is
-         * a listener whose lifetime ended on a bind failure it has already reported. A shutdown never arrives here, because the check above answers it first.
+        /* The listener refused, and its own message names the cause. A TypeError is the listener refusing a path already routed, or an option it was
+         * constructed with, an out-of-range port among them, and it names the collision or the option. An abort error is a listener whose lifetime ended on a
+         * bind failure it has already reported. A shutdown never arrives here, because the check above answers it first.
          */
         this.log.error("Unable to receive Access webhook deliveries. %s", error.message);
       } else {

@@ -2,7 +2,7 @@
  *
  * controller-actions.d.mts: Type declarations for the settings page's controller connection check, its kept controller answers, and the controller save and removal.
  */
-import type { AccessConfig, AccessConfigInterpreter, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, classifyProbeResponse, controllerListedElsewhere,
+import type { AccessConfig, AccessConfigInterpreter, AccessControllerList, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict, classifyProbeResponse,
   hasValidIdentity, readProbeRejection } from "./access-config.mjs";
 import type { CommitConfig, SaveFlow } from "homebridge-plugin-utils";
 
@@ -81,6 +81,7 @@ export declare const TOKEN_REFUSED_WARNING: string;
  * @param injected.controllerListedWarning   - The sentence a save speaks when that rule, or the composer asking it again, refuses the save.
  * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
  *                                             controller-scoped entries by.
+ * @param injected.errorMessage              - homebridge-plugin-utils' reading of the message a thrown value or a failed write's error carries.
  * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
  * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
@@ -93,9 +94,10 @@ export declare const TOKEN_REFUSED_WARNING: string;
  */
 export declare const makeControllerActions: (injected: {
   commitConfig: CommitConfig<AccessConfig>;
-  controllerListedElsewhere: typeof controllerListedElsewhere;
+  controllerListedElsewhere: AccessControllerList["controllerListedElsewhere"];
   controllerListedWarning: string;
   controllerSerial: (answer: AccessProbeSuccess) => unknown;
+  errorMessage: (err: unknown) => string;
   interpreters: () => Promise<Pick<AccessConfigInterpreter, "withControllerRemoved" | "withControllerSaved">>;
   platformConfig: () => AccessConfig | null;
   processDeviceList: (list: { address: unknown; devices: Record<string, unknown>[] }) => Record<string, unknown>[];

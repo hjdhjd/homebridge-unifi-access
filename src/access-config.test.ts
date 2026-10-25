@@ -11,12 +11,11 @@
  * trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a migrated configuration runs on the
  * same effective values the legacy one did.
  */
-import { ALL_CHOICES, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, mqttConnectionSettings,
-  normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
+import { ALL_CHOICES, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries,
+  formatValueList, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse,
-  controllerListedElsewhere, deviceListResult, hasValidIdentity, makeAccessConfig, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict,
-  withPrimaryIdentity } from "../homebridge-ui/public/access-config.mjs";
+  deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection, staleSelectionVerdict } from "../homebridge-ui/public/access-config.mjs";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_MQTT_TOPIC } from "./settings.ts";
 import type { AccessControllerOptions } from "./options.ts";
@@ -62,10 +61,16 @@ const ADDRESS_TOPIC = "unifi/gate";
 // The catalog index the webUI hands the interpreters, built from the real served catalog exactly as the browser builds it.
 const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 
+/* The controller list's interpreters, built exactly the way the webUI builds them: over homebridge-plugin-utils' listed-address rule, imported here from the package
+ * root that is compiled from the same source as the page's browser copy.
+ */
+const { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity } =
+  makeControllerList({ addressListedElsewhere, addressListingForm });
+
 // The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index and the builder that makes one, the
-// framework's own entry enumerators, its list formatter, and its scope-identifier repair.
-const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
-  scopeSafeId });
+// controller list's reader and save composer above, the framework's own entry enumerators, its list formatter, and its scope-identifier repair.
+const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, enumerateConfiguredEntries, enumerateScopeEntries,
+  formatValueList, scopeSafeId });
 
 // The interpreters the suite reads off that holder, named here once so every arm below reads them as plain functions.
 const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
@@ -871,22 +876,23 @@ test("an add at an address another controller holds is refused, and an add at a 
     [ CREDENTIALS, { address: SECOND_ADDRESS, tokens: TOKENS } ], "and it appends beside the controller already there");
 });
 
-test("an edit moving onto another controller's address is refused, and one writing exactly its own stored address is accepted beside a controller sharing it", () => {
+test("an edit moving onto another controller's address is refused, and one writing its own stored address beside a repeated entry saves the first entry alone", () => {
 
   const second = { address: SECOND_ADDRESS, tokens: TOKENS };
 
   assertRefused({ controllers: [ { ...CREDENTIALS }, second ] }, { address: ADDRESS, originalAddress: SECOND_ADDRESS, tokens: TOKENS },
     "an edit moving the second controller onto the first one's address is refused");
 
-  // A configuration that already carries more than one controller at an address, which the refusal stops new saves from making but must leave editable.
+  // A configuration that already carries more than one controller at an address, which the refusal stops new saves from making. The page reads the first item there
+  // alone, so an edit lands on it and the write leaves the later item out.
   const pair = [ { ...CREDENTIALS }, { address: ADDRESS, tokens: TOKENS } ];
 
   assert.deepEqual(accepted({ controllers: pair }, { ...CREDENTIALS, originalAddress: ADDRESS, password: "new secret" },
-    "an edit writing exactly the address its item stores moves nothing and is accepted"), [ { ...CREDENTIALS, password: "new secret" }, pair[1] ],
-  "and it replaces the item it names while the item sharing its address stands");
+    "an edit writing exactly the address its item stores is accepted"), [{ ...CREDENTIALS, password: "new secret" }],
+  "and the saved list holds the edited first entry alone");
 });
 
-test("an edit changing only the letter case of its own address is accepted where no other controller holds it, and refused onto a spelling another holds", () => {
+test("an edit changing only the letter case of its own address is accepted, and over a case-variant pair it writes the first entry alone", () => {
 
   const host = { address: "unifi.local", tokens: TOKENS };
 
@@ -894,9 +900,11 @@ test("an edit changing only the letter case of its own address is accepted where
     "a case-only edit of a controller no other controller shares an address with is accepted"), [{ address: "UNIFI.local", tokens: TOKENS }],
   "and the address is stored exactly as typed");
 
-  // A case-variant pair, which the folded comparison treats as one controller: the edit would otherwise write the exact duplicate the page cannot tell apart.
-  assertRefused({ controllers: [ host, { address: "UNIFI.local", tokens: TOKENS } ] }, { address: "UNIFI.local", originalAddress: "unifi.local", tokens: TOKENS },
-    "a case-only edit onto the exact spelling another controller holds is refused, because only an exactly unchanged address moves nothing");
+  // A case-variant pair, which the listed-address rule reads as one controller: the page reads the first entry alone, so the edit moves that entry onto the
+  // spelling the later one holds and the write leaves the later one out.
+  assert.deepEqual(accepted({ controllers: [ host, { address: "UNIFI.local", tokens: TOKENS } ] },
+    { address: "UNIFI.local", originalAddress: "unifi.local", tokens: TOKENS }, "a case-only edit onto the spelling a later entry at its own address holds is accepted"),
+  [{ address: "UNIFI.local", tokens: TOKENS }], "and it writes the edited first entry alone");
 });
 
 test("an edit whose original address matches no controller is refused at a held address and appends at a free one", () => {
@@ -909,20 +917,22 @@ test("an edit whose original address matches no controller is refused at a held 
     [ CREDENTIALS, { address: SECOND_ADDRESS, tokens: TOKENS } ], "and it appends, because an original address that names no item is an add");
 });
 
-test("the comparison folds letter case and surrounding space, and an address differing in any other character is accepted and stored as typed", () => {
+test("the comparison folds every spelling of a held console, and an address naming another host or another port is accepted and stored as typed", () => {
 
-  const config = { controllers: [ { address: "unifi.local", tokens: TOKENS }, { address: "fe80::1", tokens: TOKENS } ] };
+  const config = { controllers: [ { address: "unifi.local", tokens: TOKENS }, { address: "fe80::1", tokens: TOKENS }, { address: "10.0.0.42", tokens: TOKENS } ] };
 
-  for(const address of [ "UNIFI.LOCAL", " unifi.local", "unifi.local\t", "  Unifi.Local  ", "FE80::1" ]) {
+  // Letter case, surrounding space, a trailing dot on the host, the default HTTPS port, an IPv6 literal with or without its brackets, compressed or written out,
+  // and an IPv4 address in its shorthand each name a held console, so each is refused.
+  for(const address of [ "UNIFI.LOCAL", " unifi.local", "unifi.local\t", "  Unifi.Local  ", "unifi.local.", "unifi.local:443", "FE80::1", "[fe80::1]",
+    "fe80:0:0:0:0:0:0:1", "10.42" ]) {
 
-    assertRefused(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " names a held address in another case or with surrounding space");
+    assertRefused(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " names a held address in another spelling");
   }
 
-  // Some of these name the same machine in another spelling and the rest are near-misses a character away, and each is accepted, because the comparison folds
-  // letter case and surrounding space and nothing else.
-  for(const address of [ "unifi.local.", "unifi.local:443", "unifi-local", "unifi.locals", "[fe80::1]", "fe80:0:0:0:0:0:0:1" ]) {
+  // A port other than the default and a host differing in a character the form keeps each name another console as far as the rule can see, so each is accepted.
+  for(const address of [ "unifi.local:8443", "unifi-local", "unifi.locals", "[fe80::2]" ]) {
 
-    assert.deepEqual(accepted(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " differs in a character the form keeps")?.at(-1),
+    assert.deepEqual(accepted(config, { address, tokens: TOKENS }, "an add at " + JSON.stringify(address) + " differs in what the form keeps")?.at(-1),
       { address, tokens: TOKENS }, "and it appends exactly as typed");
   }
 
@@ -949,9 +959,18 @@ test("an entry with no address, an empty one, or one that is not a string never 
     assert.equal(controllerListedElsewhere(unaddressed, { address }), false, "a written address of " + JSON.stringify(address) + " has no form, so it is never listed");
     assert.ok(withControllerSaved(unaddressed, { address, tokens: TOKENS }), "and the composer answers a patch for it too");
   }
+
+  // A value carrying a scheme or a path has no form either, so an exact twin of one is accepted, and the connection check is what answers it.
+  for(const address of [ "https://unifi.local", "unifi.local/" ]) {
+
+    const twin = { address, tokens: TOKENS };
+
+    assert.deepEqual(accepted({ controllers: [twin] }, { address, tokens: TOKENS }, "an exact twin of " + JSON.stringify(address) + " is accepted"), [ twin, twin ],
+      "and it appends beside the entry it repeats");
+  }
 });
 
-test("first-run refuses an address a later controller holds, writes one none holds, and writes where the primary and a later controller already share it", () => {
+test("first-run refuses an address a later controller holds, writes one none holds, and writes the primary alone beside a later entry repeating it", () => {
 
   const later = { address: ADDRESS, tokens: TOKENS };
   const identity = { address: ADDRESS, tokens: TOKENS };
@@ -969,17 +988,149 @@ test("first-run refuses an address a later controller holds, writes one none hol
     "and written onto the primary");
   assert.equal(primaryListedElsewhere({}, identity), false, "and a fresh configuration has nothing to refuse");
 
-  // A primary that already stores the typed address beside a later controller holding it too, which first run is the only screen able to reach.
+  /* A primary that already stores the typed address beside a later controller repeating it, which first run is the only screen able to reach. The page reads the
+   * primary alone at its address, so the write beside the repeat holds the primary alone.
+   */
   const pair = { controllers: [ { address: ADDRESS, username: CREDENTIALS.username }, later ] };
 
-  assert.equal(primaryListedElsewhere(pair, identity), false, "a primary already storing exactly the typed address moves nothing, so the early check accepts it");
-  assert.deepEqual(withPrimaryIdentity(pair, identity)?.controllers, [ { address: ADDRESS, tokens: TOKENS }, later ],
-    "and the composer writes it, leaving the configuration passable rather than trapped in first run");
+  assert.equal(primaryListedElsewhere(pair, identity), false, "a primary storing the typed address beside a later entry repeating it is accepted by the early check");
+  assert.deepEqual(withPrimaryIdentity(pair, identity)?.controllers, [{ address: ADDRESS, tokens: TOKENS }],
+    "and the composer writes the primary alone, leaving the configuration passable rather than trapped in first run");
 });
 
 test("the listed-address refusal's sentence has one home, beside the rule that refuses", () => {
 
   assert.equal(CONTROLLER_LISTED_WARNING, LISTED, "the sentence's one home holds the refusal's sentence");
+});
+
+// The controllers values a hand edit can leave that are not a list, each beside the label its assertions name it by.
+const NOT_A_LIST = [ [ undefined, "undefined" ], [ null, "null" ], [ { address: ADDRESS }, "an object" ], [ "unifi.local", "a non-empty string" ],
+  [ "", "an empty string" ], [ 42, "a number" ] ] as [ unknown, string ][];
+
+test("a controllers value that is not a list reads as no controllers", () => {
+
+  for(const [ value, label ] of NOT_A_LIST) {
+
+    assert.deepEqual(controllers({ controllers: value }), [], label + " reads as an empty list");
+  }
+});
+
+// Every reader of the list goes through the reader, so a value that is not a list reaches none of them as anything but an empty list.
+test("over a controllers value that is not a list, first run is required, passable, and writes a list holding the one new entry", () => {
+
+  const identity = { address: ADDRESS, tokens: TOKENS };
+
+  for(const [ value, label ] of NOT_A_LIST) {
+
+    const config: AccessConfig = { controllers: value };
+
+    assert.equal(primaryController(config), undefined, label + " holds no primary controller, so first run is required");
+    assert.equal(primaryListedElsewhere(config, identity), false, label + " lists no address, and the early check answers without throwing");
+    assert.deepEqual(withPrimaryIdentity(config, identity)?.controllers, [identity], label + " is written as a list holding the one new entry");
+  }
+});
+
+test("an entry that is not an object is left out, and the object entries beside it are kept in their stored order as the stored objects", () => {
+
+  const first = { ...CREDENTIALS };
+  const second = { address: SECOND_ADDRESS, tokens: TOKENS };
+  const read = controllers({ controllers: [ null, first, "unifi.local", second, 42 ] });
+
+  assert.equal(read.length, 2, "null, a string, and a number are left out");
+  assert.equal(read[0], first, "the first object entry is kept as the stored object itself");
+  assert.equal(read[1], second, "and so is the second, in its stored order");
+});
+
+// The comparison form is the listed-address rule's own, so the list the page reads and the refusal a save meets agree on which entries are one controller.
+test("the first entry at an address is kept and every later entry at it is left out, by the form the listed-address rule compares in", () => {
+
+  const first = { address: "unifi.local", tokens: TOKENS };
+
+  for(const [ repeat, label ] of [ [ "unifi.local", "the exact address" ], [ "UNIFI.Local", "the address in another case" ],
+    [ "  unifi.local\t", "the address with surrounding space" ], [ "unifi.local.", "the address with a trailing dot" ],
+    [ "UniFi.local:443", "the address with the default port" ] ] as [ string, string ][]) {
+
+    const read = controllers({ controllers: [ first, { address: repeat, tokens: TOKENS } ] });
+
+    assert.equal(read.length, 1, "a later entry at " + label + " is left out");
+    assert.equal(read[0], first, "and the first entry is kept as the stored object, beside a later entry at " + label);
+  }
+
+  // An entry whose address has no form never repeats another, so every one of these is kept, an absent address and an empty one each appearing more than once.
+  const distinct: AccessControllerConfig[] = [ { address: SECOND_ADDRESS, tokens: TOKENS }, { address: ADDRESS, tokens: TOKENS },
+    { address: "unifi.local.", tokens: TOKENS }, { address: "unifi.local:8443", tokens: TOKENS } ];
+  const formless: AccessControllerConfig[] = [ { tokens: TOKENS }, { address: "", tokens: TOKENS }, { address: "   ", tokens: TOKENS }, { address: 42, tokens: TOKENS },
+    { tokens: TOKENS }, { address: "", tokens: TOKENS } ];
+
+  assert.deepEqual(controllers({ controllers: distinct }).map((item) => distinct.indexOf(item)), [ 0, 1, 2, 3 ],
+    "entries at different addresses are each kept as the stored object, in their stored order");
+  assert.deepEqual(controllers({ controllers: formless }).map((item) => formless.indexOf(item)), [ 0, 1, 2, 3, 4, 5 ],
+    "and every entry whose address has no form is kept as the stored object, in its stored order");
+});
+
+test("a save over a repeated address writes the edited first entry and no entry at the address after it, and a removal takes every spelling of its address", () => {
+
+  const other = { address: SECOND_ADDRESS, tokens: TOKENS };
+  const written = saved({ controllers: [ { ...CREDENTIALS }, other, { ...CREDENTIALS, username: "twin@example.com" } ] },
+    { ...CREDENTIALS, originalAddress: ADDRESS, password: "new secret" });
+
+  assert.deepEqual(written.controllers, [ { ...CREDENTIALS, password: "new secret" }, other ],
+    "with the edited first entry, the other address's entry, and no entry at the edited address after them");
+
+  const removed = accessConfig.withControllerRemoved({ controllers: [ { address: "unifi.local", tokens: TOKENS }, { address: "UNIFI.local", tokens: TOKENS }, other ] },
+    { address: "unifi.local" });
+
+  assert.deepEqual(removed.controllers, [other], "a removal takes the address's first entry, and the entry differing from it only in letter case leaves with it");
+});
+
+test("the controllers awaiting migration are read one entry per listed address, and a repeated entry alone causes no write", () => {
+
+  const both: TestConfig = { controllers: [ { ...CREDENTIALS, mqttUrl: LEGACY_BROKER },
+    { ...CREDENTIALS, mqttUrl: "mqtt://10.0.0.5:1883", username: "twin@example.com" } ] };
+  const laterOnly: TestConfig = { controllers: [ { ...CREDENTIALS }, { ...CREDENTIALS, mqttUrl: LEGACY_BROKER, username: "twin@example.com" } ] };
+
+  assert.deepEqual(controllersAwaitingMigration(both).map((entry) => entry.username), [CREDENTIALS.username],
+    "where every entry at an address carries a legacy setting, the first entry alone awaits migration");
+  assert.deepEqual(controllersAwaitingMigration(laterOnly), [], "where only the later entry carries one, nothing awaits migration");
+  assert.equal(accessConfig.migrate(laterOnly, RESOLVED), null, "and the migration over it has nothing to do, so the repeated entry stays where it is");
+});
+
+test("the migration over a repeated address composes the first entry's value alone and writes one successor there", () => {
+
+  const config: TestConfig = { controllers: [ { ...CREDENTIALS, mqttUrl: LEGACY_BROKER },
+    { ...CREDENTIALS, mqttUrl: "mqtt://10.0.0.5:1883", username: "twin@example.com" } ] };
+  const patch = migrated(config, RESOLVED);
+
+  assert.equal(engineWith(patch.options).value("Mqtt.Url", undefined, CONTROLLER_MAC), LEGACY_BROKER, "the first entry's broker composes at the controller's scope");
+  assert.equal(patch.options?.filter((entry) => entry.toLowerCase().includes("mqtt.url")).length, 1, "and the later entry's broker composes nothing");
+  assert.deepEqual(patch.controllers, [CREDENTIALS], "and one successor is written at the address, the first entry's");
+
+  // A topic equal to the registered default composes nothing, which leaves the controller's scope open, so a later entry read here would compose its own topic.
+  const defaulted: TestConfig = { controllers: [ { ...CREDENTIALS, mqttTopic: ACCESS_MQTT_TOPIC },
+    { ...CREDENTIALS, mqttTopic: LEGACY_TOPIC, username: "twin@example.com" } ] };
+  const defaultedPatch = migrated(defaulted, RESOLVED);
+
+  assert.equal(engineWith(defaultedPatch.options).scope("Mqtt.Topic", undefined, CONTROLLER_MAC), "none",
+    "the later entry's topic composes nothing where the first entry's default composed nothing");
+  assert.deepEqual(defaultedPatch.controllers, [CREDENTIALS], "and one successor is written at the address");
+});
+
+test("an entry that is not an object reaches no interpreter, beside a controller every interpreter reads", () => {
+
+  const config: TestConfig = { controllers: [ null, { ...CREDENTIALS, mqttUrl: LEGACY_BROKER } ] as unknown as AccessControllerConfig[] };
+  const listed = { controllers: [ null, { ...CREDENTIALS } ] as unknown as AccessControllerConfig[] };
+
+  assert.equal(primaryController(listed)?.address, ADDRESS, "the primary is the first object entry");
+  assert.equal(controllerListedElsewhere(listed, { address: ADDRESS }), true, "the early check reads past the entry and finds the held address");
+  assert.equal(primaryListedElsewhere(listed, { address: SECOND_ADDRESS }), false, "and so does first run's");
+  assert.deepEqual(saved(listed, { address: SECOND_ADDRESS, tokens: TOKENS }).controllers, [ CREDENTIALS, { address: SECOND_ADDRESS, tokens: TOKENS } ],
+    "a save writes the list without the entry");
+  assert.deepEqual(withPrimaryIdentity(listed, { ...CREDENTIALS, password: "new secret" })?.controllers, [{ ...CREDENTIALS, password: "new secret" }],
+    "and so does first run");
+  assert.deepEqual(accessConfig.withControllerRemoved(listed, { address: ADDRESS }).controllers, [], "a removal leaves nothing behind it");
+  assert.deepEqual(controllersAwaitingMigration(config).map((entry) => entry.address), [ADDRESS], "the awaiting controller is the object entry");
+  assert.deepEqual(migrated(config, RESOLVED).controllers, [CREDENTIALS], "and the migration writes its successor alone");
+  assert.equal(accessConfig.migrate(listed, RESOLVED), null, "while beside a controller with nothing to migrate, the entry causes no write");
 });
 
 test("removal drops the item its address names, and an empty MAC set leaves the configured options untouched", () => {

@@ -2,8 +2,8 @@
  *
  * access-config.d.mts: Type declarations for the pure Access platform-configuration interpreters.
  */
-import type { CatalogIndex, FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
-  scopeSafeId } from "homebridge-plugin-utils";
+import type { CatalogIndex, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries,
+  formatValueList, scopeSafeId } from "homebridge-plugin-utils";
 
 /**
  * One configured controller, as it actually arrives from the Homebridge UI. Every property is declared as an unknown-valued optional because that is the honest shape
@@ -115,6 +115,47 @@ export interface AccessConfigInterpreter {
     controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }) => AccessConfigPatch | null;
 }
 
+/**
+ * The interpreters of the configured controller list, which makeControllerList builds over homebridge-plugin-utils' listed-address rule. Each is declared as a
+ * property carrying a function, which is what the factory builds, so a consumer is free to read one off the object and call it on its own.
+ */
+export interface AccessControllerList {
+
+  /**
+   * Whether a controller save would be refused because another configured controller already holds the address it writes, compared in homebridge-plugin-utils'
+   * listing form and asked of the configuration the page last received, so a save can answer before its connection test. A save that writes its own item's
+   * address, in any spelling, is never refused, and an address the rule gives no form is never listed. The composer's own refusal, made against the
+   * configuration at the write, is the one that decides.
+   */
+  controllerListedElsewhere: (config: AccessConfig | null | undefined, save: { address?: unknown; originalAddress?: unknown }) => boolean;
+
+  /**
+   * The configured controllers, one entry per listed address: the stored entries themselves in their stored order, keeping the first entry at each address and
+   * every entry whose address has no form, and leaving out every later entry at an address and every entry that is not an object, or an empty list when the
+   * configuration holds no list.
+   */
+  controllers: (config?: AccessConfig) => AccessControllerConfig[];
+
+  /**
+   * The controllers array that writes one controller's identity onto the item its original address names, or appends it where that names none, composed over the
+   * list one entry per listed address. Null means the address is already listed and nothing is to be written.
+   */
+  controllersWithSave: (config: AccessConfig | undefined, save: AccessIdentity & { originalAddress?: unknown }) => AccessControllerConfig[] | null;
+
+  /** The primary controller entry (the first), or undefined on a fresh configuration. */
+  primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;
+
+  /** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
+  primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
+
+  /**
+   * The controllers patch that writes an identity onto the primary controller, preserving the additional controllers the configured list holds, one entry per
+   * listed address, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary holds the address the
+   * identity writes.
+   */
+  withPrimaryIdentity: (config: AccessConfig | undefined, identity: AccessIdentity) => { controllers: AccessControllerConfig[] } | null;
+}
+
 /** The headline a controller the plugin could not reach is rendered under. */
 export declare const CONNECTION_FAILURE_HEADLINE: string;
 
@@ -133,15 +174,6 @@ export declare const SERVER_FAILURE_HEADLINE: string;
 /** Read the UI server's kind-tagged device probe into the verdict every consumer branches on. */
 export declare const classifyProbeResponse: (response?: unknown) => AccessProbeVerdict;
 
-/**
- * Whether a controller save would be refused because another configured controller already holds the address it writes, asked of the configuration the page last
- * received so a save can answer before its connection test. The composer's own refusal, made against the configuration at the write, is the one that decides.
- */
-export declare const controllerListedElsewhere: (config: AccessConfig | null | undefined, save: { address?: unknown; originalAddress?: unknown }) => boolean;
-
-/** The configured controllers, normalized so callers never branch on undefined. */
-export declare const controllers: (config?: AccessConfig) => AccessControllerConfig[];
-
 /** Map a probe verdict onto the device list and connection outcome the framework's hook contract carries, with each outcome's own copy beside it. */
 export declare const deviceListResult: (verdict: AccessProbeVerdict) => AccessDeviceListResult;
 
@@ -150,11 +182,13 @@ export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
 
 /**
  * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its entry
- * enumerators, its list formatter, and its scope-identifier repair.
+ * enumerators, its list formatter, its scope-identifier repair, and the configured controller list's reader and save composer.
  *
  * @param injected.FeatureOptions             - The feature-option engine class.
  * @param injected.buildCatalogIndex          - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
  * @param injected.catalog                    - The catalog index, which carries the served categories and options alongside its derived indices.
+ * @param injected.controllers                - The configured controllers, one entry per listed address, as makeControllerList reads them.
+ * @param injected.controllersWithSave        - The controllers array a save writes, or null for an address already listed, as makeControllerList composes it.
  * @param injected.enumerateConfiguredEntries - The framework's own enumerator over the configured entries addressing one option.
  * @param injected.enumerateScopeEntries      - The framework's own enumerator over the configured entries reading at one scope identifier.
  * @param injected.formatValueList            - The framework's composition of a list option's stored form from its selected members.
@@ -163,14 +197,20 @@ export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
  * @returns The migration, the awaiting-migration predicate, the controller save, and the controller removal.
  */
 export declare const makeAccessConfig: (injected: { FeatureOptions: typeof FeatureOptions; buildCatalogIndex: typeof buildCatalogIndex; catalog: CatalogIndex;
+  controllers: AccessControllerList["controllers"]; controllersWithSave: AccessControllerList["controllersWithSave"];
   enumerateConfiguredEntries: typeof enumerateConfiguredEntries; enumerateScopeEntries: typeof enumerateScopeEntries;
   formatValueList: typeof formatValueList; scopeSafeId: typeof scopeSafeId }) => AccessConfigInterpreter;
 
-/** The primary controller entry (the first), or undefined on a fresh configuration. */
-export declare const primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;
-
-/** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
-export declare const primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
+/**
+ * Build the interpreters of the configured controller list over homebridge-plugin-utils' listed-address rule, handed in so the module stays import-free.
+ *
+ * @param injected.addressListedElsewhere - homebridge-plugin-utils' check of whether an address being saved is already listed at another position.
+ * @param injected.addressListingForm     - homebridge-plugin-utils' listing form of an address.
+ *
+ * @returns The interpreters of the configured controller list.
+ */
+export declare const makeControllerList: ({ addressListedElsewhere, addressListingForm }: { addressListedElsewhere: typeof addressListedElsewhere;
+  addressListingForm: typeof addressListingForm }) => AccessControllerList;
 
 /**
  * The detail a rejected probe request carries: its message where that is a string, the rejection itself where it is a string, and the unrecognized-shape sentence
@@ -180,9 +220,3 @@ export declare const readProbeRejection: (reason: unknown) => string;
 
 /** The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call. */
 export declare const staleSelectionVerdict: () => AccessProbeFailure;
-
-/**
- * The controllers patch that writes an identity onto the primary controller, or null when the identity is not one the plugin can connect with, and null as well
- * when a controller after the primary holds the address the identity writes and the primary does not already store exactly that address.
- */
-export declare const withPrimaryIdentity: (config: AccessConfig | undefined, identity: AccessIdentity) => { controllers: AccessControllerConfig[] } | null;

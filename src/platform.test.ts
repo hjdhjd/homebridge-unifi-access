@@ -257,6 +257,107 @@ test("a skipped controller entry fences the reclaim off", async () => {
   assert.deepEqual(platform.accessories.map(accessory => accessory.UUID), [accessoryUuid("stranded")], "and the accessory stays in the list untouched");
 });
 
+/* The warning the platform logs for an address listed more than once, transcribed rather than referenced so a sentence that drifts by a character in its one home
+ * reddens an arm.
+ *
+ * @param address - The address as the first entry at it stores it.
+ *
+ * @returns The line as the harness renders it.
+ */
+function listedAgain(address: string): string {
+
+  return "warn: The controller " + address + " is listed more than once in the plugin configuration. Only its first entry is used. Saving that controller in the " +
+    "plugin settings removes the extra entries.";
+}
+
+// Every warning line a harness recorded, which is what the arms about a repeated address read.
+function warnings(harness: Harness): string[] {
+
+  return harness.lines.filter((line) => line.startsWith("warn: "));
+}
+
+/* One address in spellings the settings page reads as one controller, by the listed-address rule the page and the platform share. The first repeat is a spelling the
+ * first entry does not store, so a warning that named the repeated spelling rather than the first entry's would redden the arm, and the one controller constructed is
+ * the platform reading the first entry alone.
+ */
+test("entries at one address in its exact, case-varied, space-padded, dotted, and default-port spellings warn once and construct the first entry alone", () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: "UniFi.local", tokens: { access: "first" } }, { address: "UNIFI.LOCAL", tokens: { access: "case" } },
+    { address: "  unifi.local\t", tokens: { access: "space" } }, { address: "unifi.local.", tokens: { access: "dot" } },
+    { address: "UniFi.local:443", tokens: { access: "port" } }, { address: "UniFi.local", tokens: { access: "exact" } } ], options: [], platform: "UniFi Access" });
+
+  assert.deepEqual(warnings(harness), [listedAgain("UniFi.local")], "the first repeat warns once with the address as the first entry stores it");
+  assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.tokens?.access), ["first"], "and only the first entry is constructed");
+  assert.deepEqual(platform.config.controllers.map((entry) => entry.address), ["UniFi.local"], "which is the one entry the platform's list holds");
+});
+
+// An IPv6 literal names one console with or without its brackets, and a port other than the default names another console, so only the bracketed repeat warns.
+test("an IPv6 address repeated in its bracketed spelling warns once, and the same host on another port is read as its own controller", () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: "fe80::1", tokens: { access: "token" } }, { address: "[FE80::1]", tokens: { access: "token" } },
+    { address: "unifi.local", tokens: { access: "token" } }, { address: "unifi.local:8443", tokens: { access: "token" } } ], options: [], platform: "UniFi Access" });
+
+  assert.deepEqual(warnings(harness), [listedAgain("fe80::1")], "the bracketed repeat is skipped with one warning naming the first entry's address");
+  assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.address), [ "fe80::1", "unifi.local", "unifi.local:8443" ],
+    "and the entry on another port is constructed beside the bare host");
+});
+
+// However many entries repeat an address, the warning is about the address, so it is logged once for it, naming the address as the first entry stores it.
+test("an address repeated more than once beside another address warns once, and entries with no address are never one controller", () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: "10.0.0.1", tokens: { access: "token" } }, { address: "10.0.0.2", tokens: { access: "token" } },
+    { address: " 10.0.0.1 ", tokens: { access: "token" } }, { address: "10.0.0.1", tokens: { access: "token" } }, { tokens: { access: "token" } },
+    { address: "", tokens: { access: "token" } } ] as unknown as AccessPlatformConfig["controllers"], options: [], platform: "UniFi Access" });
+
+  assert.deepEqual(warnings(harness), [listedAgain("10.0.0.1")], "the repeated address warns once however many entries repeat it");
+  assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.address), [ "10.0.0.1", "10.0.0.2" ], "each address's first entry is built");
+  assert.equal(harness.lines.filter((line) => line === "info: No host or IP address has been configured.").length, 2,
+    "and an entry with no address has no form to repeat, so each such entry still reaches the address check");
+});
+
+// A string is the shape a walk with no list check reads character by character; an object and a number are controls, which read as no controllers either way.
+test("a controllers value that is not a list reads as no controllers, and an entry that is not an object is passed over", () => {
+
+  for(const [ value, label ] of [ [ { address: "10.0.0.1" }, "an object" ], [ "unifi.local", "a non-empty string" ], [ 42, "a number" ] ] as [ unknown, string ][]) {
+
+    const harness = makeHarness();
+
+    harness.make({ controllers: value as AccessPlatformConfig["controllers"], options: [], platform: "UniFi Access" });
+
+    assert.deepEqual(harness.lines, ["info: No UniFi Access controllers have been configured."], label + " says there are no controllers and nothing else");
+  }
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ null, "unifi.local", { address: "10.0.0.1", tokens: { access: "token" } } ] as unknown as
+    AccessPlatformConfig["controllers"], options: [], platform: "UniFi Access" });
+
+  assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.address), ["10.0.0.1"], "construction completes over the one object entry");
+  assert.deepEqual(platform.config.controllers.map((entry) => entry.address), ["10.0.0.1"], "which is the whole of the list the platform acts on");
+});
+
+test("a controller listed under more than one spelling leaves the reclaim fence open, because the fence counts the list the platform acts on", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [ { address: "unifi.local", tokens: { access: "token" } }, { address: "UNIFI.local.", tokens: { access: "token" } } ],
+    options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
+
+  const reporting = makeControllerDouble({ config: { address: "unifi.local" } });
+
+  harness.restore(platform, cachedAccessory("stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+
+  const inner = platformInternals(platform);
+
+  assert.equal(inner.controllers.length, 1, "the repeated spelling constructs nothing");
+
+  inner.controllers.splice(0, inner.controllers.length, reporting);
+  await inner.reclaimStranded([Promise.resolve({ controller: reporting, outcome: "reporting" })]);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("stranded")], "the one listed controller reported, so the stranded accessory is reclaimed");
+});
+
 test("an unavailable identity fences the reclaim off, and a rejecting login maps to one", async () => {
 
   const direct = makeHarness();

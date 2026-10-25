@@ -15,10 +15,10 @@
  * The child process dying with the settings modal is the primary disposal: every connection this module holds lives in this process alone, so the modal closing
  * takes it all down. The explicit disposal method exists for tests and for symmetry, not for a server call site.
  */
-import type { AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions, ConnectionEvents,
-  ConnectionState, StateStore } from "unifi-access";
-import { AccessCertificateError, AccessClient, AccessStallError, AccessTimeoutError, isHub, isReader, isSignInRefusal, isTamperCapable, selectController,
-  selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
+import type { AccessApiCode, AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions,
+  ConnectionEvents, ConnectionState, StateStore } from "unifi-access";
+import { AccessApiError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessProtocolError, AccessRequestError, AccessStallError, AccessTimeoutError,
+  isHub, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
   dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
@@ -176,11 +176,22 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
   return { controllers };
 }
 
+/* The result codes the library names as capability signals rather than faults: a controller with no official API at all, which is what an Identity Enterprise
+ * controller answers, and a device below an endpoint's firmware floor. Membership is read with `some` rather than `includes`, whose argument is typed as the list's
+ * own literals and so refuses the open code a caught error carries.
+ */
+const UNSUPPORTED_CODES = [ "CODE_DEVICE_API_NOT_SUPPORTED", "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" ] as const satisfies readonly AccessApiCode[];
+
 /**
- * Classify a connect failure into the wire contract's error vocabulary. The readings are the library's own: a refused identity or a refused privilege, in every
- * spelling {@link isSignInRefusal} reads, the one a refused bootstrap document read carries as its cause included, answers `auth-invalid`, a timeout or a stalled
- * bootstrap answers `timeout`, and a certificate that does not verify answers `misconfigured`. Everything else - the library's remaining network and throttle
- * classes among them - answers `unreachable`, the honest default: the panel's unreachable copy names connectivity, which is what an unclassified throw is to a user.
+ * Classify a connect failure into the wire contract's error vocabulary, from the library's exported classes and their own typed fields alone and never from a
+ * cause. A refused identity or a refused privilege, in every spelling {@link isSignInRefusal} reads, the one a refused bootstrap document read carries as its cause
+ * included, answers `auth-invalid`, a timeout or a stalled bootstrap answers `timeout`, and a certificate that does not verify answers `misconfigured`.
+ *
+ * A controller that answered, and answered with something the feed cannot use, is told apart from one that could not be reached. A refusal in the controller's
+ * result envelope carrying one of the codes the library names as capability signals answers `unsupported`, and any other refusal there answers `faulted`, as does
+ * an error status the library does not classify further, a response it could not make sense of, and a bootstrap document that would not decode or fold into the
+ * state model. Everything else answers `unreachable`, the default for a failure none of these readings names: the library's network and throttle classes, a
+ * bootstrap fetch that failed, and whatever the library does not type.
  *
  * The identity-composition rejection deliberately does not route through here: it is a refusal to attempt, not a thrown failure, so the view path answers it with
  * `auth-missing` directly.
@@ -205,6 +216,17 @@ export function classifyStatusError(error: unknown): StatusErrorReason {
   if(error instanceof AccessCertificateError) {
 
     return "misconfigured";
+  }
+
+  // A refusal code the sign-in reading above did not claim is either one of the capability signals or the controller declining for a reason of its own.
+  if(error instanceof AccessApiError) {
+
+    return UNSUPPORTED_CODES.some((code) => (code === error.code)) ? "unsupported" : "faulted";
+  }
+
+  if((error instanceof AccessRequestError) || (error instanceof AccessProtocolError) || ((error instanceof AccessBootstrapError) && (error.stage !== "fetch"))) {
+
+    return "faulted";
   }
 
   return "unreachable";

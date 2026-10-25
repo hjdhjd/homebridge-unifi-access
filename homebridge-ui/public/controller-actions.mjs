@@ -11,21 +11,17 @@
  *
  * The module takes no imports at all and names no browser global. Every reach beyond it is handed in: the UI-server bridge's request, the framework's deadline,
  * the probe classifier, the rejection's reading, and the identity rule the connection check runs over, and the connection check, the configuration interpreters,
- * the listed-address rule and its sentence, the page's read of its configuration, the serial read, the host's toast, the framework's coordinated write, the
- * status-context send, and the device-list decoration the save and the removal run over. A save runs through the save flow its card carries. That is what lets
- * the whole of it run under node against recording doubles and the real save flow, which puts a swapped toast severity, a put-back that restores the wrong
- * address, a seed that lands after its write, and a connection check that drops a failure's sentence or loses its bound in front of a gate rather than in front of
- * a user.
+ * the listed-address rule and its sentence, the error text rule every failure paints through, the page's read of its configuration, the serial read, the host's
+ * toast, the framework's coordinated write, the status-context send, and the device-list decoration the save and the removal run over. A save runs through the save
+ * flow its card carries. That is what lets the whole of it run under node against recording doubles and the real save flow, which puts a swapped toast severity, a
+ * put-back that restores the wrong address, a seed that lands after its write, and a connection check that drops a failure's sentence or loses its bound in front
+ * of a gate rather than in front of a user.
  */
 
 // What a save says when the controller it validated refused the API token beside the credentials. The first-run submit speaks the same sentence, so it is stated
 // once, here beside the save that speaks it.
 export const TOKEN_REFUSED_WARNING = "This controller has been saved, but it did not accept the API token. The plugin will use the local user's username and " +
   "password alone; webhooks and the doorbell trigger need an API token the controller accepts.";
-
-// The message a thrown value or a failed write's error carries, read the one way this module's failure paints read it: an error's own message, and anything else
-// as its text.
-const errorMessage = (error) => (error instanceof Error) ? error.message : String(error);
 
 /* The words of one outcome as the single message a toast carries: its sentences, then any failure detail, in the order the line shows them, with an empty part
  * dropped rather than joined. An outcome is composed once and delivered to whichever surface presents it, so the toast says exactly what the line would have said.
@@ -44,6 +40,8 @@ const toastMessage = ({ detail = "", lines = [] }) => [ ...lines, detail ].filte
  * @param injected.controllerListedWarning   - The sentence a save speaks when that rule, or the composer asking it again, refuses the save.
  * @param injected.controllerSerial          - The page's read of the serial a probe answer's controller row carries, in the spelling the runtime keys
  *                                             controller-scoped entries by.
+ * @param injected.errorMessage              - homebridge-plugin-utils' reading of the message a thrown value or a failed write's error carries: its own message
+ *                                             wherever it carries one, a plain object the UI server rejects with included, and its text otherwise.
  * @param injected.interpreters              - The page's holder for the configuration interpreters that need the served catalog.
  * @param injected.platformConfig            - The page's read of the platform configuration it last received, which the listed-address check is asked of.
  * @param injected.processDeviceList         - The page's decoration of a probe's device list into the shape the framework renders from.
@@ -54,8 +52,8 @@ const toastMessage = ({ detail = "", lines = [] }) => [ ...lines, detail ].filte
  *
  * @returns The kept answers, the controller removal, and the controller save.
  */
-export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, interpreters, platformConfig,
-  processDeviceList, requestControllerProbe, sendStatusContext, toast }) => {
+export const makeControllerActions = ({ commitConfig, controllerListedElsewhere, controllerListedWarning, controllerSerial, errorMessage, interpreters,
+  platformConfig, processDeviceList, requestControllerProbe, sendStatusContext, toast }) => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
    * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be

@@ -4,16 +4,23 @@
  */
 "use strict";
 
-import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, controllerListedElsewhere, controllers, deviceListResult, hasValidIdentity,
-  makeAccessConfig, primaryController, primaryListedElsewhere, readProbeRejection, staleSelectionVerdict, withPrimaryIdentity } from "./access-config.mjs";
+import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection,
+  staleSelectionVerdict } from "./access-config.mjs";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
 import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./controller-actions.mjs";
+import { addressListedElsewhere, addressListingForm } from "homebridge-plugin-utils/webui/address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
+import { errorMessage } from "homebridge-plugin-utils/webUi-errors.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
+
+// The configured controller list's interpreters, bound once over homebridge-plugin-utils' listed-address rule, which is the rule the plugin skips a repeated
+// controller by, so the page lists, refuses, and writes controllers by the same reading of an address the plugin starts them by.
+const { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity } =
+  makeControllerList({ addressListedElsewhere, addressListingForm });
 
 /* The bound in seconds on each individual controller probe. This is not a worst-case bound and does not pretend to be one: a probe performs a full authentication and
  * then fetches the controller's information and topology documents, so a genuinely worst-case first connection runs past it. PROBE_DEADLINE admits the healthy
@@ -61,8 +68,8 @@ const accessConfig = async () => {
 
   const { categories, options } = await ui.featureOptions.catalog();
 
-  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), enumerateConfiguredEntries,
-    enumerateScopeEntries, formatValueList, scopeSafeId });
+  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), controllers, controllersWithSave,
+    enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, scopeSafeId });
 };
 
 /* Execute our first run screen until the primary controller carries both of the things the plugin needs of it. The two are asked separately because the plugin's own
@@ -182,8 +189,7 @@ const firstRunOnSubmit = async ({ commit, config }) => {
 
     // The config write can reject. Painting into the result line keeps the user on the form with concrete guidance and the specific failure, and this catch resolves
     // first, so the framework's generic toast never fires for this plugin.
-    firstRunCard.verdict.render({ detail: (err instanceof Error) ? err.message : String(err), lines: ["Unable to complete the plugin configuration."],
-      tone: "text-danger" });
+    firstRunCard.verdict.render({ detail: errorMessage(err), lines: ["Unable to complete the plugin configuration."], tone: "text-danger" });
 
     return false;
   }
@@ -359,9 +365,9 @@ const commitConfig = (compose, options) => ui.featureOptions.commitConfig(compos
  * reach outside themselves is handed in from here, because each of those reaches is the page's to own: the host's toast, the framework's coordinated write and the
  * catalog-backed interpreters behind it, the configuration the page last received, the device-list decoration a save's seed runs over the answer it keeps, the
  * connection check and the status-context send, which travel over the UI-server bridge, and the row shape the UI server writes a controller into, which the serial
- * read interprets. The listed-address rule and its sentence come straight from the interpretation module rather than through the interpreters, because neither
- * needs the catalog and a save's refusal must not wait on a catalog read. What the actions keep about each controller stays theirs, and the page reads it back
- * through the handle alone.
+ * read interprets. The listed-address check comes from the controller list bound above and its sentence from the interpretation module, rather than through the
+ * interpreters, because neither needs the catalog and a save's refusal must not wait on a catalog read. The error text rule is homebridge-plugin-utils', handed in
+ * beside them because the module takes no imports. What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 
@@ -369,6 +375,7 @@ const { answers, removeController, saveController } = makeControllerActions({
   controllerListedElsewhere,
   controllerListedWarning: CONTROLLER_LISTED_WARNING,
   controllerSerial,
+  errorMessage,
   interpreters: accessConfig,
   platformConfig: () => injectedConfig,
   processDeviceList,
@@ -1008,9 +1015,13 @@ const featureOptionsParams = {
         "below." },
       "auth-missing": { label: "Sign-in required", message: "Live status needs a way to sign in to this controller. Add a local user's username and password, or " +
         "an API token, in the card below." },
+      "faulted": { label: "Controller error", message: "The controller answered with an error, or with a response that could not be understood. Check that " +
+        "the controller and the Access application are running normally, and that the plugin is up to date." },
       "misconfigured": { label: "Certificate rejected", message: "This controller presented a TLS certificate that could not be verified. Turn off " +
         "certificate verification for this controller in the card below, or install a trusted certificate on the console and on the Access developer API." },
-      "not-found": { message: "This device was not listed by a configured controller in this session. Refresh the controller list to relist it." }
+      "not-found": { message: "This device was not listed by a configured controller in this session. Refresh the controller list to relist it." },
+      "unsupported": { label: "No developer API", message: "This controller has no developer API for an API token to reach. Add a local user's username and " +
+        "password in the card below." }
     },
     identity: (device) => [
 
@@ -1299,8 +1310,9 @@ const wiringSignal = wiringController.signal;
  *
  * A migration that composes a patch persists it itself, without waiting for the user to press Save. Most people never open this panel to save anything, so a
  * migration that waited for one would leave a fleet split between two configuration shapes indefinitely, and the plumbing that reconciles them could never retire.
- * The write is gated on there being a patch, which is what bounds the cost: only a pass that actually found legacy settings writes at all, so a converged
- * configuration's every later open finds nothing to do and reaches neither the controllers nor the disk.
+ * The session's commit answers a null patch as unchanged without writing anything, and the save is gated on the commit having written, which is what bounds the
+ * cost: only a pass that actually found legacy settings writes at all, so a converged configuration's every later open finds nothing to do and reaches neither the
+ * controllers nor the disk.
  *
  * Reopening the panel is convergent. Each open imports a fresh copy of this module whose wiring runs independently, and a copy reading an already-migrated
  * configuration composes nothing and writes nothing. Two genuinely simultaneous wirings are where the honest bound sits: they read the same configuration but may
@@ -1356,16 +1368,20 @@ const wireAccessConfig = async () => {
   const patch = migrate(session.platform, macByAddress);
 
   // The signal is read immediately before the write, so an envelope that expired while the probes were still running cannot stage a patch after the fact.
-  if(patch && !wiringSignal.aborted) {
+  if(wiringSignal.aborted) {
 
-    await session.commit(patch);
+    return;
+  }
 
-    // The signal is read a second time, because the commit itself was an await and the envelope may have expired across it. A save the deadline overtakes is skipped
-    // rather than forced, which leaves the migration staged for the user's own save - the weaker outcome, and the honest one.
-    if(!wiringSignal.aborted) {
+  const result = await session.commit(patch);
 
-      await session.persist();
-    }
+  /* The save follows only a commit that wrote, which a null patch never does. The signal is read a second time, because the commit itself was an await and the
+   * envelope may have expired across it. A save the deadline overtakes is skipped rather than forced, which leaves the migration staged for the user's own save -
+   * the weaker outcome, and the honest one.
+   */
+  if((result.kind === "written") && !wiringSignal.aborted) {
+
+    await session.persist();
   }
 };
 

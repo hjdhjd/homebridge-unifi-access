@@ -13,8 +13,9 @@
  * Two settings substrates meet here. A feature option is where a setting lives, and a set of per-controller configuration properties are a second home the plugin
  * honors so that a configuration nobody has opened the webUI on keeps working. The migration reconciles the two, moving each property's value into the option that
  * supersedes it and rebuilding the item without it, and the same pass folds the retired 1.x per-member booleans into the lists that supersede them and carries the
- * entries keyed by a controller's address onto its MAC address. The module takes no imports at all - the engine class, the served catalog, and every framework
- * helper the interpreters use are handed in - so the whole of it is exercisable under Node against the real engine and the real catalog, with no network and no DOM.
+ * entries keyed by a controller's address onto its MAC address. The module takes no imports at all - the engine class, the served catalog, homebridge-plugin-utils'
+ * listed-address rule, and every framework helper the interpreters use are handed in - so the whole of it is exercisable under Node against the real engine, the
+ * real catalog, and the real rule, with no network and no DOM.
  */
 
 /* The keys a controllers[] item converges to: everything the plugin's own controller options type declares, less the properties that migrate into feature
@@ -63,12 +64,6 @@ const RETIRED_FAMILIES = [
 // a field in the editor mean the same thing as never having filled it in. The tokens object and the TLS preference are written by arms of their own below, since
 // neither is a string this presence test could read.
 const IDENTITY_KEYS = [ "address", "password", "username" ];
-
-// The configured controllers, normalized so callers never branch on undefined. On a fresh configuration the controllers array is absent; this yields an empty array.
-export const controllers = (config) => (Array.isArray(config?.controllers) ? config.controllers : []);
-
-// The primary controller entry (the first), or undefined on a fresh configuration.
-export const primaryController = (config) => controllers(config)[0];
 
 /* Whether a controller item describes an identity the plugin can connect with, which is the browser-side statement of the plugin's own composeConnectIdentity rule
  * and is checked against it by this module's test suite.
@@ -265,153 +260,195 @@ const withIdentityApplied = (base, identity) => {
 // save, and the page hands it to every surface that speaks the refusal.
 export const CONTROLLER_LISTED_WARNING = "This controller is already listed.";
 
-/* The form an address is compared in when a save asks whether another configured controller already holds it: surrounding space removed and letters lowercased.
- * Only a string that is non-empty once trimmed has a form. An address that is absent, empty, or not a string - a hand edit can leave any of those - has none
- * and never matches, so an empty field is left to the connection test's own sentence rather than read as a listed address.
- *
- * Every lookup on the page stays exact, because a lookup asks which stored entry a key names and the stored string is that key. The refusal asks a different
- * question - whether a new entry would name a controller already listed - and the runtime builds one controller per configured entry with no check of its own,
- * so a listed host name typed again in another case, or a listed address typed with a stray space, would reach the same machine twice. Host names are
- * case-insensitive, and so are IPv6 literals, which is what makes the fold sound. The form folds nothing else: a bracketed and a bare IPv6 literal, a compressed
- * and an expanded one, a trailing dot, and an added port each stay distinct, because naming one controller in such different spellings is out of this rule's
- * reach.
- */
-const listingForm = (address) => {
-
-  if(typeof address !== "string") {
-
-    return null;
-  }
-
-  const trimmed = address.trim();
-
-  return trimmed.length ? trimmed.toLowerCase() : null;
-};
-
-/* Whether the address a save writes onto the item at `index` is held by any other configured item, where an index of -1 names no target and the save appends.
- * This is the one rule the save's composer, the first-run composer, and the page's early checks all ask, so none of them can disagree about what counts as the
- * same controller.
- *
- * A save that writes exactly the address its target already stores moves nothing and is never refused, whatever the other items hold, which keeps a
- * configuration that already carries more than one item at an address editable. "Exactly" is exact string equality rather than the folded form: an edit that changes
- * only the letter case of its own address still moves it, and is refused where another item already holds the spelling it moves to.
- */
-const listedElsewhere = (items, index, address) => {
-
-  if((index !== -1) && (items[index]?.address === address)) {
-
-    return false;
-  }
-
-  const form = listingForm(address);
-
-  return (form !== null) && items.some((item, position) => (position !== index) && (listingForm(item?.address) === form));
-};
-
 // The index of the item a save writes onto: the one whose address is exactly the address the save started from, or -1 for an add and for an original address no
 // item holds. The composer and the early check find their target here alike, so they ask the rule about the same item.
 const saveTarget = (items, originalAddress) => (originalAddress === undefined) ? -1 : items.findIndex((item) => item?.address === originalAddress);
 
-/* Compose the controllers array that writes one controller's identity, either onto the item it already has or as a new item at the end.
+/* Build the interpreters of the configured controller list over homebridge-plugin-utils' listed-address rule: its listing form, the form addresses are compared
+ * in, and its check of whether a saved address is already listed at another position. Every interpreter here reads the list one entry per listed address, so each
+ * one needs the rule, and handing the rule in is what keeps this module import-free while the page, its suites, and the plugin all read a controller's address
+ * through the one rule. What counts as one address is the rule's to state; what this module states is which entry at an address is kept, and what a save may
+ * write. None of these needs the served catalog, so a save's refusal never waits on a catalog read.
  *
- * The item the write lands on is found by the address the caller started from, not by the address being written, so an edit that changes a controller's address
- * replaces that controller rather than adding a second one beside it. An `originalAddress` that names no configured item - and the absent one an add passes -
- * appends instead, which is the whole of what distinguishes adding a controller from editing one.
+ * Every lookup on the page stays exact, because a lookup asks which stored entry a key names and the stored string is that key. The refusal asks a different
+ * question - whether a new entry would name a controller already listed - and the plugin uses only the first entry at an address, skipping every later one at
+ * startup, so a listed address typed again in another spelling would write an entry the plugin never uses. An address the rule gives no form - absent, empty, or
+ * not a string, any of which a hand edit can leave - never matches, so an empty field is left to the connection test's own sentence rather than read as a listed
+ * address.
  *
- * A save whose written address another item already holds is refused rather than composed, answering null, on the append and the replace alike. The
- * composer runs against the configuration as it stands at the write, so this is the refusal that decides, including for a save queued behind another that
- * changed the configuration after the page last read it.
+ * @param injected.addressListedElsewhere - homebridge-plugin-utils' check of whether an address being saved is already listed at another position.
+ * @param injected.addressListingForm     - homebridge-plugin-utils' listing form of an address, or null for a value that has none.
+ *
+ * @returns The interpreters of the configured controller list, each under the name the page calls it by.
  */
-const controllersWithSave = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
+export const makeControllerList = ({ addressListedElsewhere, addressListingForm }) => {
 
-  const identity = { address, password, tokens, username, verifyTls };
-  const items = controllers(config);
-  const index = saveTarget(items, originalAddress);
+  /* The configured controllers, one entry per listed address: the stored entries in their stored order, with every entry after the first at one listing form left
+   * out, and an empty list when the configuration holds no list at all, so a caller never branches on what a hand edit left there. An entry that is not an object
+   * is left out too, because every reader reads an entry's members, and an entry whose address has no form is never a repeat and is always kept.
+   *
+   * The first entry at an address is kept because it is the one the plugin uses: startup skips every later entry at that address. The page therefore reads,
+   * edits, lists, and removes that same entry, and every write composed over this list persists the list as read, which is how a repeated entry leaves the
+   * configuration file. The entries are the stored objects themselves rather than copies, so a writer carries each entry it does not name across untouched.
+   */
+  const controllers = (config) => {
 
-  if(listedElsewhere(items, index, address)) {
+    if(!Array.isArray(config?.controllers)) {
 
-    return null;
-  }
+      return [];
+    }
 
-  if(index === -1) {
+    const listed = new Set();
 
-    return [ ...items, withIdentityApplied({}, identity) ];
-  }
+    return config.controllers.filter((item) => {
 
-  const next = [...items];
+      if((typeof item !== "object") || (item === null)) {
 
-  next[index] = withIdentityApplied(items[index], identity);
+        return false;
+      }
 
-  return next;
-};
+      const form = addressListingForm(item.address);
 
-/* Whether a controller save would be refused because another configured controller already holds the address it writes, asked of the configuration the page
- * last received so a save can answer before its connection test. The composer asks the same rule again inside the write, against the configuration as it then
- * stands, and its answer is the one that decides. A stale configuration can make the answers differ - this one can refuse a save the composer would accept,
- * which the user retries, or pass one the composer then refuses - but it can never let a duplicate through.
- *
- * @param config - The platform configuration entry.
- * @param save   - The address the save writes, and the address of the item it started from, absent for an add.
- *
- * @returns True when another configured controller already holds the written address.
- */
-export const controllerListedElsewhere = (config, { address, originalAddress }) => {
+      if(form === null) {
 
-  const items = controllers(config);
+        return true;
+      }
 
-  return listedElsewhere(items, saveTarget(items, originalAddress), address);
-};
+      if(listed.has(form)) {
 
-/* Whether the first-run save would be refused because a controller after the primary already holds the address it writes. The first-run save always writes onto
- * the primary, so the primary is the rule's target, and a primary that already stores exactly this address moves nothing, which keeps first run passable for a
- * configuration whose primary and a later controller already share an address.
- *
- * @param config   - The platform configuration entry.
- * @param identity - The identity the first-run form would write, of which only the address is read.
- *
- * @returns True when another configured controller already holds the written address.
- */
-export const primaryListedElsewhere = (config, { address }) => listedElsewhere(controllers(config), 0, address);
+        return false;
+      }
 
-/* Produce the patch that writes an identity onto the primary controller, preserving any additional controllers and the primary's other fields. This is the first-run
- * save, and it composes nothing at all for an identity the plugin could not connect with: a configuration written from an incomplete form would leave the user with
- * a controller entry the platform's own gate skips and no first run to walk them back through it.
- *
- * On a true first run controllers[0] is undefined; the successor is composed from the identity alone, so no separate initialization is needed.
- *
- * @param config   - The platform configuration entry.
- * @param identity - The identity to write onto the primary controller.
- *
- * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary
- *          holds the address the identity writes and the primary does not already store exactly that address, by the rule a controller save is refused under.
- */
-export const withPrimaryIdentity = (config, identity) => {
+      listed.add(form);
 
-  if(!identity?.address?.length || !hasValidIdentity(identity)) {
+      return true;
+    });
+  };
 
-    return null;
-  }
+  // The primary controller entry (the first), or undefined on a fresh configuration.
+  const primaryController = (config) => controllers(config)[0];
 
-  const next = [...controllers(config)];
+  /* Whether the address a save writes onto the item at `index` is held by any other configured item, where an index of -1 names no target and the save appends.
+   * This is the one question the save's composer, the first-run composer, and the page's early checks all ask of the rule, so none of them can disagree about
+   * what counts as the same controller.
+   *
+   * The items are the configured controllers as the page reads them, one entry per listed address, so no position but the target's own holds the target's form,
+   * and a save that writes its target's own address in any spelling is never refused.
+   */
+  const heldElsewhere = (items, index, address) => addressListedElsewhere({ address, addresses: items.map((item) => item.address), index });
 
-  if(listedElsewhere(next, 0, identity.address)) {
+  /* Compose the controllers array that writes one controller's identity, either onto the item it already has or as a new item at the end.
+   *
+   * The item the write lands on is found by the address the caller started from, not by the address being written, so an edit that changes a controller's
+   * address replaces that controller rather than adding a second one beside it. An `originalAddress` that names no configured item - and the absent one an add
+   * passes - appends instead, which is the whole of what distinguishes adding a controller from editing one.
+   *
+   * A save whose written address another item already holds is refused rather than composed, answering null, on the append and the replace alike. The composer
+   * runs against the configuration as it stands at the write, so this is the refusal that decides, including for a save queued behind another that changed the
+   * configuration after the page last read it.
+   *
+   * @param config - The platform configuration entry.
+   * @param save   - The identity to write, and the address of the item it started from, absent for an add.
+   *
+   * @returns The controllers array to write, one entry per listed address, or null when the address is already listed and nothing is to be written.
+   */
+  const controllersWithSave = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
 
-    return null;
-  }
+    const identity = { address, password, tokens, username, verifyTls };
+    const items = controllers(config);
+    const index = saveTarget(items, originalAddress);
 
-  next[0] = withIdentityApplied(next[0] ?? {}, identity);
+    if(heldElsewhere(items, index, address)) {
 
-  return { controllers: next };
+      return null;
+    }
+
+    if(index === -1) {
+
+      return [ ...items, withIdentityApplied({}, identity) ];
+    }
+
+    const next = [...items];
+
+    next[index] = withIdentityApplied(items[index], identity);
+
+    return next;
+  };
+
+  /* Whether a controller save would be refused because another configured controller already holds the address it writes, asked of the configuration the page
+   * last received so a save can answer before its connection test. The composer asks the same rule again inside the write, against the configuration as it then
+   * stands, and its answer is the one that decides. A stale configuration can make the answers differ - this one can refuse a save the composer would accept,
+   * which the user retries, or pass one the composer then refuses - but it can never let a duplicate through.
+   *
+   * @param config - The platform configuration entry.
+   * @param save   - The address the save writes, and the address of the item it started from, absent for an add.
+   *
+   * @returns True when another configured controller already holds the written address.
+   */
+  const controllerListedElsewhere = (config, { address, originalAddress }) => {
+
+    const items = controllers(config);
+
+    return heldElsewhere(items, saveTarget(items, originalAddress), address);
+  };
+
+  /* Whether the first-run save would be refused because a controller after the primary already holds the address it writes. The first-run save always writes
+   * onto the primary, so the primary is the rule's target, and a first run that writes the primary's own address in any spelling is never refused, because the
+   * page reads one entry per listed address and no later entry it reads holds the primary's form.
+   *
+   * @param config   - The platform configuration entry.
+   * @param identity - The identity the first-run form would write, of which only the address is read.
+   *
+   * @returns True when another configured controller already holds the written address.
+   */
+  const primaryListedElsewhere = (config, { address }) => heldElsewhere(controllers(config), 0, address);
+
+  /* Produce the patch that writes an identity onto the primary controller, preserving the additional controllers the configured list holds, one entry per listed
+   * address, and the primary's other fields. This is the first-run save, and it composes nothing at all for an identity the plugin could not connect with: a
+   * configuration written from an incomplete form would leave the user with a controller entry the platform's own gate skips and no first run to walk them back
+   * through it.
+   *
+   * On a true first run controllers[0] is undefined; the successor is composed from the identity alone, so no separate initialization is needed.
+   *
+   * @param config   - The platform configuration entry.
+   * @param identity - The identity to write onto the primary controller.
+   *
+   * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary
+   *          holds the address the identity writes, by the rule a controller save is refused under.
+   */
+  const withPrimaryIdentity = (config, identity) => {
+
+    if(!identity?.address?.length || !hasValidIdentity(identity)) {
+
+      return null;
+    }
+
+    const next = [...controllers(config)];
+
+    if(heldElsewhere(next, 0, identity.address)) {
+
+      return null;
+    }
+
+    next[0] = withIdentityApplied(next[0] ?? {}, identity);
+
+    return { controllers: next };
+  };
+
+  return { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity };
 };
 
 /* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, and the predicate
  * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the catalog builder, the entry enumerators, the list
  * formatter, and the identifier repair is what keeps this module import-free and exercisable under Node against the real engine and the real catalog, rather than
- * against a stand-in that could drift from either.
+ * against a stand-in that could drift from either. The configured controller list's reader and its save composer are handed in as makeControllerList built them,
+ * so every interpreter here reads and writes the entry at each address the page shows and the plugin uses.
  *
  * @param injected.FeatureOptions              - The feature-option engine class.
  * @param injected.buildCatalogIndex           - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
  * @param injected.catalog                     - The catalog index built from the served categories and options, which carries both alongside its derived indices.
+ * @param injected.controllers                 - The configured controllers, one entry per listed address, as makeControllerList reads them.
+ * @param injected.controllersWithSave         - The controllers array a save writes, or null for an address already listed, as makeControllerList composes it.
  * @param injected.enumerateConfiguredEntries  - The framework's own enumerator over the configured entries addressing one option.
  * @param injected.enumerateScopeEntries       - The framework's own enumerator over the configured entries reading at one scope identifier.
  * @param injected.formatValueList             - The framework's composition of a list option's stored form from its selected members.
@@ -419,8 +456,8 @@ export const withPrimaryIdentity = (config, identity) => {
  *
  * @returns The interpreters: the migration, the awaiting-migration predicate, the controller save, and the controller removal.
  */
-export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
-  scopeSafeId }) => {
+export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, enumerateConfiguredEntries, enumerateScopeEntries,
+  formatValueList, scopeSafeId }) => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: every engine transform this
   // module drives - the option set, the scope clear, the scope move - composes a fresh array and reassigns its own field, and where this module assigns the
@@ -659,6 +696,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
         return false;
       };
 
+      // The controllers as the page reads them, one entry per listed address, so a repeated address is probed for the entry the plugin uses and for no other.
       return controllers(config)
         .filter((item) => item?.username?.length && item?.password?.length &&
           (properties.some((property) => item?.[property] !== undefined) || hasAddressEntry(item)))
@@ -711,7 +749,11 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
       let composed = composeRetiredFamilies(engine, Array.isArray(config.options) ? config.options : []);
       let rewritten = false;
 
-      for(const item of config.controllers ?? []) {
+      /* The items are the controllers as the page reads them, one entry per listed address, so at a repeated address a pass reads, composes, and carries forward the
+       * entry the plugin uses and no other, and a rewrite writes the list without the later entries. A pass with nothing to migrate writes nothing, so a repeated
+       * entry alone never causes a write.
+       */
+      for(const item of controllers(config)) {
 
         const mac = macByAddress?.get(item?.address);
         const successor = {};
@@ -773,8 +815,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, e
       return Object.keys(patch).length ? patch : null;
     },
 
-    /* Produce the patch that removes one controller, with the settings sweep the user chose. Every item stored at exactly the removed address leaves with it,
-     * since each of them reaches the same controller.
+    /* Produce the patch that removes one controller, with the settings sweep the user chose. The removal composes over the controllers as the page reads them, one
+     * entry per listed address, so the entry stored at exactly the removed address leaves, and every later entry repeating its address in any spelling leaves with
+     * it, since the list it writes never carried them.
      *
      * The two halves are deliberately separable. Dropping the item is what removal means and always happens; stripping the entries is the user's own follow-on
      * choice, because the settings they configured for those devices are worth keeping when a controller is being re-added under a new address, and worth

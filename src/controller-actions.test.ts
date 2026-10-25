@@ -98,6 +98,24 @@ const CHECK_FAILURE_TOAST = "Unable to connect to the UniFi Access controller. P
 // What the interpreter holder throws when an arm asks it to.
 const INTERPRETERS_FAILURE = "the served catalog could not be read";
 
+/* What the interpreter holder rejects with when an arm asks it to stand for the UI server refusing the catalog read: the plain object the bridge rejects with, which
+ * carries a message and is no error, and which the catalog read rethrows unchanged.
+ */
+const CATALOG_REFUSAL = "The plugin's UI server could not read the option catalog.";
+const CATALOG_REJECTION: unknown = { message: CATALOG_REFUSAL };
+
+/* homebridge-plugin-utils' errorMessage, which the page hands the actions, restated as the stand's double because Node has no package route to the browser module
+ * that ships it: a thrown value's own message wherever it carries one, and its text otherwise.
+ *
+ * @param err - What was thrown, or what a failed write carried as its error.
+ *
+ * @returns The message a failure paints.
+ */
+function errorText(err: unknown): string {
+
+  return String((err as { message?: unknown } | null | undefined)?.message ?? err);
+}
+
 // What the device-list decoration throws when an arm asks it to.
 const PROCESSING_FAILURE = "the device list could not be processed";
 
@@ -158,6 +176,7 @@ type WriteStep = "committed" | "failed" | "failedBeforeCompose" | "failedWithStr
 // What an arm stands the module up over. Every member has a default, so an arm names only what it is about.
 interface StandOptions {
 
+  catalogRejected?: boolean;
   composerRefuses?: boolean;
   composerThrows?: Error;
   duringCheck?: CardEvent;
@@ -182,6 +201,8 @@ interface Stand {
   catalogReads: () => number;
   composed: unknown[];
   control: { disabled: boolean };
+  // Every value the actions read a failure's message from, in the order they read it, through the error text rule the page hands them.
+  errorReads: unknown[];
   interpreterCalls: InterpreterCall[];
   listedChecks: ListedCheck[];
   probeCalls: ProbeRequest[];
@@ -257,6 +278,8 @@ function failedAnswer(): AccessProbeVerdict {
  * the rename it was handed, calls the composer against the platform the write composes over, records what the kept answers held once the composer had run, and
  * answers what the arm's script names.
  *
+ * @param options.catalogRejected         - Whether the interpreter holder rejects with the plain object the bridge rejects with, which is how the UI server's
+ *                                          refusal of the catalog read reaches a save.
  * @param options.composerRefuses         - Whether the save interpreter answers null, which is how it refuses an address another controller holds.
  * @param options.composerThrows          - What the save interpreter throws rather than composing, which rejects the press.
  * @param options.duringCheck             - What befalls the card while the connection check is in flight, ahead of anything the check answers.
@@ -274,11 +297,13 @@ function failedAnswer(): AccessProbeVerdict {
  *
  * @returns The actions and every recorder beneath them.
  */
-function stand({ composerRefuses = false, composerThrows, duringCheck, duringListedCheck, duringWrite, hold = Promise.resolve(), interpretersThrow = false,
-  listed = false, malformedStarter = false, onWrite, probe, processingThrows = false, retireDuringCatalogRead = false, writes = [] }: StandOptions = {}): Stand {
+function stand({ catalogRejected = false, composerRefuses = false, composerThrows, duringCheck, duringListedCheck, duringWrite, hold = Promise.resolve(),
+  interpretersThrow = false, listed = false, malformedStarter = false, onWrite, probe, processingThrows = false, retireDuringCatalogRead = false,
+  writes = [] }: StandOptions = {}): Stand {
 
   const composed: unknown[] = [];
   const control = { disabled: false };
+  const errorReads: unknown[] = [];
   const interpreterCalls: InterpreterCall[] = [];
   const listedChecks: ListedCheck[] = [];
   const probeCalls: ProbeRequest[] = [];
@@ -485,6 +510,12 @@ function stand({ composerRefuses = false, composerThrows, duringCheck, duringLis
 
       return answer.devices[0]?.["serialNumber"];
     },
+    errorMessage: (err) => {
+
+      errorReads.push(err);
+
+      return errorText(err);
+    },
     interpreters: async () => {
 
       // Every read of the catalog is counted, so an arm can show that a check which answered early never reached the read.
@@ -493,6 +524,11 @@ function stand({ composerRefuses = false, composerThrows, duringCheck, duringLis
       if(interpretersThrow) {
 
         throw new Error(INTERPRETERS_FAILURE);
+      }
+
+      if(catalogRejected) {
+
+        throw CATALOG_REJECTION;
       }
 
       // A newer act on the card retiring the press while its catalog read is in flight, which the flow reads once the check answers.
@@ -567,8 +603,8 @@ function stand({ composerRefuses = false, composerThrows, duringCheck, duringLis
     toast
   });
 
-  return { actions, card, catalogReads: (): number => catalogReads, composed, control, interpreterCalls, listedChecks, probeCalls, renames, renders, retire,
-    seenDuringWrite, sends: (): number => sends, serialReads, starts: (): number => starts, toasts };
+  return { actions, card, catalogReads: (): number => catalogReads, composed, control, errorReads, interpreterCalls, listedChecks, probeCalls, renames, renders,
+    retire, seenDuringWrite, sends: (): number => sends, serialReads, starts: (): number => starts, toasts };
 }
 
 /* Put an answer into the kept answers the only way a reader can, which exercises the keep rule on the way in.
@@ -1177,6 +1213,16 @@ test("s33: a device-list processing that throws in the composer's seed rejects t
   assert.equal(stood.actions.answers.generation(), before, "and the generation did not move, because the processing runs before the seed changes anything");
   assertSpoke({ renames: [{ from: ORIGINAL_ADDRESS, to: ADDRESS }], renders: [{ detail: PROCESSING_FAILURE, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }],
     sends: 0, stood });
+});
+
+test("s34: a catalog read the UI server refuses with a plain object paints that object's own message, read through the error text rule the page hands in", async () => {
+
+  const stood = stand({ catalogRejected: true, probe: passed("connected") });
+
+  assert.equal(await stood.actions.saveController({ card: stood.card, originalAddress: undefined }), null, "the save answers null");
+  assert.deepEqual(stood.composed, [], "nothing was composed or written");
+  assert.deepEqual(stood.errorReads, [CATALOG_REJECTION], "the failure's message is read once, through the rule the page handed in, from what the read rejected with");
+  assertSpoke({ renders: [{ detail: CATALOG_REFUSAL, lines: [SAVE_FAILURE_LINE], tone: "text-danger" }], sends: 0, stood });
 });
 
 test("r1: a committed removal drops the answer, sends once, and says nothing at all", async () => {
