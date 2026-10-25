@@ -5,14 +5,13 @@
 /* eslint-disable camelcase */
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, createStateStore,
   selectAccessPoints } from "unifi-access";
-import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
+import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
-import { Characteristic, Service } from "@homebridge/hap-nodejs";
 import { EventEmitter, on } from "node:events";
 import { HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
-import { ROOT_ID, buildingTopology, hubRecord, makePlatformDouble } from "../testing.helpers.ts";
+import { ROOT_ID, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
@@ -79,53 +78,18 @@ function enterpriseDevices(): Record<string, unknown>[] {
   ];
 }
 
-// A cached accessory as Homebridge restores it, carrying whatever context the version that created it wrote: the controller key alone by default, the MAC address
-// where an arm needs the hardware it names, and the device identity where the arm is about an accessory this version created.
-function accessory(uuid: string, context: AccessAccessoryContext = { controller: CONTROLLER_MAC }): AccessAccessory {
-
-  return { UUID: uuid, context, displayName: "Accessory " + uuid } as unknown as AccessAccessory;
-}
-
-/* The accessory constructor Homebridge supplies: the members the controller writes and reads on a freshly created one, and the service surface a device configures
- * itself through. The services are the genuine HAP classes and the lookups are backed by a plain list, so an accessory the adoption path hands to a device is dressed
- * here exactly as it is in the field - which is what lets an arm follow an adoption all the way to a constructed device rather than stopping at the registration.
+/* A cached accessory as Homebridge restores it: a real accessory under the UUID its seed derives, the way production derives one from a device identity, carrying
+ * whatever context the version that created it wrote: the controller key alone by default, the MAC address where an arm needs the hardware it names, and the
+ * device identity where the arm is about an accessory this version created. It reaches the controller's list through the harness's restore, as a cached accessory
+ * reaches the platform's through Homebridge's own restore loop.
  */
-class TestAccessory {
+function accessory(seed: string, context: AccessAccessoryContext = { controller: CONTROLLER_MAC }, displayName = "Accessory " + seed): AccessAccessory {
 
-  public UUID: string;
-  public context: Record<string, unknown>;
-  public displayName: string;
-  public services: Service[];
+  const cached = makeTestAccessory(displayName, seed);
 
-  constructor(displayName: string, uuid: string) {
+  cached.context = context;
 
-    this.UUID = uuid;
-    this.context = {};
-    this.displayName = displayName;
-    this.services = [];
-  }
-
-  public addService(service: Service): Service {
-
-    this.services.push(service);
-
-    return service;
-  }
-
-  public getService(target: { UUID: string }): Service | undefined {
-
-    return this.services.find(service => (service.UUID === target.UUID) && !service.subtype);
-  }
-
-  public getServiceById(target: { UUID: string }, subtype: string): Service | undefined {
-
-    return this.services.find(service => (service.UUID === target.UUID) && (service.subtype === subtype));
-  }
-
-  public removeService(service: Service): void {
-
-    this.services.splice(this.services.indexOf(service), 1);
-  }
+  return cached;
 }
 
 /* One device handle the client answers for a record's identity, in the shape the adoption path consumes: the projection every device reads its own record through,
@@ -186,9 +150,13 @@ interface ControllerHarness {
   clock: TestClock;
   controller: AccessController;
   logged: string[];
-  registered: string[];
+  // The UUIDs each registration Homebridge accepted named, in the order it accepted them.
+  readonly registered: string[];
+  // Hand cached accessories to the accessory list through Homebridge's own restore loop, which bridges each, so a later exit or save reaches one Homebridge holds.
+  restore: (...cached: AccessAccessory[]) => void;
   shutdown: AbortController;
-  unregistered: string[];
+  // The UUIDs each unregister Homebridge accepted named, in the order it accepted them.
+  readonly unregistered: string[];
 }
 
 /* Stand up a real AccessController over a platform double and a stubbed client, so an arm reads what the controller actually did to HomeKit rather than what a
@@ -201,39 +169,20 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
   handles?: Map<string, unknown>; options?: string[]; store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
 
   const accessories: AccessAccessory[] = [];
+  // The Homebridge API double the platform hands the controller: the accessory class an adoption builds from, and the calls Homebridge accepted, read below.
+  const api = makeTestApi();
   const clock = new TestClock();
   // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
   const logged: string[] = [];
-  const registered: string[] = [];
-  const unregistered: string[] = [];
   // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from.
   const shutdown = new AbortController();
 
-  const api = {
-
-    hap: { Characteristic, Service, uuid: { generate: (input: string): string => "uuid-" + input } },
-    on: (): void => undefined,
-    platformAccessory: TestAccessory,
-    registerPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
-
-      for(const target of targets) {
-
-        registered.push(target.UUID);
-      }
-    },
-    unregisterPlatformAccessories: (_name: string, _platformName: string, targets: AccessAccessory[]): void => {
-
-      for(const target of targets) {
-
-        unregistered.push(target.UUID);
-      }
-    },
-    updatePlatformAccessories: (): void => undefined
-  };
+  // The UUIDs the accepted calls of one kind named, in the order Homebridge accepted them.
+  const targets = (kind: "register" | "unregister"): string[] => api.calls.flatMap((call) => (call.kind === kind) ? call.accessories.map((target) => target.UUID) : []);
 
   /* The clock every deadline this controller owns is armed on is the one this arm holds, rather than the fresh one the double would otherwise default to, because a
    * controller reading a clock no arm holds is a controller whose timers an advance would never reach. The accessory entry and exit the double defaults to reach
-   * this arm's own api recorders and this arm's own list, which is what lets an adoption and a retirement be read here.
+   * this arm's own API double and this arm's own list, which is what lets an adoption and a retirement be read here.
    */
   const platform = makePlatformDouble({ accessories, api, clock, entries: options.options ?? [],
     log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
@@ -251,7 +200,27 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
 
   controller.client = client;
 
-  return { accessories, clock, controller, logged, registered, shutdown, unregistered };
+  return {
+
+    accessories,
+    clock,
+    controller,
+    logged,
+    get registered(): string[] {
+
+      return targets("register");
+    },
+    restore: (...cached: AccessAccessory[]): void => {
+
+      api.restorePlatformAccessories({ accessories: cached, platform: { configureAccessory: (restored): void => void accessories.push(restored) },
+        platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+    },
+    shutdown,
+    get unregistered(): string[] {
+
+      return targets("unregister");
+    }
+  };
 }
 
 /* The connection monitor a controller observes, with the transitions an arm hands it. The generator ends on the caller's own abort, which is the lifetime the real
@@ -412,9 +381,9 @@ test("a departure with the delay on removes the accessory only once its whole de
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
   // An accessory naming hardware the topology does not carry, so membership can never account for it and the delay is the only thing standing between it and removal.
-  const departed = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+  const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  harness.accessories.push(departed);
+  harness.restore(departed);
   harness.controller.removeHomeKitDevice(departed);
 
   assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 1, "a departure states the delay it is serving, once");
@@ -426,7 +395,7 @@ test("a departure with the delay on removes the accessory only once its whole de
 
   harness.clock.advance(1);
 
-  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE99"]);
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE99")]);
   assert.equal(harness.clock.nextDeadline, null, "a fired removal leaves nothing behind on the timeline");
 });
 
@@ -437,9 +406,9 @@ test("a device that returns during its delay keeps its accessory and leaves noth
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
-  const returning = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+  const returning = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  harness.accessories.push(returning);
+  harness.restore(returning);
   harness.controller.removeHomeKitDevice(returning);
 
   /* The hardware turns up while the timer runs, which is the whole reason the delay exists. The fire path re-asks membership rather than trusting what it read when
@@ -461,9 +430,9 @@ test("a second departure raised during the delay neither restarts the wait nor r
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
-  const departed = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+  const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  harness.accessories.push(departed);
+  harness.restore(departed);
   harness.controller.removeHomeKitDevice(departed);
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS / 2);
 
@@ -476,7 +445,7 @@ test("a second departure raised during the delay neither restarts the wait nor r
 
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS / 2);
 
-  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE99"], "the removal fires one whole delay after the first departure, not after the second");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE99")], "the removal fires one whole delay after the first departure, not after the second");
   assert.equal(harness.clock.nextDeadline, null);
 });
 
@@ -487,9 +456,9 @@ test("an adoption during the delay clears the removal armed against its accessor
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
-  const adopted = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const adopted = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
 
-  harness.accessories.push(adopted);
+  harness.restore(adopted);
   harness.controller.removeHomeKitDevice(adopted);
 
   assert.equal(harness.clock.nextDeadline, DEVICE_REMOVAL_DELAY_MS, "the departure must genuinely have armed something for the adoption to clear");
@@ -518,10 +487,10 @@ test("the plugin's shutdown drains every pending removal without acting on any o
   /* Two accessories, because the drain has to reach every entry rather than one: a teardown that dropped a single timer would pass with one pending and leave the
    * other to fire against a controller that is already gone.
    */
-  const first = accessory("uuid-AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
-  const second = accessory("uuid-AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+  const first = accessory("AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+  const second = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
-  harness.accessories.push(first, second);
+  harness.restore(first, second);
   harness.controller.removeHomeKitDevice(first);
   harness.controller.removeHomeKitDevice(second);
 
@@ -571,11 +540,11 @@ test("membership resolution keeps what it can project and reclaims what it canno
    * capability is not, so nothing accounts for its accessory and it is reclaimed. An unfiltered membership set would answer the first two identically and keep the
    * third, which is the regression this arm exists to fail.
    */
-  const plain = accessory("uuid-AABBCCDDEE01");
-  const port = accessory("uuid-AABBCCDDEE02-PORT1");
-  const unsupported = accessory("uuid-AABBCCDDEE03");
+  const plain = accessory("AABBCCDDEE01");
+  const port = accessory("AABBCCDDEE02-PORT1");
+  const unsupported = accessory("AABBCCDDEE03");
 
-  harness.accessories.push(plain, port, unsupported);
+  harness.restore(plain, port, unsupported);
 
   for(const target of [ plain, port, unsupported ]) {
 
@@ -587,7 +556,7 @@ test("membership resolution keeps what it can project and reclaims what it canno
 
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
-  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE03"], "only the record membership cannot account for may be reclaimed");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE03")], "only the record membership cannot account for may be reclaimed");
   assert.ok(harness.accessories.includes(plain));
   assert.ok(harness.accessories.includes(port));
   assert.ok(!harness.accessories.includes(unsupported));
@@ -613,13 +582,13 @@ test("the adoption gate addresses one port of an Enterprise hub by that port's o
   assert.equal(refused.controller.addHomeKitDevice(port), false, "the entry names this port, so adoption must refuse it");
   assert.deepEqual(refused.registered, [], "and nothing may reach HomeKit on its behalf");
   assert.equal(refused.controller.addHomeKitDevice(plain), true, "the plain hub is named by nothing, so it is adopted");
-  assert.deepEqual(refused.registered, ["uuid-AABBCCDDEE01"]);
+  assert.deepEqual(refused.registered, [accessoryUuid("AABBCCDDEE01")]);
 
   // The supersession stated as an assertion: an entry carrying no port qualifier does not address a port, so the port is adopted in spite of it.
   const bare = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE02"], store });
 
   assert.equal(bare.controller.addHomeKitDevice(port), true, "an entry carrying no port qualifier does not address a port of an Enterprise hub");
-  assert.deepEqual(bare.registered, ["uuid-AABBCCDDEE02-PORT1"]);
+  assert.deepEqual(bare.registered, [accessoryUuid("AABBCCDDEE02-PORT1")]);
 });
 
 test("the discovered line names each device by the identity an option entry and an MQTT topic address it with", () => {
@@ -744,10 +713,10 @@ test("a token-only controller keys ownership by its configured address and recla
    * own key read undefined and so did the context, so the two matched - which is why an implementation that compares them directly reclaims a stranger's
    * accessory here rather than leaving it alone.
    */
-  const anonymous = accessory("uuid-anonymous", {});
-  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8" });
+  const anonymous = accessory("anonymous", {});
+  const stranger = accessory("stranger", { controller: "5.6.7.8" });
 
-  harness.accessories.push(anonymous, stranger);
+  harness.restore(anonymous, stranger);
 
   harness.controller.removeHomeKitDevice(anonymous, true);
   harness.controller.removeHomeKitDevice(stranger, true);
@@ -763,12 +732,12 @@ test("a controller that has learned its MAC address still owns the accessories i
   assert.equal(harness.controller.ownershipKey, CONTROLLER_MAC);
 
   // The accessory carries the key this controller answered by before it read a controller document, so it is this controller's own to act on rather than an orphan.
-  const carried = accessory("uuid-carried", { controller: "1.2.3.4" });
+  const carried = accessory("carried", { controller: "1.2.3.4" });
 
-  harness.accessories.push(carried);
+  harness.restore(carried);
   harness.controller.removeHomeKitDevice(carried, true);
 
-  assert.deepEqual(harness.unregistered, ["uuid-carried"], "an accessory keyed by this controller's prior identity is still its own");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("carried")], "an accessory keyed by this controller's prior identity is still its own");
 });
 
 test("a token-only controller answers by its configured address in the scope form", () => {
@@ -836,10 +805,10 @@ test("an accessory created under an earlier form of the device's identity is nev
    * device identity. Adoption reads the identity alone: the current accessory is what the device keeps, nothing is registered, and the earlier accessory is left
    * for the sweep - an adoption that looked the earlier spelling up would retire one of them here, and one that found nothing at all would register a third.
    */
-  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
-  const current = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const earlier = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const current = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
 
-  harness.accessories.push(earlier, current);
+  harness.restore(earlier, current);
 
   assert.equal(harness.controller.addHomeKitDevice(plain), true);
   assert.deepEqual(harness.registered, [], "the accessory under the device identity is adopted, so nothing is registered");
@@ -854,9 +823,9 @@ test("membership names a device by its identity alone, so a queued removal of an
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
-  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const earlier = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
 
-  harness.accessories.push(earlier);
+  harness.restore(earlier);
 
   /* The default removal delay is sixty seconds and the fire path re-asks membership before acting. Membership names a device by its identity alone, so nothing
    * accounts for an accessory keyed by an earlier form of it - a membership set widened to earlier spellings would keep this accessory instead.
@@ -865,7 +834,7 @@ test("membership names a device by its identity alone, so a queued removal of an
 
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
-  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"], "membership accounts for a device under its identity alone");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:01")], "membership accounts for a device under its identity alone");
   assert.ok(!harness.accessories.includes(earlier));
 });
 
@@ -882,14 +851,14 @@ test("a device the user disabled gives up the accessory under its identity, and 
 
   // The accessory under the device identity and one created under an earlier form. The gate retires the one adoption would have kept; the earlier one is not this
   // path's to judge, since the sweep accounts for it exactly as it does for every other accessory of this controller's.
-  const current = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
-  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const current = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const earlier = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
 
-  harness.accessories.push(current, earlier);
+  harness.restore(current, earlier);
 
   assert.equal(harness.controller.addHomeKitDevice(plain), false);
   assert.deepEqual(harness.registered, [], "a disabled device must never reach HomeKit");
-  assert.deepEqual(harness.unregistered, ["uuid-AABBCCDDEE01"]);
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")]);
   assert.deepEqual(harness.accessories, [earlier]);
 
   const removals = harness.logged.filter(line => line.includes("Removing"));
@@ -914,7 +883,7 @@ test("the accessory seed reads the spelling the library stores, and an update in
   assert.ok(record);
   assert.equal(record.mac, "AABBCCDDEE04", "the library stores every MAC address it holds in one spelling");
   assert.equal(harness.controller.addHomeKitDevice(record), true);
-  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE04"], "so a new accessory is minted from the stored spelling rather than from the wire's");
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE04")], "so a new accessory is minted from the stored spelling rather than from the wire's");
 
   /* The older notification dialect reaches the merge untranslated, which is where a re-spelling would otherwise land on the stored record. A same-identity update
    * in another spelling leaves the record's own reference in place, and that is what keeps the seed stable for the life of the process.
@@ -943,14 +912,14 @@ test("an accessory naming hardware this controller projects is its own to remove
    * spelling that other controller wrote, which is a claim on this controller's own device that no context key can contradict, under a UUID no seed of that
    * device produces, so only a claim that reads the address can recognize it; the second names hardware nothing here projects, and is a stranger's to keep.
    */
-  const claimed = accessory("uuid-stale-01", { controller: "5.6.7.8", mac: "AA:BB:CC:DD:EE:01" });
-  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+  const claimed = accessory("stale-01", { controller: "5.6.7.8", mac: "AA:BB:CC:DD:EE:01" });
+  const stranger = accessory("stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
 
-  harness.accessories.push(claimed, stranger);
+  harness.restore(claimed, stranger);
   harness.controller.removeHomeKitDevice(claimed, true);
   harness.controller.removeHomeKitDevice(stranger, true);
 
-  assert.deepEqual(harness.unregistered, ["uuid-stale-01"]);
+  assert.deepEqual(harness.unregistered, [accessoryUuid("stale-01")]);
   assert.deepEqual(harness.accessories, [stranger], "an accessory naming hardware this controller does not project is never its business");
 
   const removals = harness.logged.filter(line => line.includes("Removing"));
@@ -979,16 +948,16 @@ test("a device adopted to a constructed accessory is spared by the sweep and sta
 
   await harness.controller.login();
 
-  const configured = harness.controller.configuredDevices.get("uuid-AABBCCDDEE01");
+  const configured = harness.controller.configuredDevices.get(accessoryUuid("AABBCCDDEE01"));
 
   assert.ok(configured, "the adoption runs to a configured device rather than stopping at the accessory it registered");
-  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE01"], "and the accessory behind that device is the one HomeKit was told about");
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE01")], "and the accessory behind that device is the one HomeKit was told about");
 
   /* The sweep runs in the same unbroken pass, immediately behind the seed that configured this device, and leaves it where it is. A device configured in this very
    * pass is the case the sweep's own first test is there for.
    */
   assert.deepEqual(harness.unregistered, [], "an accessory the seed just configured is not an orphan");
-  assert.deepEqual(harness.accessories.map(accessory => accessory.UUID), ["uuid-AABBCCDDEE01"], "and it stays in HomeKit");
+  assert.deepEqual(harness.accessories.map(accessory => accessory.UUID), [accessoryUuid("AABBCCDDEE01")], "and it stays in HomeKit");
 
   /* What the accessory carries for the life of the pairing, written by the adoption itself rather than by anything a test arranged: the key this controller answers
    * by, the identity the accessory was minted under, and the hardware it names. The startup sweep and the platform's reclaim each read one of the three, so an
@@ -1017,17 +986,17 @@ test("the first start after an identity change retires every accessory created u
    * may reach. The sweep must part them by disposition - retired at once, delayed as a departure, or left
    * alone - reading the identity record rather than whether the hardware happens to be present.
    */
-  const staleOurs = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
-  const staleStranded = accessory("uuid-stranded-01", { controller: "68:d7:9a:60:f6:f8", mac: "AA:BB:CC:DD:EE:01" });
-  const stalePort = accessory("uuid-aa:bb:cc:dd:ee:02-PORT1", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:02" });
-  const currentPort = accessory("uuid-AABBCCDDEE02-PORT1", { controller: CONTROLLER_MAC, id: "AABBCCDDEE02-PORT1", mac: "AABBCCDDEE02" });
-  const unprojected1x = accessory("uuid-aa:bb:cc:dd:ee:03", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:03" });
-  const unprojectedForeign = accessory("uuid-stale-03", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:03" });
-  const departed1x = accessory("uuid-aa:bb:cc:dd:ee:99", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:99" });
-  const departedCurrent = accessory("uuid-AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
-  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+  const staleOurs = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const staleStranded = accessory("stranded-01", { controller: "68:d7:9a:60:f6:f8", mac: "AA:BB:CC:DD:EE:01" });
+  const stalePort = accessory("aa:bb:cc:dd:ee:02-PORT1", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:02" });
+  const currentPort = accessory("AABBCCDDEE02-PORT1", { controller: CONTROLLER_MAC, id: "AABBCCDDEE02-PORT1", mac: "AABBCCDDEE02" });
+  const unprojected1x = accessory("aa:bb:cc:dd:ee:03", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:03" });
+  const unprojectedForeign = accessory("stale-03", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:03" });
+  const departed1x = accessory("aa:bb:cc:dd:ee:99", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:99" });
+  const departedCurrent = accessory("AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+  const stranger = accessory("stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
 
-  harness.accessories.push(staleOurs, staleStranded, stalePort, currentPort, unprojected1x, unprojectedForeign, departed1x, departedCurrent, stranger);
+  harness.restore(staleOurs, staleStranded, stalePort, currentPort, unprojected1x, unprojectedForeign, departed1x, departedCurrent, stranger);
 
   await harness.controller.login();
 
@@ -1036,9 +1005,10 @@ test("the first start after an identity change retires every accessory created u
    */
   const reason = "It carries no record of the device identity this version keys accessories by.";
 
-  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE01"]);
-  assert.deepEqual(harness.unregistered, [ "uuid-aa:bb:cc:dd:ee:01", "uuid-stranded-01", "uuid-aa:bb:cc:dd:ee:02-PORT1", "uuid-aa:bb:cc:dd:ee:03",
-    "uuid-aa:bb:cc:dd:ee:99" ], "an accessory recording no identity was created under an earlier form and goes at once, its hardware present or not");
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE01")]);
+  assert.deepEqual(harness.unregistered, [ accessoryUuid("aa:bb:cc:dd:ee:01"), accessoryUuid("stranded-01"), accessoryUuid("aa:bb:cc:dd:ee:02-PORT1"),
+    accessoryUuid("aa:bb:cc:dd:ee:03"), accessoryUuid("aa:bb:cc:dd:ee:99") ],
+  "an accessory recording no identity was created under an earlier form and goes at once, its hardware present or not");
 
   const immediate = harness.logged.filter(line => line.includes("Removing"));
 
@@ -1052,9 +1022,9 @@ test("the first start after an identity change retires every accessory created u
   // strangers are untouched - the one naming the unprojectable record above all, since a claim walked over unfiltered membership would have taken it.
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
-  assert.deepEqual(harness.unregistered.slice(5), ["uuid-AABBCCDDEE98"]);
+  assert.deepEqual(harness.unregistered.slice(5), [accessoryUuid("AABBCCDDEE98")]);
   assert.ok(harness.logged.filter(line => line.includes("Removing")).slice(5).every(line => line.endsWith("from HomeKit.")));
-  assert.deepEqual(harness.accessories.filter(x => x.UUID !== "uuid-AABBCCDDEE01"), [ currentPort, unprojectedForeign, stranger ]);
+  assert.deepEqual(harness.accessories.filter(x => x.UUID !== accessoryUuid("AABBCCDDEE01")), [ currentPort, unprojectedForeign, stranger ]);
 });
 
 test("a disabled device's earlier accessory is retired at the first start with its reason, though nothing is added in its place", async (t) => {
@@ -1069,14 +1039,14 @@ test("a disabled device's earlier accessory is retired at the first start with i
 
   // The plain hub is disabled, so the seed adds nothing under its identity, and the sweep still retires the accessory created under the earlier form - the
   // decision reads the identity record, never whether a replacement exists.
-  const earlier = accessory("uuid-aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
+  const earlier = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
 
-  harness.accessories.push(earlier);
+  harness.restore(earlier);
 
   await harness.controller.login();
 
-  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE02-PORT1"], "the port is added; the disabled hub is not");
-  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"]);
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE02-PORT1")], "the port is added; the disabled hub is not");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:01")]);
 
   const removals = harness.logged.filter(line => line.includes("Removing"));
 
@@ -1099,17 +1069,17 @@ test("a controller the user disabled takes every accessory it can claim out of H
    * Enterprise hub's hardware - which its port shares, so the claim lands at the hardware grain where a serial set built from port-qualified identities would
    * miss it - and a stranger naming nothing here. The disabled pass retires what the predicate claims, directly and without a delay.
    */
-  const ours = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
-  const foreign1x = accessory("uuid-stranded-02", { controller: "68:d7:9a:60:f6:f8", mac: "aa:bb:cc:dd:ee:02" });
-  const stranger = accessory("uuid-stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
+  const ours = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+  const foreign1x = accessory("stranded-02", { controller: "68:d7:9a:60:f6:f8", mac: "aa:bb:cc:dd:ee:02" });
+  const stranger = accessory("stranger", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:99" });
 
-  harness.accessories.push(ours, foreign1x, stranger);
+  harness.restore(ours, foreign1x, stranger);
 
   await harness.controller.login();
 
   assert.ok(harness.logged.some(line => line.includes("Disabling this UniFi Access controller in HomeKit.")));
   assert.deepEqual(harness.registered, [], "a disabled controller adds nothing");
-  assert.deepEqual(harness.unregistered, [ "uuid-AABBCCDDEE01", "uuid-stranded-02" ]);
+  assert.deepEqual(harness.unregistered, [ accessoryUuid("AABBCCDDEE01"), accessoryUuid("stranded-02") ]);
   assert.deepEqual(harness.accessories, [stranger]);
   assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 0, "the disabled pass never queues");
 });
@@ -1157,10 +1127,10 @@ test("login reports the identity outcome its exit took", async (t) => {
 
   t.after(() => disabled.shutdown.abort());
 
-  disabled.accessories.push(accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" }));
+  disabled.restore(accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" }));
 
   assert.equal(await disabled.controller.login(), "disabled", "a controller the user turned off in HomeKit connected first, so its identity is settled");
-  assert.deepEqual(disabled.unregistered, ["uuid-AABBCCDDEE01"], "and it still takes the accessories it answered for with it");
+  assert.deepEqual(disabled.unregistered, [accessoryUuid("AABBCCDDEE01")], "and it still takes the accessories it answered for with it");
 });
 
 test("a login whose connect is refused on every attempt keeps retrying on the library's refusal schedule until shutdown ends it", async (t) => {
@@ -1273,13 +1243,13 @@ test("an accessory under the device identity that records none is adopted rather
    * an accessory this version created. The seed adopts it by its UUID, so nothing is registered for the hub, and the sweep must leave it alone because
    * membership accounts for it whatever its record says: a sweep that read the record first would retire the identity's own accessory.
    */
-  const wiped = accessory("uuid-AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" });
+  const wiped = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" });
 
-  harness.accessories.push(wiped);
+  harness.restore(wiped);
 
   await harness.controller.login();
 
-  assert.deepEqual(harness.registered, ["uuid-AABBCCDDEE02-PORT1"], "the hub's accessory is adopted, so only the port is added");
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE02-PORT1")], "the hub's accessory is adopted, so only the port is added");
   assert.deepEqual(harness.unregistered, [], "an accessory membership accounts for is never the sweep's to retire");
   assert.ok(harness.accessories.includes(wiped));
 });
@@ -1299,13 +1269,12 @@ test("an orphan is named from the controller's own record whichever spelling its
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
   // A cached accessory whose context carries the colon-bearing spelling the controller wrote when it was created, which is what the naming fold has to resolve.
-  const stale = { UUID: "uuid-aa:bb:cc:dd:ee:01", context: { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" },
-    displayName: "Stale Twin" } as unknown as AccessAccessory;
+  const stale = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" }, "Stale Twin");
 
-  harness.accessories.push(stale);
+  harness.restore(stale);
   harness.controller.removeHomeKitDevice(stale, true);
 
-  assert.deepEqual(harness.unregistered, ["uuid-aa:bb:cc:dd:ee:01"]);
+  assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:01")]);
 
   const removals = harness.logged.filter(line => line.includes("Removing"));
 
@@ -1338,14 +1307,14 @@ test("a record whose hardware identity never arrived is admitted to nothing", ()
   /* Membership never names it either, so nothing can account for an accessory derived from it and the sweep reclaims one. An implementation that composed an
    * identity anyway would derive this accessory's own UUID for the record, claim it, and keep it.
    */
-  const orphan = accessory("uuid-undefined");
+  const orphan = accessory("undefined");
 
-  harness.accessories.push(orphan);
+  harness.restore(orphan);
   harness.controller.removeHomeKitDevice(orphan);
 
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
-  assert.deepEqual(harness.unregistered, ["uuid-undefined"], "a record with no hardware identity can account for no accessory");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("undefined")], "a record with no hardware identity can account for no accessory");
 });
 
 test("the plugin's shutdown reaches a controller through the one signal every controller composes from", async () => {
@@ -1542,14 +1511,6 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
 
   const platform = makePlatformDouble({
 
-    api: {
-
-      hap: { uuid: { generate: (input: string): string => "uuid-" + input } },
-      on: (): void => undefined,
-      registerPlatformAccessories: (): void => undefined,
-      unregisterPlatformAccessories: (): void => undefined,
-      updatePlatformAccessories: (): void => undefined
-    },
     clock,
     config: { controllers: options.controllers ?? [{ address: "1.2.3.4" }], options: [] },
     entries,

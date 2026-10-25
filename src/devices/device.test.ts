@@ -5,18 +5,17 @@
  */
 /* eslint-disable camelcase */
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
+import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, writesOn } from "../testing.helpers.ts";
 import { FeatureOptions, HAPStatus, mqttTopic } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
-import { hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
-import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
 import { AccessDevice } from "./device.ts";
 import type { DecoratedSerial } from "../policy.ts";
-import { HapStatusError } from "@homebridge/hap-nodejs";
+import type { TestAccessAccessory } from "../testing.helpers.ts";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import test from "node:test";
@@ -95,6 +94,8 @@ function portRecord(sourceId: string): AccessStateDevice & { mac: string } {
 
 interface Harness {
 
+  // The accessory this harness's device is stood up on, Homebridge's own, recording every write the device makes to it.
+  accessory: TestAccessAccessory;
   // The time source every timer this device arms is registered on, so an arm reads and moves the device's own timeline rather than waiting on a real one.
   clock: TestClock;
   // The admission record this device is constructed on - the narrowed record membership admits a device by, and the source of the identity a device captures once.
@@ -108,12 +109,17 @@ interface Harness {
   health: { isHealthy: boolean };
   // The lines the deviation log lands on, rendered as the logger would render them. It speaks at info, which is the channel a user reads at startup.
   infoLines: string[];
+  // What the device wrote to the accessory's information service, the identity stamp and a rename's names among them.
+  readonly infoWrites: { characteristic: string; value: unknown }[];
   loop: () => Promise<void>;
+  // What the device wrote to the service carrying no availability characteristic, which is nothing where the arm asked for no such service.
+  readonly otherWrites: { characteristic: string; value: unknown }[];
   projection: AccessDeviceProjection;
   // What the device attached to the bridge and what it later detached, by event name, so a registration and its teardown can be read as a pair.
   registrations: string[];
   removals: string[];
-  statusWrites: unknown[];
+  // What the device wrote to the service carrying availability, which is every availability statement HomeKit was shown.
+  readonly statusWrites: { characteristic: string; value: unknown }[];
   warnings: string[];
 }
 
@@ -128,20 +134,23 @@ interface Harness {
  * identity, the broker double an arm reads publishes from, the platform above, and the loop capture. Its device name and its own name are separate members there,
  * so a rendered prefix an arm reads shows for itself that no controller half reached it.
  *
+ * The accessory is built here, once per harness, so the writes an arm reads are the ones its own device made to it.
+ *
  * @param script - The records the projection yields, in order.
- * @param init   - The device record construction seeds this device from, the broker double the controller publishes through where an arm reads what reached
- *                 the broker, and the feature-option entries the engine resolves against.
+ * @param init   - The accessory's name, the device record construction seeds this device from, the broker double the controller publishes through where an arm
+ *                 reads what reached the broker, the feature-option entries the engine resolves against, and whether the accessory carries a service with no
+ *                 availability characteristic beside the one that has it.
  */
-function makeHarness(script: (AccessStateDevice | undefined)[], init: { construction?: AccessStateDevice & { mac: string }; mqtt?: TestMqttClient;
-  options?: string[]; } = {}): Harness {
+function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessoryName?: string; construction?: AccessStateDevice & { mac: string };
+  mqtt?: TestMqttClient; options?: string[]; otherService?: boolean; } = {}): Harness {
 
   const clock = new TestClock();
   const emissions: AccessEventPacket[] = [];
   const registrations: string[] = [];
   const removals: string[] = [];
   const infoLines: string[] = [];
-  const statusWrites: unknown[] = [];
   const warnings: string[] = [];
+  const stood = makeAccessory({ name: init.accessoryName, other: init.otherService });
   const construction = init.construction ?? record();
   const engine = new FeatureOptions(featureOptionCategories, featureOptions, init.options ?? []);
   // A connection that reads healthy unless an arm says otherwise, which is the state a device is configured under in the field.
@@ -188,7 +197,6 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     mqtt: init.mqtt,
     platform: makePlatformDouble({
 
-      api: { hap: { Characteristic: SentinelCharacteristic, HapStatusError, Service: SentinelService } },
       clock,
       featureOptions: engine,
       log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
@@ -197,149 +205,72 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { construc
     spawnLoop: (_title: string, body: () => Promise<void>): void => { loop = body; }
   });
 
-  return { clock, construction, controller, emissions, featureOptions: engine, health, infoLines,
-    loop: (): Promise<void> => loop(), projection: projection as unknown as AccessDeviceProjection, registrations, removals, statusWrites, warnings };
-}
-
-/* The HAP characteristic namespace and a characteristic instance in one class, which is the double duty HAP's own class does. Every characteristic this suite
- * names is a static string equal to its own name, so a read of hap.Characteristic.Name answers "Name" and the recorders below match on the same spelling the
- * device wrote. It has to be a class rather than a literal because the library reaches the characteristic constructor by reflection, through the first
- * characteristic of a service, and a literal would leave that reflection holding Object with none of these statics on it.
- */
-class SentinelCharacteristic {
-
-  public static readonly ConfiguredName = "ConfiguredName";
-  public static readonly FirmwareRevision = "FirmwareRevision";
-  public static readonly Manufacturer = "Manufacturer";
-  public static readonly Model = "Model";
-  public static readonly Name = "Name";
-  public static readonly SerialNumber = "SerialNumber";
-  public static readonly StatusActive = "StatusActive";
-
-  // What this characteristic reports when it is read. A characteristic is the carrier of its own value in HAP, so a read of a service's characteristic answers
-  // one of these rather than a bare value.
-  public readonly value: unknown;
-
-  constructor(value?: unknown) {
-
-    this.value = value;
-  }
-}
-
-// What one service double answers, what it carries, and where a write to it lands, given to the constructor beside the UUID the service is found by.
-interface SentinelServiceInit {
-
-  // What a read of this service's characteristic reports a value for. A service answering nothing is one no arm gave a value to.
-  answers?: (characteristic: string) => unknown;
-  // Whether this service reports the named characteristic, which is the question the availability sweep asks before it writes.
-  carries: (characteristic: string) => boolean;
-  // Where a write to this service is recorded.
-  writes: (characteristic: string, value: unknown) => void;
-}
-
-/* The HAP service namespace and a service instance in one class, the same double duty the characteristic above does. The static is the one namespace entry the
- * plugin's lookups name, reduced to the UUID a lookup reads: the library's accessory rename takes the first service's constructor, reads the information
- * service's UUID off it, and then finds the service carrying that UUID in the accessory's own list.
- */
-class SentinelService {
-
-  public static readonly AccessoryInformation = { UUID: "AccessoryInformation" };
-
-  public readonly characteristics = [new SentinelCharacteristic()];
-  // The name the library's per-service rename writes. A real service carries one, so this one does.
-  public displayName = "";
-  public readonly UUID: string;
-
-  readonly #init: SentinelServiceInit;
-
-  constructor(uuid: string, init: SentinelServiceInit) {
-
-    this.UUID = uuid;
-    this.#init = init;
-  }
-
-  public getCharacteristic(characteristic: string): SentinelCharacteristic {
-
-    return new SentinelCharacteristic(this.#init.answers?.(characteristic));
-  }
-
-  public testCharacteristic(characteristic: string): boolean {
-
-    return this.#init.carries(characteristic);
-  }
-
-  public updateCharacteristic(characteristic: string, value: unknown): void {
-
-    this.#init.writes(characteristic, value);
-  }
-}
-
-// What an arm varies about the accessory its device is stood up on. Only the availability sink is required, because every device reports its reachability.
-interface AccessoryDoubleOptions {
-
-  // What the device stamps on the information service.
-  infoWrites?: { characteristic: string; value: unknown }[];
-  // The name the information service answers for the name characteristic.
-  name?: string;
-  // When given, a third service joins the list reporting nothing, so a sweep can be read for what it left alone as well as for what it wrote.
-  otherWrites?: unknown[];
-  // Every name Homebridge's own display-name setter is handed, so a rename an arm expects to be refused shows up here rather than passing silently.
-  renames?: string[];
-  statusWrites: unknown[];
-}
-
-/* An accessory shaped as a real one is, because the library reaches HAP by reflection rather than by name: it reads the first service's constructor for the
- * information service's UUID and the first characteristic's constructor for the name statics, then looks the information service up inside the accessory's own
- * service list. So the information service sits first in services here, where Homebridge places it, and every lookup matches by UUID as HAP performs it. The
- * sentinel classes above stand in for HAP rather than the real classes because this suite's instrument is a write recorder - the count and the order of what the
- * device wrote - which real characteristics cannot answer.
- *
- * The information service answers the name the accessory was stood up under, because the device reads its current name from that characteristic before it decides
- * whether a record's alias is a change: a double answering nothing there falls back to the record's own alias, which the tick has already written, and can never
- * see one. It reports no availability characteristic, as the real information service reports none, so the sweep passes over it and writes only the carrier.
- *
- * @param options - What the arm varies; see {@link AccessoryDoubleOptions}.
- *
- * @returns The accessory double, typed as the accessory.
- */
-function makeAccessory(options: AccessoryDoubleOptions): AccessAccessory {
-
-  const infoWrites = options.infoWrites ?? [];
-  const otherWrites = options.otherWrites;
-  const renames = options.renames ?? [];
-  const services = [
-
-    new SentinelService(SentinelService.AccessoryInformation.UUID, {
-
-      answers: (characteristic: string): unknown => (characteristic === SentinelCharacteristic.Name) ? options.name : undefined,
-      carries: (): boolean => false,
-      writes: (characteristic: string, value: unknown): void => { infoWrites.push({ characteristic, value }); }
-    }),
-    new SentinelService("StatusCarrier", {
-
-      carries: (characteristic: string): boolean => characteristic === SentinelCharacteristic.StatusActive,
-      writes: (characteristic: string, value: unknown): void => { options.statusWrites.push({ characteristic, value }); }
-    })
-  ];
-
-  if(otherWrites) {
-
-    services.push(new SentinelService("OtherCarrier", {
-
-      carries: (): boolean => false,
-      writes: (characteristic: string, value: unknown): void => { otherWrites.push({ characteristic, value }); }
-    }));
-  }
-
   return {
 
-    UUID: "uuid1",
-    context: {},
-    displayName: "Test Hub",
-    getService: (target: { UUID: string }): unknown => services.find(service => service.UUID === target.UUID),
-    services,
-    updateDisplayName: (name: string): void => { renames.push(name); }
-  } as unknown as AccessAccessory;
+    accessory: stood.accessory,
+    clock,
+    construction,
+    controller,
+    emissions,
+    featureOptions: engine,
+    health,
+    infoLines,
+    get infoWrites(): { characteristic: string; value: unknown }[] {
+
+      return writesOn(stood.accessory, stood.information);
+    },
+    loop: (): Promise<void> => loop(),
+    get otherWrites(): { characteristic: string; value: unknown }[] {
+
+      return stood.other ? writesOn(stood.accessory, stood.other) : [];
+    },
+    projection: projection as unknown as AccessDeviceProjection,
+    registrations,
+    removals,
+    get statusWrites(): { characteristic: string; value: unknown }[] {
+
+      return writesOn(stood.accessory, stood.carrier);
+    },
+    warnings
+  };
+}
+
+// The accessory a device is stood up on, and the services on it an arm reads the device's writes from.
+interface DeviceAccessory {
+
+  accessory: TestAccessAccessory;
+  // The service carrying StatusActive, which is what the availability sweep writes.
+  carrier: Service;
+  // The information service HAP gives every accessory at construction, which the device stamps and a rename writes into.
+  information: Service;
+  // When asked for, a service carrying no availability characteristic, so a sweep can be read for what it left alone as well as for what it wrote.
+  other?: Service;
+}
+
+/* Stand up the accessory a device is built on: Homebridge's own, so the library's reflection over the first service's constructor finds HAP's information service
+ * where Homebridge places it, and every lookup and write the device makes runs through HAP as it does in the field. The name is the accessory's display name and
+ * its information service's name at once, as HAP sets them together at construction, because the device reads its current name from that characteristic before it decides
+ * whether a record's alias is a change.
+ *
+ * The carrier's StatusActive is attached here, because the sweep asks the service whether it carries the characteristic before it writes, and HAP attaches one only
+ * when it is first asked for. The information service carries no availability characteristic, as the real one carries none, so the sweep passes over it. The
+ * accessory records from the moment each service joins it, so what an arm reads is what the device wrote after construction.
+ *
+ * @param options - name: the accessory's name, "Test Hub" by default; other: whether a service carrying no availability characteristic joins the carrier.
+ *
+ * @returns The accessory and the services an arm reads writes from.
+ */
+function makeAccessory({ name = "Test Hub", other = false }: { name?: string; other?: boolean } = {}): DeviceAccessory {
+
+  const accessory = makeTestAccessory(name);
+  const information = accessory.getService(Service.AccessoryInformation);
+  const carrier = accessory.addService(Service.ContactSensor, name);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  carrier.getCharacteristic(Characteristic.StatusActive);
+
+  return { accessory, carrier, information, other: other ? accessory.addService(Service.Switch, name) : undefined };
 }
 
 test("availability composes controller health with the device's own online state", async () => {
@@ -351,21 +282,22 @@ test("availability composes controller health with the device's own online state
 
   outage.health.isHealthy = false;
 
-  const unreachable = new TestDevice(outage.controller, outage.projection, makeAccessory({ statusWrites: outage.statusWrites }), outage.construction);
+  const unreachable = new TestDevice(outage.controller, outage.projection, outage.accessory, outage.construction);
 
   await outage.loop();
 
   assert.equal(unreachable.isOnline, true, "the record's own flags still read online, which is what makes controller health the term under test");
   assert.equal(unreachable.isReachable, false, "a device behind an unhealthy controller cannot be reached, whatever its own record last said");
-  assert.deepEqual(outage.statusWrites, [{ characteristic: "StatusActive", value: false }], "and the loop projects that composition rather than the record's flags");
+  assert.deepEqual(outage.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }],
+    "and the loop projects that composition rather than the record's flags");
 
   const healthy = makeHarness([record()]);
-  const reachable = new TestDevice(healthy.controller, healthy.projection, makeAccessory({ statusWrites: healthy.statusWrites }), healthy.construction);
+  const reachable = new TestDevice(healthy.controller, healthy.projection, healthy.accessory, healthy.construction);
 
   await healthy.loop();
 
   assert.equal(reachable.isReachable, true, "the same record behind a healthy controller reads reachable");
-  assert.deepEqual(healthy.statusWrites, [{ characteristic: "StatusActive", value: true }]);
+  assert.deepEqual(healthy.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: true }]);
 });
 
 test("a reader wrapped in the device's rule answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
@@ -375,7 +307,7 @@ test("a reader wrapped in the device's rule answers while the device can be reac
    * under test. Each term of the composition is moved on its own, because a reader that consulted only one of them would pass on the other's strength.
    */
   const harness = makeHarness([record()]);
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
   const read = device.answer(() => true);
 
   assert.equal(read(), true, "a reader answers under a healthy controller and an online record");
@@ -383,7 +315,7 @@ test("a reader wrapped in the device's rule answers while the device can be reac
   harness.health.isHealthy = false;
 
   // The controller term refuses with HAP's own status error carrying the communication-failure status.
-  assert.throws(() => read(), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+  assert.throws(() => read(), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 
   harness.health.isHealthy = true;
 
@@ -392,35 +324,34 @@ test("a reader wrapped in the device's rule answers while the device can be reac
   device.uda = { ...device.uda, is_online: false };
 
   // The device's own record gates the read from there, refusing it the same way.
-  assert.throws(() => read(), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+  assert.throws(() => read(), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 });
 
 test("a reachability refresh writes every service carrying availability and only those, reading the composition afresh each time", () => {
 
-  const harness = makeHarness([]);
-  const otherWrites: unknown[] = [];
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ otherWrites, statusWrites: harness.statusWrites }),
-    harness.construction);
+  const harness = makeHarness([], { otherService: true });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.refreshReachability();
 
-  assert.deepEqual(harness.statusWrites, [{ characteristic: "StatusActive", value: true }], "the service reporting the characteristic is written");
-  assert.deepEqual(otherWrites, [], "and the one that does not report it is left alone");
+  assert.deepEqual(harness.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: true }], "the service reporting the characteristic is written");
+  assert.deepEqual(harness.otherWrites, [], "and the one that does not report it is left alone");
 
   // The push reads the composition at the moment it runs rather than a value captured when the device was built, which is what makes the controller observer's walk
-  // worth anything at all.
+  // worth anything at all. The accessory's record restarts here, so what the second refresh wrote is read on its own.
+  harness.accessory.clearObservations();
   harness.health.isHealthy = false;
   device.refreshReachability();
 
-  assert.deepEqual(harness.statusWrites.slice(1), [{ characteristic: "StatusActive", value: false }]);
-  assert.deepEqual(otherWrites, []);
+  assert.deepEqual(harness.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }]);
+  assert.deepEqual(harness.otherWrites, []);
 });
 
 test("a reachability refresh states the device's availability on its own topic, retained, and only when the reading moves", () => {
 
   const mqtt = new TestMqttClient();
   const harness = makeHarness([], { mqtt });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.refreshReachability();
   device.refreshReachability();
@@ -449,7 +380,7 @@ test("the record loop states availability on the deliveries that move it and on 
   const harness = makeHarness([ record(), record({ alias: "Renamed" }), record({ is_online: false }), record({ alias: "Renamed Again", is_online: false }) ],
     { mqtt });
 
-  new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   await harness.loop();
 
@@ -462,7 +393,7 @@ test("removal states offline as the device's last word, past the end of its own 
 
   const mqtt = new TestMqttClient();
   const harness = makeHarness([], { mqtt });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.refreshReachability();
 
@@ -487,7 +418,7 @@ test("removal states offline as the device's last word, past the end of its own 
   /* A device re-adopted under the same identity states online again. The removal's statement was change-gated, which is what wrote offline into the client's
    * memory of the topic...an ungated one would have left online remembered there, and this statement would have been swallowed as unchanged.
    */
-  const readopted = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const readopted = new TestDevice(harness.controller, harness.projection, makeAccessory().accessory, harness.construction);
 
   readopted.refreshReachability();
 
@@ -497,7 +428,7 @@ test("removal states offline as the device's last word, past the end of its own 
 test("a present record yields exactly one update carrying the wire's own packet shape", async () => {
 
   const harness = makeHarness([record({ alias: "Renamed" })]);
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   await harness.loop();
 
@@ -514,13 +445,13 @@ test("a present record yields exactly one update carrying the wire's own packet 
   // The loop is the only writer of the held record, and it wrote the record the yield carried.
   assert.equal(device.uda.alias, "Renamed");
   assert.equal(harness.statusWrites.length, 1);
-  assert.deepEqual(harness.statusWrites[0], { characteristic: "StatusActive", value: true });
+  assert.deepEqual(harness.statusWrites[0], { characteristic: Characteristic.StatusActive.UUID, value: true });
 });
 
 test("a record that has left the state produces no update, no write, and no refresh", async () => {
 
   const harness = makeHarness([undefined]);
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
   const held = device.uda;
 
   await harness.loop();
@@ -536,18 +467,18 @@ test("a delivered update carrying an offline record drives availability false", 
   // observe loop as an ordinary record update rather than as a signal of its own.
   const harness = makeHarness([record({ is_online: false })]);
 
-  new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   await harness.loop();
 
   assert.equal(harness.statusWrites.length, 1, "every delivered update must write availability once");
-  assert.deepEqual(harness.statusWrites[0], { characteristic: "StatusActive", value: false });
+  assert.deepEqual(harness.statusWrites[0], { characteristic: Characteristic.StatusActive.UUID, value: false });
 });
 
 test("a timer armed on a device is drained by cleanup and can never arm again afterwards", () => {
 
   const harness = makeHarness([]);
-  const device = new TimerDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TimerDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
   let fired = 0;
 
   device.arm("relock-main", () => fired++, TIMER_DELAY_MS);
@@ -579,7 +510,7 @@ test("a device's debug lines carry its name and answer an entry suffixed with it
 
   const entries = ["Enable.Log.Debug.AABBCCDDEE01"];
   const owner = makeHarness([], { options: entries });
-  const device = new TestDevice(owner.controller, owner.projection, makeAccessory({ statusWrites: owner.statusWrites }), owner.construction);
+  const device = new TestDevice(owner.controller, owner.projection, owner.accessory, owner.construction);
 
   device.log.debug("Owner speaks.");
 
@@ -588,7 +519,7 @@ test("a device's debug lines carry its name and answer an entry suffixed with it
   assert.deepEqual(owner.warnings, ["Test Hub [UA Hub]: Owner speaks."]);
 
   const sibling = makeHarness([], { construction: record({ mac: "aabbccddee02" }), options: entries });
-  const quiet = new TestDevice(sibling.controller, sibling.projection, makeAccessory({ statusWrites: sibling.statusWrites }), sibling.construction);
+  const quiet = new TestDevice(sibling.controller, sibling.projection, sibling.accessory, sibling.construction);
 
   quiet.log.debug("Sibling speaks.");
 
@@ -599,7 +530,7 @@ test("a device's debug lines carry its name and answer an entry suffixed with it
 test("a device's log prefix names the device alone, with no half naming the controller it belongs to", () => {
 
   const harness = makeHarness([]);
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.log.info("Owner speaks.");
 
@@ -618,14 +549,14 @@ test("a device entry outranks the controller entry that would otherwise answer f
    */
   const entries = [ "Enable.Log.Debug.AABBCCDDEE01", "Disable.Log.Debug." + CONTROLLER_ID ];
   const owner = makeHarness([], { options: entries });
-  const device = new TestDevice(owner.controller, owner.projection, makeAccessory({ statusWrites: owner.statusWrites }), owner.construction);
+  const device = new TestDevice(owner.controller, owner.projection, owner.accessory, owner.construction);
 
   device.log.debug("Owner speaks.");
 
   assert.deepEqual(owner.warnings, ["Test Hub [UA Hub]: Owner speaks."]);
 
   const sibling = makeHarness([], { construction: record({ mac: "aabbccddee02" }), options: entries });
-  const quiet = new TestDevice(sibling.controller, sibling.projection, makeAccessory({ statusWrites: sibling.statusWrites }), sibling.construction);
+  const quiet = new TestDevice(sibling.controller, sibling.projection, sibling.accessory, sibling.construction);
 
   quiet.log.debug("Sibling speaks.");
 
@@ -640,13 +571,12 @@ test("a device's identity is captured at adoption and survives a record whose ow
    * record moving underneath it must not move the accessory with it.
    */
   const harness = makeHarness([record({ mac: "ffeeddccbb02" })]);
-  const infoWrites: { characteristic: string; value: unknown }[] = [];
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ infoWrites, statusWrites: harness.statusWrites }),
-    harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configureInfo();
 
-  assert.deepEqual(infoWrites.filter(write => write.characteristic === "SerialNumber"), [{ characteristic: "SerialNumber", value: "AABBCCDDEE01" }]);
+  assert.deepEqual(harness.infoWrites.filter(write => write.characteristic === Characteristic.SerialNumber.UUID),
+    [{ characteristic: Characteristic.SerialNumber.UUID, value: "AABBCCDDEE01" }]);
   assert.equal(device.id, "AABBCCDDEE01");
 
   await harness.loop();
@@ -661,8 +591,8 @@ test("a device's identity is captured at adoption and survives a record whose ow
    */
   device.configureInfo();
 
-  assert.deepEqual(infoWrites.filter(write => write.characteristic === "SerialNumber"),
-    [ { characteristic: "SerialNumber", value: "AABBCCDDEE01" }, { characteristic: "SerialNumber", value: "AABBCCDDEE01" } ]);
+  assert.deepEqual(harness.infoWrites.filter(write => write.characteristic === Characteristic.SerialNumber.UUID),
+    [ { characteristic: Characteristic.SerialNumber.UUID, value: "AABBCCDDEE01" }, { characteristic: Characteristic.SerialNumber.UUID, value: "AABBCCDDEE01" } ]);
 });
 
 test("an Enterprise hub port answers the option entries that name it, and its sibling answers none of them", () => {
@@ -675,8 +605,8 @@ test("an Enterprise hub port answers the option entries that name it, and its si
   const entries = [ "Enable.Device.SyncName.AABBCCDDEE02-PORT1", "Enable.Hub.LockDelayInterval.AABBCCDDEE02-PORT1.5" ];
   const portOne = makeHarness([], { construction: portRecord("port1"), options: entries });
   const portTwo = makeHarness([], { construction: portRecord("port2"), options: entries });
-  const one = new TestDevice(portOne.controller, portOne.projection, makeAccessory({ statusWrites: portOne.statusWrites }), portOne.construction);
-  const two = new TestDevice(portTwo.controller, portTwo.projection, makeAccessory({ statusWrites: portTwo.statusWrites }), portTwo.construction);
+  const one = new TestDevice(portOne.controller, portOne.projection, portOne.accessory, portOne.construction);
+  const two = new TestDevice(portTwo.controller, portTwo.projection, portTwo.accessory, portTwo.construction);
 
   assert.equal(one.hasFeature("Device.SyncName"), true, "the entry names this port, so this port's own gate must answer true");
   assert.equal(two.hasFeature("Device.SyncName"), false, "nothing names its sibling, so the sibling's gate must answer false");
@@ -697,8 +627,8 @@ test("an Enterprise hub port answers the option entries that name it, and its si
   // The control: with nothing configured at all, both ports answer the catalog default and neither has a deviation to report.
   const bareOne = makeHarness([], { construction: portRecord("port1") });
   const bareTwo = makeHarness([], { construction: portRecord("port2") });
-  const plainOne = new TestDevice(bareOne.controller, bareOne.projection, makeAccessory({ statusWrites: bareOne.statusWrites }), bareOne.construction);
-  const plainTwo = new TestDevice(bareTwo.controller, bareTwo.projection, makeAccessory({ statusWrites: bareTwo.statusWrites }), bareTwo.construction);
+  const plainOne = new TestDevice(bareOne.controller, bareOne.projection, bareOne.accessory, bareOne.construction);
+  const plainTwo = new TestDevice(bareTwo.controller, bareTwo.projection, bareTwo.accessory, bareTwo.construction);
 
   plainOne.configure();
   plainTwo.configure();
@@ -712,7 +642,7 @@ test("an Enterprise hub port answers the option entries that name it, and its si
 test("one string carries a device's option scope, its MQTT topic tail, and the identity the webUI writes against", () => {
 
   const harness = makeHarness([], { construction: portRecord("port1"), options: ["Enable.Device.SyncName.AABBCCDDEE02-PORT1"] });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   /* The webUI server decorates its device list by calling this same function on the same record, so what a user writes an entry against in the browser is what
    * the plugin reads it back by. The literal beside it is what proves the spelling rather than agreeing with whatever the composition happens to answer.
@@ -738,7 +668,7 @@ test("an Enterprise port's identity is captured at adoption and survives a recor
    * capture exists to make impossible: an accessory's identity is frozen by every cache in the field, and a port's qualifier is half of the identity here.
    */
   const harness = makeHarness([portRecord("port2")], { construction: portRecord("port1") });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   assert.equal(device.id, "AABBCCDDEE02-PORT1");
 
@@ -752,7 +682,7 @@ test("an Enterprise port's identity is captured at adoption and survives a recor
 test("a typed delivery registration lands in the same map that cleanup drains", () => {
 
   const harness = makeHarness([]);
-  const device = new DeliveryDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new DeliveryDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.listen();
 
@@ -769,7 +699,7 @@ test("a typed delivery registration lands in the same map that cleanup drains", 
 test("a device with name synchronization off derives no name to synchronize, whatever its alias reads", () => {
 
   const harness = makeHarness([], { construction: record({ alias: "Front Door" }) });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
@@ -779,7 +709,7 @@ test("a device with name synchronization off derives no name to synchronize, wha
 test("a synchronized name is the alias as HomeKit's naming rules leave it", () => {
 
   const harness = makeHarness([], { construction: record({ alias: "Front Gate \u{1F6AA}" }), options: ["Enable.Device.SyncName"] });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
@@ -789,20 +719,19 @@ test("a synchronized name is the alias as HomeKit's naming rules leave it", () =
 test("an alias with nothing left under HomeKit's naming rules derives no name to synchronize", () => {
 
   const harness = makeHarness([], { construction: record({ alias: "..." }), options: ["Enable.Device.SyncName"] });
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ statusWrites: harness.statusWrites }), harness.construction);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
   assert.equal(device.synced(), undefined, "the rules empty this alias out, and a write the library would refuse must never be attempted");
 });
 
-test("a record whose alias empties out under HomeKit's naming rules is neither written nor reported as a change", async () => {
+test("a record whose alias empties out under HomeKit's naming rules is neither written nor reported as a change", async (t) => {
 
   const harness = makeHarness([record({ alias: "..." })], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
-  const infoWrites: { characteristic: string; value: unknown }[] = [];
-  const renames: string[] = [];
-  const device = new TestDevice(harness.controller, harness.projection, makeAccessory({ infoWrites, renames, statusWrites: harness.statusWrites }),
-    harness.construction);
+  // Every name Homebridge's own display-name setter is handed, so a rename the arm expects to be refused shows up here rather than passing silently.
+  const renames = t.mock.method(harness.accessory, "updateDisplayName");
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
@@ -813,30 +742,30 @@ test("a record whose alias empties out under HomeKit's naming rules is neither w
 
   assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [],
     "a name the rules empty out is not a change, so the loop has nothing to report and cannot report it on every update");
-  assert.deepEqual(renames, [], "and the accessory is never handed a name HomeKit would refuse");
-  assert.deepEqual(infoWrites.filter(write => [ "ConfiguredName", "Name" ].includes(write.characteristic)), [],
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), [], "and the accessory is never handed a name HomeKit would refuse");
+  assert.deepEqual(harness.infoWrites.filter(write => [ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID ].includes(write.characteristic)), [],
     "nor does the information service inside the accessory's services carry a name write, because the rename was never attempted");
 });
 
-test("a record whose alias changed re-synchronizes the accessory name through the loop and says so once", async () => {
+test("a record whose alias changed re-synchronizes the accessory name through the loop and says so once", async (t) => {
 
-  const harness = makeHarness([record({ alias: "Back Door" })], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
-  const infoWrites: { characteristic: string; value: unknown }[] = [];
-  const renames: string[] = [];
-  const device = new TestDevice(harness.controller, harness.projection,
-    makeAccessory({ infoWrites, name: "Front Door", renames, statusWrites: harness.statusWrites }), harness.construction);
+  const harness = makeHarness([record({ alias: "Back Door" })], { accessoryName: "Front Door", construction: record({ alias: "Front Door" }),
+    options: ["Enable.Device.SyncName"] });
+  // Every name Homebridge's own display-name setter is handed, so the arm reads how many times the rename reached it as well as what it was handed.
+  const renames = t.mock.method(harness.accessory, "updateDisplayName");
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
   await harness.loop();
 
-  /* The positive half of the arm above it. The distinguishing input is the name the information service answers: without one the current-name read falls back to
-   * the alias the tick has already written, the two compare equal, and no rename is ever attempted.
+  /* The positive half of the arm above it. The distinguishing input is the accessory's own name, which its information service answers and which differs from
+   * the alias the tick writes: an accessory already named for that alias would compare equal to it, and no rename would ever be attempted.
    */
   assert.equal(device.uda.alias, "Back Door", "the loop must have written the record the yield carried");
-  assert.deepEqual(renames, ["Back Door"], "the library's setter is handed the new name exactly once");
-  assert.deepEqual(infoWrites.filter(write => [ "ConfiguredName", "Name" ].includes(write.characteristic)),
-    [ { characteristic: "ConfiguredName", value: "Back Door" }, { characteristic: "Name", value: "Back Door" } ],
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), ["Back Door"], "the library's setter is handed the new name exactly once");
+  assert.deepEqual(harness.infoWrites.filter(write => [ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID ].includes(write.characteristic)),
+    [ { characteristic: Characteristic.ConfiguredName.UUID, value: "Back Door" }, { characteristic: Characteristic.Name.UUID, value: "Back Door" } ],
     "and the library writes the configured name and then the name onto the information service it found inside the accessory's own services");
   assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")),
     ["Test Hub [UA Hub]: Detected a name change on the controller; updating the HomeKit name to Back Door."],

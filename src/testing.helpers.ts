@@ -1,11 +1,17 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * testing.helpers.ts: The fixture builders more than one suite reads - the topology documents, the configuration rows, the managed device records, and the
+ * testing.helpers.ts: The fixture builders more than one suite reads - the Homebridge runtime and the builder of every Homebridge API double, the accessories
+ * built on that runtime and the readers of what HAP recorded on them, the topology documents, the configuration rows, the managed device records, and the
  * platform and controller doubles every suite stands its devices up over.
  *
- * Each export states one Access document or record shape, so every suite seeding that shape seeds the same one and a change to the shape is a change in one place.
- * A harness only one file reads stays in that file: the hub suite's real-HAP accessory, the device suite's write recorder, and the status feed's client stub are
- * instruments for one suite's questions rather than shared vocabulary, and moving them here would buy nothing.
+ * Every accessory, service and characteristic a suite touches is the real thing. This file loads the Homebridge runtime once, through homebridge-plugin-utils'
+ * Homebridge double, and makeTestApi builds every API double a suite uses over it, so an accessory is Homebridge's own PlatformAccessory over the hap-nodejs copy
+ * Homebridge loads, and the API the platform double hands production runs Homebridge's own bridge bookkeeping and records the calls Homebridge accepted. A suite's
+ * assertion about HomeKit state therefore reads what production would leave there, and the harness restates no part of HAP or Homebridge to get it.
+ *
+ * Each record builder states one Access document or record shape, so every suite seeding that shape seeds the same one and a change to the shape is a change in one
+ * place. A harness only one file reads stays in that file: the status feed's client stub is an instrument for one suite's questions rather than shared vocabulary,
+ * and moving it here would buy nothing.
  *
  * The record builders default to the members every suite that spells one agrees on, and to nothing beyond that. Overrides can add a member or restate one but
  * cannot take a defaulted member away, so a default carrying more than the agreed set would change what an arm reads in a suite that deliberately left that member
@@ -19,20 +25,147 @@
  */
 /* eslint-disable camelcase */
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
-import type { API, Logging } from "homebridge";
+import type { API, ChangeReason, CharacteristicValue, Logging } from "homebridge";
+import type { AccessAccessory, AccessAccessoryContext } from "./types.ts";
 import type { AccessBootstrapConfig, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
 import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { TestClock, silentLog } from "homebridge-plugin-utils/testing";
+import { TestClock, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
+import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
-import type { AccessAccessory } from "./types.ts";
 import type { AccessController } from "./controller/controller.ts";
 import type { AccessPlatform } from "./platform.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
-import type { TestMqttClient } from "homebridge-plugin-utils/testing";
+
+/**
+ * The Homebridge runtime every suite runs on: the hap-nodejs copy and the classes Homebridge loads from this repository's tree, resolved once for the whole process.
+ * Every API double makeTestApi builds runs on it, so every accessory a suite meets shares one HAP.
+ */
+export const runtime = await loadHomebridge(import.meta.url);
+
+/**
+ * The builder every Homebridge API double in the suites comes from: each call makes a TestHomebridgeApi over the runtime above and holds it for the check
+ * homebridge-plugin-utils' watchServerWarnings runs after each test.
+ *
+ * This module evaluates once per process, before any suite creates its tests, and the test runner gives each file a process of its own, so the builder's one
+ * after-each hook sits at the root of each file's test tree and checks every double built through it once each test's own cleanups have run. A warning Homebridge
+ * logged on a double that the test left untaken fails the test it is checked after, and one a before hook or a timer logs lands on the next test, as
+ * homebridge-plugin-utils documents for the check. A second builder in a file would lose its check in any test whose first check failed, so no suite calls
+ * watchServerWarnings itself and every double, the platform double's default included, comes from here.
+ */
+export const makeTestApi = watchServerWarnings(runtime);
+
+/**
+ * The runtime's HAP namespace, the one production reaches as `api.hap`.
+ */
+export const hap = runtime.hap;
+
+/**
+ * HAP's own Characteristic and Service classes, the namespaces a suite names a kind by (`Characteristic.On`, `Service.Switch`), each exported as a value and, below,
+ * as the instance type, the way the class itself serves as a value and a type.
+ */
+export const { Characteristic, Service } = hap;
+
+export type Characteristic = InstanceType<typeof hap.Characteristic>;
+
+export type Service = InstanceType<typeof hap.Service>;
+
+/**
+ * The accessory the accessory builder hands back: Homebridge's own PlatformAccessory over the runtime's HAP, carrying the plugin's typed context, made through an API
+ * double so it records every value change and characteristic warning HAP raises on it.
+ */
+export type TestAccessAccessory = TestPlatformAccessory<AccessAccessoryContext>;
+
+// The API double whose accessory class builds every accessory makeTestAccessory hands back. An accessory made here is placed on another API's bridge by that API's
+// own restore or registration, because each API double runs on the one runtime above and accepts any accessory of its PlatformAccessory class.
+const constructionApi = makeTestApi();
+
+// The counter behind each default accessory identity, so accessories built without a seed, same-named or not, never share a UUID: Homebridge skips a registration
+// whose UUID it already holds, which would leave a later accessory off the bridge in silence.
+let accessorySeeds = 0;
+
+// The next default seed, unique within the process.
+function nextSeed(): string {
+
+  accessorySeeds++;
+
+  return "homebridge-unifi-access.test-accessory." + accessorySeeds.toString();
+}
+
+/**
+ * The UUID an accessory seeded by `seed` carries, derived through HAP's own generator exactly as production derives each accessory's UUID, so a suite seeds a device's
+ * accessory by the same identity production composes for it: the device's decorated serial.
+ *
+ * @param seed - The identity the accessory's UUID derives from.
+ *
+ * @returns The UUID HAP generates for that seed.
+ */
+export function accessoryUuid(seed: string): string {
+
+  return hap.uuid.generate(seed);
+}
+
+/**
+ * Build an accessory through the construction API: Homebridge's own PlatformAccessory, born off the bridge as every new accessory is, with the AccessoryInformation
+ * service HAP gives it at construction and its Name set to the display name.
+ *
+ * @param displayName - The accessory's display name. Defaults to "Test Accessory".
+ * @param seed        - The identity its UUID derives from through {@link accessoryUuid}. Defaults to a seed unique within the process, so accessories a row builds
+ *                      without one never collide.
+ *
+ * @returns A fresh accessory, typed with the plugin's context.
+ */
+export function makeTestAccessory(displayName = "Test Accessory", seed = nextSeed()): TestAccessAccessory {
+
+  return new constructionApi.platformAccessory<AccessAccessoryContext>(displayName, accessoryUuid(seed));
+}
+
+// The reasons HAP stamps on the changes its event notifications and its update path raise, each checked against the member of HAP's own const enum that names it,
+// the form homebridge-plugin-utils' Homebridge double checks HAP's event names by, so a value that drifts from upstream fails the typecheck here. The enum itself is
+// out of reach at runtime under this project's module syntax.
+const EVENT_REASON = "event" satisfies `${ChangeReason.EVENT}`;
+const UPDATE_REASON = "update" satisfies `${ChangeReason.UPDATE}`;
+
+/**
+ * The event notifications one characteristic sent HomeKit through HAP's `sendEventNotification`, in the order it sent them. HAP stores each notified value as the
+ * characteristic's value and raises a change for it, so a row reads what HomeKit was told from this rather than from the final value, and a notification on another
+ * instance of the same kind elsewhere on the accessory stays out. HAP's reason enum is a string enum, so each change's reason widens to the string it carries for
+ * the comparison.
+ *
+ * @param accessory      - The accessory whose recorded changes to read.
+ * @param characteristic - The characteristic instance whose notifications to select.
+ *
+ * @returns The value of each notification the characteristic sent.
+ */
+export function eventsFrom(accessory: TestPlatformAccessory, characteristic: Characteristic): Nullable<CharacteristicValue>[] {
+
+  const matches = (change: { characteristic: Characteristic; reason: string }): boolean => (change.characteristic === characteristic) && (change.reason === EVENT_REASON);
+
+  return accessory.changes.filter(matches).map((change) => change.newValue);
+}
+
+/**
+ * The writes production made to one service through HAP's update path (`updateValue` and `updateCharacteristic`), each as the characteristic's UUID beside the
+ * value written, in the order HAP raised them. HAP raises a change for every such write, a write of an unchanged value included, so a row proving production wrote
+ * nothing reads this rather than the final values, and a row about the order one update reaches HomeKit in reads it across the service's characteristics. HomeKit's
+ * own writes and reads and the event notifications the service sent carry other reasons and stay out, as does a write to another service of the same kind
+ * elsewhere on the accessory. The service is selected by identity rather than its characteristics by kind, so a characteristic the service gains or loses inside
+ * the window keeps the writes HAP raised on it there. A row opens the window it reads with the accessory's `clearObservations()`.
+ *
+ * @param accessory - The accessory whose recorded changes to read.
+ * @param service   - The service instance whose writes to select.
+ *
+ * @returns Each update the service raised, as the characteristic's UUID and the value written.
+ */
+export function writesOn(accessory: TestPlatformAccessory, service: Service): { characteristic: string; value: Nullable<CharacteristicValue> }[] {
+
+  const matches = (change: { reason: string; service: Service }): boolean => (change.service === service) && (change.reason === UPDATE_REASON);
+
+  return accessory.changes.filter(matches).map((change) => ({ characteristic: change.characteristic.UUID, value: change.newValue }));
+}
 
 /**
  * The building every topology document below roots at, and the location an Enterprise hub is recognized as building-hosted by.
@@ -159,24 +292,12 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
 type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "registerAccessory" |
   "signal" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
 
-/* The Homebridge api members the plugin reads, each optional because an arm supplies only the ones its path reaches: the HAP namespace and the accessory class are
- * whatever the arm hands over (a real class, a string stub), and the accessory calls are recorders or no-ops.
- */
-export interface PlatformApiDouble {
-
-  hap?: unknown;
-  on?: (event: string, handler: () => void) => void;
-  platformAccessory?: unknown;
-  registerPlatformAccessories?: (pluginName: string, platformName: string, accessories: AccessAccessory[]) => void;
-  unregisterPlatformAccessories?: (pluginName: string, platformName: string, accessories: AccessAccessory[]) => void;
-  updatePlatformAccessories?: (accessories?: AccessAccessory[]) => void;
-}
-
 // What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
 export interface PlatformDoubleOptions {
 
   accessories?: AccessAccessory[];
-  api?: PlatformApiDouble;
+  // The Homebridge API double, for an arm that reads its calls or its events. An arm handing none gets one from makeTestApi, checked like every other.
+  api?: TestHomebridgeApi;
   clock?: Clock;
   config?: AccessOptions;
   // The feature-option entries an engine is built from, when the arm does not hand over an engine of its own.
@@ -190,8 +311,10 @@ export interface PlatformDoubleOptions {
 }
 
 /* Stand up the platform as a controller or a device reads it: every member the plugin reads, defaulted, with the accessory entry and exit reaching the same api calls
- * and the same list the real ones do. The one cast lives here, stated once: the platform class carries private fields nothing structural can satisfy, so a double
- * typed against the members the plugin reads is widened to the class at this boundary and nowhere else.
+ * and the same list the real ones do. The api is a Homebridge API double, so those calls run Homebridge's own checks and bridge bookkeeping, and an accessory the
+ * list holds has to be registered or restored on that api before an exit or a save reaches it, as under Homebridge. The casts live here, stated once: the platform
+ * class carries private fields nothing structural can satisfy, so a double typed against the members the plugin reads is widened to the class at this boundary and
+ * nowhere else, and the API double answers only the part of Homebridge's API the plugin reaches, so it is widened to that API at the same boundary.
  *
  * @param options - What the arm varies; see {@link PlatformDoubleOptions}.
  *
@@ -200,7 +323,7 @@ export interface PlatformDoubleOptions {
 export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessPlatform {
 
   const accessories = options.accessories ?? [];
-  const api = options.api ?? {};
+  const api = options.api ?? makeTestApi();
   const surface: PlatformSurface = {
 
     accessories,
@@ -212,9 +335,9 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
     log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
     registerAccessory: (accessory: AccessAccessory): void => {
 
-      api.registerPlatformAccessories?.(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       accessories.push(accessory);
-      api.updatePlatformAccessories?.(accessories);
+      api.updatePlatformAccessories(accessories);
     },
     signal: options.signal ?? new AbortController().signal,
     unregisterAccessory: (accessory: AccessAccessory): void => {
@@ -226,9 +349,9 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
         return;
       }
 
-      api.unregisterPlatformAccessories?.(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       accessories.splice(index, 1);
-      api.updatePlatformAccessories?.(accessories);
+      api.updatePlatformAccessories(accessories);
     },
     webhookListener: options.webhookListener ?? ((): HttpListener => {
 

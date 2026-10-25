@@ -15,17 +15,17 @@ import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts
 import { AccessApiError, AccessCapabilityError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, HapStatusError, Service, uuid } from "@homebridge/hap-nodejs";
+import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory,
+  writesOn } from "../testing.helpers.ts";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
-import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
-import { configRows, hubRecord, makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
-import type { AccessAccessory } from "../types.ts";
 import { AccessHub } from "./hub.ts";
 import { AccessReservedNames } from "../types.ts";
 import type { Mock } from "node:test";
+import type { TestAccessAccessory } from "../testing.helpers.ts";
 import type { TestMqttPublish } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
@@ -102,73 +102,23 @@ function carried<T extends Service>(serviceType: new (displayName?: string, subt
   return new serviceType("Test Hub " + subtype, subtype);
 }
 
-/* A HomeKit accessory over real HAP services: the lookups and the service mutations the plugin performs, backed by a plain list. The services are the genuine classes,
- * so what the shared service helpers do to them here is what they do in the field, and each member answers by HAP's own rule for it, so a lookup or an add that HAP
- * would answer differently fails here as it would there. A type lookup answers the first service of the type whatever its subtype, an identity lookup matches the
- * type and the subtype exactly, an add is refused with HAP's own message where HAP refuses it, and a removal takes out exactly the service it names.
+/* The HomeKit accessory a hub is stood up on: Homebridge's own PlatformAccessory over HAP, seeded by the hub's identifier and carrying the services a previous run
+ * left on it. Every lookup and service mutation the plugin performs on it is HAP's own, so what the shared service helpers do to it here is what they do in the
+ * field: a type lookup answers the first service of the type whatever its subtype, an identity lookup matches the type and the subtype exactly, an add is refused
+ * where HAP refuses it, and a removal takes out exactly the service it names.
+ *
+ * @param existing - The services a previous run left on the accessory, added in the order given.
+ *
+ * @returns The accessory.
  */
-function makeAccessory(services: Service[]): AccessAccessory {
+function makeAccessory(existing: Service[]): TestAccessAccessory {
 
-  const accessory = {
+  const accessory = makeTestAccessory("Test Hub", HUB_ID);
 
-    UUID: "uuid-" + HUB_ID,
-    addService: (service: Service): Service => {
+  for(const service of existing) {
 
-      // HAP admits a second service of a type only when the new one carries a subtype that no service of the type already carries.
-      for(const existing of services) {
-
-        if(existing.UUID !== service.UUID) {
-
-          continue;
-        }
-
-        if(!service.subtype) {
-
-          throw new Error("Cannot add a Service with the same UUID '" + existing.UUID +
-            "' as another Service in this Accessory without also defining a unique 'subtype' property.");
-        }
-
-        if(service.subtype === existing.subtype) {
-
-          throw new Error("Cannot add a Service with the same UUID '" + existing.UUID + "' and subtype '" + existing.subtype + "' as another Service in this Accessory.");
-        }
-      }
-
-      services.push(service);
-
-      return service;
-    },
-    context: {},
-    displayName: "Test Hub",
-    getService: (target: { UUID: string }): Service | undefined => services.find(service => service.UUID === target.UUID),
-    getServiceById: (target: { UUID: string }, subtype?: string): Service | undefined => {
-
-      return services.find(service => (service.UUID === target.UUID) && (service.subtype === subtype));
-    },
-    removeService: (service: Service): void => {
-
-      const index = services.indexOf(service);
-
-      if(index >= 0) {
-
-        services.splice(index, 1);
-      }
-    },
-    services,
-
-    /* Homebridge's own display-name setter, transcribed rather than inherited: the homebridge package exposes PlatformAccessory as a type alone, so the class cannot
-     * be constructed here. The transcription keeps the part of that method these arms read - a truthy name writes the accessory's display name, a falsy one writes
-     * nothing - and leaves out the HAP accessory beneath it, which no arm reads. The method is what the library's accessory rename writes through, so an arm
-     * reading a renamed accessory reads what Homebridge itself would have written.
-     */
-    updateDisplayName(name: string): void {
-
-      if(name) {
-
-        accessory.displayName = name;
-      }
-    }
-  } as unknown as AccessAccessory;
+    accessory.addService(service);
+  }
 
   return accessory;
 }
@@ -184,6 +134,8 @@ interface RecordedCommand {
 // What a stood-up hub looks like from a test's side: the hub itself, the deliveries and packets it can be handed, and what it commanded, published, and said.
 interface HubHarness {
 
+  // The accessory the hub is stood up on, which records every change HAP raises on its services, so an arm reads what the hub wrote and what HomeKit was sent.
+  accessory: TestAccessAccessory;
   // The time source every timer this hub arms is registered on, so an arm advances the hub's own timeline rather than the process's global timers.
   clock: TestClock;
   commands: RecordedCommand[];
@@ -206,6 +158,7 @@ interface HubHarness {
   requests: string[];
   // Every doorbell ring or cancel the hub dispatched through the official API, in the order it dispatched them.
   rings: { cancel: boolean; readerId: string }[];
+  // The accessory's own service list, HAP's array, so a creation or a retirement the hub makes is read here as it happens.
   services: Service[];
   setDoorState: (entry: AccessDoorStateEntry) => void;
   updates: unknown[];
@@ -215,6 +168,10 @@ interface HubHarness {
 // resolution and door-state read answer, the topology doors a UA Gate discovers its own from, the user's settings, and the record the hub is adopted on.
 interface HubOptions {
 
+  /* The accessory the hub is stood up on, for an arm that lays out the services a previous run left on it in an order HAP's own add would refuse. An arm naming
+   * none gets a fresh one carrying its existing services.
+   */
+  accessory?: TestAccessAccessory;
   credentials?: boolean;
   defer?: string;
   // The device roster the client's snapshot carries, keyed by unique_id, which is what the doorbell reader lookup searches.
@@ -355,7 +312,6 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const platform = makePlatformDouble({
 
-    api: { hap: { Characteristic, HapStatusError, Service, uuid } },
     /* The clock every timer this hub arms is registered on, stated here rather than left to the double's own default, because a hub reading a clock no arm holds is
      * a hub whose relocks and travels an advance would never reach.
      */
@@ -375,7 +331,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const settings = platform as { featureOptions: FeatureOptions };
 
   const doors = new Map((options.doors ?? []).map(door => [ door.unique_id, door ]));
-  const services: Service[] = [...(options.existing ?? [])];
+  const accessory = options.accessory ?? makeAccessory(options.existing ?? []);
 
   /* The official device surface, held only by a client an arm gave one to. The settings read is what seeds a reader whose record carries no configuration rows, the
    * settings write is what an access method switch dispatches, and the doorbell dispatch is what the trigger switch's manual direction sends, so each of them is
@@ -455,7 +411,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     platform
   });
 
-  const hub = new AccessHub(controller, projection as unknown as AccessDeviceProjection, makeAccessory(services), record,
+  const hub = new AccessHub(controller, projection as unknown as AccessDeviceProjection, accessory, record,
     options.hubless ? undefined : hubProjection as unknown as AccessHubProjection);
 
   // Construction narrates itself, and every arm but the ones about adoption reads from a clean slate rather than from what adoption said.
@@ -468,6 +424,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   return {
 
+    accessory,
     clock,
     commands,
     debugs,
@@ -527,7 +484,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     requests,
     rings,
-    services,
+    services: accessory.services,
     setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry),
     updates
   };
@@ -595,50 +552,6 @@ function deliverDoorState(harness: HubHarness, entry: AccessDoorStateEntry): voi
 
   harness.setDoorState(entry);
   harness.hub.refreshDoorState();
-}
-
-// Record every characteristic write a service receives, in the order it receives them, which is how one update is told from two.
-function recordWrites(service: Service): { characteristic: string; value: unknown }[] {
-
-  const writes: { characteristic: string; value: unknown }[] = [];
-  const update = service.updateCharacteristic.bind(service) as (characteristic: unknown, value: unknown) => Service;
-
-  (service as unknown as { updateCharacteristic: (characteristic: { UUID: string }, value: unknown) => Service }).updateCharacteristic =
-    (characteristic: { UUID: string }, value: unknown): Service => {
-
-      writes.push({ characteristic: characteristic.UUID, value });
-
-      return update(characteristic, value);
-    };
-
-  return writes;
-}
-
-/* Every value a service delivered on its programmable switch event as an event notification, in the order it delivered them.
- *
- * The characteristic's change event carries the reason the value moved, and a notification sent for a press is the one reason that reads as an event...a plain
- * update of the same value reads as an update. Filtering on that is what lets an arm tell a press HomeKit was notified of from a value somebody merely wrote.
- *
- * @param service - The service whose programmable switch event to listen to.
- *
- * @returns The values delivered as event notifications, oldest first.
- */
-function switchEvents(service: Service): unknown[] {
-
-  const events: unknown[] = [];
-
-  service.getCharacteristic(Characteristic.ProgrammableSwitchEvent).on("change", (change): void => {
-
-    /* The reason is typed as an ambient const enum, which this project's module settings forbid naming from another module, so the comparison is written against the
-     * string that enum member carries. The string is part of the characteristic's published change contract rather than an internal spelling of it.
-     */
-    if((change.reason as string) === "event") {
-
-      events.push(change.newValue);
-    }
-  });
-
-  return events;
 }
 
 // The garage door opener a hub configured for its own door.
@@ -712,7 +625,7 @@ function hasContactSensor(harness: HubHarness, subtype: string): boolean {
 /* What an access method switch answers when HomeKit asks it, read through the same get path HomeKit uses. The read proves the value HomeKit would see and never
  * that a handler is registered: HAP consults a handler only where one stands and answers from the characteristic's stored value otherwise, and the push path
  * writes that stored value on every pass, so an undressed switch answers exactly what a dressed one would. A registered handler is proven by a write through
- * handleSetRequest() asserted against the official update the harness records, which only a write registration can carry.
+ * triggerSet() asserted against the official update the harness records, which only a write registration can carry.
  *
  * @param harness - The hub to read.
  * @param subtype - The access method switch to ask.
@@ -721,7 +634,7 @@ function hasContactSensor(harness: HubHarness, subtype: string): boolean {
  */
 async function switchReads(harness: HubHarness, subtype: string): Promise<unknown> {
 
-  return switchService(harness, subtype).getCharacteristic(Characteristic.On).handleGetRequest();
+  return triggerGet(switchService(harness, subtype).getCharacteristic(Characteristic.On));
 }
 
 /* Restate a hub's own record the way the observe loop does, and hand it the device update that follows...which is how a bootstrap refresh reaches its handlers.
@@ -852,7 +765,7 @@ function warnCount(harness: HubHarness, sentence: string): number {
 // Write a target door state the way HomeKit does, and wait on the handler behind it.
 async function writeTarget(harness: HubHarness, target: number): Promise<void> {
 
-  await openerService(harness).getCharacteristic(Characteristic.TargetDoorState).handleSetRequest(target);
+  await triggerSet(openerService(harness).getCharacteristic(Characteristic.TargetDoorState), target);
 }
 
 // One write on a freshly stood-up door hub opener, and what that write dispatched to the library.
@@ -868,7 +781,7 @@ async function openerDispatch(options: HubOptions, target: number): Promise<Reco
 // Write a lock target the way HomeKit does, and wait on the handler behind it.
 async function writeLock(service: Service, target: number): Promise<void> {
 
-  await service.getCharacteristic(Characteristic.LockTargetState).handleSetRequest(target);
+  await triggerSet(service.getCharacteristic(Characteristic.LockTargetState), target);
 }
 
 // An unlock delivery naming one door, in the shape the live capture carries.
@@ -1198,7 +1111,7 @@ test("a switch is dressed the first time the hub holds it, a repeat pass registe
   /* The read alone cannot tell a dressed switch from an undressed one: the value push runs on every pass, and a characteristic carrying no handler answers whatever
    * was last pushed onto it. A write is what only a registration can carry, so the write is what says the switch was dressed on the pass that created it.
    */
-  await switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC).getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC).getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(harness.updates, [{ access_methods: { nfc: { enabled: "yes" } } }], "and it carries a write from HomeKit, which only a registered handler can");
   assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "and a capability the record has dropped retires its switch on the same delivery");
@@ -1366,18 +1279,19 @@ test("a dressed sensor's availability read consults the live composition, answer
 
   const availability = sensor.getCharacteristic(Characteristic.StatusActive);
 
-  assert.equal(await availability.handleGetRequest(), true, "a sensor dressed under a healthy controller reads available");
+  assert.equal(await triggerGet(availability), true, "a sensor dressed under a healthy controller reads available");
 
-  const writes = recordWrites(sensor);
+  // The accessory's record restarts here, so the read of its writes below holds only what followed the flip.
+  harness.accessory.clearObservations();
 
   /* Nothing pushes from here: no observer walk and no record delivery runs in this arm. A refusal that follows the flip can therefore only have come from the
    * handler consulting the composition, which is exactly what a dress that wrote the characteristic and registered nothing would fail by answering the cached value.
    */
   harness.health.isHealthy = false;
 
-  await assert.rejects(availability.handleGetRequest(), (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+  await assert.rejects(triggerGet(availability), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "a read taken after the connection moved is refused with the status HomeKit renders as Not Responding");
-  assert.deepEqual(writes, [], "with no push behind it at all");
+  assert.deepEqual(writesOn(harness.accessory, sensor), [], "with no push behind it at all");
 });
 
 test("every reader a hub wires answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
@@ -1418,7 +1332,7 @@ test("every reader a hub wires answers while the device can be reached and refus
 
     await Promise.all(held.map(async (reader): Promise<void> => {
 
-      assert.strictEqual(await reader.characteristic.handleGetRequest(), reader.value,
+      assert.strictEqual(await triggerGet(reader.characteristic), reader.value,
         "a reader answers while the device can be reached, and answers the value the characteristic holds");
     }));
 
@@ -1430,15 +1344,15 @@ test("every reader a hub wires answers while the device can be reached and refus
       const [handler] = call.arguments;
 
       // The rule refuses with HAP's own status error.
-      assert.throws(() => handler({}), { constructor: HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+      assert.throws(() => handler({}), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
 
-      await assert.rejects(characteristic.handleGetRequest(), (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+      await assert.rejects(triggerGet(characteristic), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
         "which HAP's read path renders as the status HomeKit shows as Not Responding");
     }));
 
     harness.health.isHealthy = true;
 
-    await assert.doesNotReject((first.this as Characteristic).handleGetRequest(),
+    await assert.doesNotReject(triggerGet(first.this as Characteristic),
       "and the next read after recovery answers, with nothing rewired");
   };
 
@@ -2115,7 +2029,7 @@ test("a confirmed access method write answers from the model before the controll
 
   const confirmed = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("yes") });
 
-  await switchService(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(switchService(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(confirmed.updates, [{ access_methods: { pin_code: { enabled: "yes" } } }], "the write carries the desired state in the official vocabulary");
 
@@ -2126,7 +2040,7 @@ test("a confirmed access method write answers from the model before the controll
   // The negative control: the controller answered success while leaving the setting where it was. Nothing was confirmed, so nothing is folded.
   const declined = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("no") });
 
-  await switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 
   assert.equal(await switchReads(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "a write the controller declined leaves the model where it was");
   assert.ok(declined.errors.some(line => line === LOG_PREFIX + "The controller declined the PIN access method change."), "and the decline is announced");
@@ -2155,7 +2069,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   const written = makeReader({ official: true, record: testHub({ ...reader, configs: row("no") }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
-  await switchService(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(switchService(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 
   assert.equal(await switchReads(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
@@ -2344,7 +2258,7 @@ test("a UA Gate's side door relocks through the close command, on its own MQTT t
   assert.equal(lineCount(gate, "Side door locked."), 1, "the close cancelled the side door's pending relock");
 
   // And the automation trigger reaches the same verb with the same door.
-  await switchService(gate, AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER).getCharacteristic(Characteristic.On).handleSetRequest(false);
+  await triggerSet(switchService(gate, AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER).getCharacteristic(Characteristic.On), false);
 
   assert.deepEqual(gate.commands.map(command => command.options), [ { actor: UNLOCK_ACTOR, doorId: SIDE_DOOR }, { doorId: SIDE_DOOR }, { doorId: SIDE_DOOR } ]);
   assert.deepEqual(gate.commands.map(command => command.verb), [ "unlock", "close", "close" ]);
@@ -2360,7 +2274,7 @@ test("a UA Gate's own lock automation trigger closes the gate", async () => {
   const gate = makeGate({ options: ["Enable.Hub.Lock.Trigger"] });
 
   // The switch mirrors the lock, so turning it off is asking for the locked direction.
-  await switchService(gate, AccessReservedNames.SWITCH_LOCK_TRIGGER).getCharacteristic(Characteristic.On).handleSetRequest(false);
+  await triggerSet(switchService(gate, AccessReservedNames.SWITCH_LOCK_TRIGGER).getCharacteristic(Characteristic.On), false);
 
   assert.deepEqual(gate.commands, [{ options: { doorId: MAIN_DOOR }, verb: "close" }]);
 });
@@ -2553,13 +2467,12 @@ test("a repeat pass leaves an unlocked door's lock trigger on and writes nothing
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "an unlocked door puts the trigger on");
 
-  const writes = recordWrites(trigger);
-
+  harness.accessory.clearObservations();
   restateRecord(harness, {});
 
-  assert.deepEqual(writes, [], "a repeat pass finds the switch dressed and writes nothing to it");
+  assert.deepEqual(writesOn(harness.accessory, trigger), [], "a repeat pass finds the switch dressed and writes nothing to it");
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "so the unlocked door is still showing");
-  assert.equal(await trigger.getCharacteristic(Characteristic.On).handleGetRequest(), true, "and the handler the creation registered still answers");
+  assert.equal(await triggerGet(trigger.getCharacteristic(Characteristic.On)), true, "and the handler the creation registered still answers");
 });
 
 test("a repeat pass does not halt a running travel", async () => {
@@ -2585,17 +2498,17 @@ test("a restated record with nothing changed writes nothing to any service and c
     makeGate({ options: ["Enable.Hub.Door.Service=Lock"] }) ]) {
 
     const before = [...harness.services];
-    const recorded = before.map(service => ({ service, writes: recordWrites(service) }));
 
+    harness.accessory.clearObservations();
     restateRecord(harness, {});
 
-    for(const { service, writes } of recorded) {
+    for(const service of before) {
 
-      assert.deepEqual(writes, [], "a pass over a record that did not change writes nothing to the " + service.displayName + " service");
+      assert.deepEqual(writesOn(harness.accessory, service), [], "a pass over a record that did not change writes nothing to the " + service.displayName + " service");
     }
 
     /* Read the services member for member rather than by count alone: a pass that re-created one instead of finding it would leave a list of the same length whose
-     * members the recorder never wrapped, and every write to those would go unseen above.
+     * new members the reads above never select, and every write to those would go unseen there.
      */
     assert.equal(harness.services.length, before.length, "and creates none beside the ones it found");
 
@@ -3404,12 +3317,14 @@ test("an opener reads the door position sensor where one is wired, and the lock 
 test("one delivery makes one opener update, from both of its readings and in the order HomeKit expects", () => {
 
   const opener = makeOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
-  const writes = recordWrites(openerService(opener));
+
+  opener.accessory.clearObservations();
 
   // One delivery moving the position and the relay at once, which is the shape that renders twice if each reading announces itself.
   deliverDoorState(opener, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
 
-  assert.deepEqual(writes, [ { characteristic: Characteristic.TargetDoorState.UUID, value: Characteristic.TargetDoorState.OPEN },
+  assert.deepEqual(writesOn(opener.accessory, openerService(opener)), [
+    { characteristic: Characteristic.TargetDoorState.UUID, value: Characteristic.TargetDoorState.OPEN },
     { characteristic: Characteristic.CurrentDoorState.UUID, value: Characteristic.CurrentDoorState.OPEN } ]);
 });
 
@@ -3452,7 +3367,7 @@ test("the opener reports no obstruction, and a door is presented as one accessor
   // The accessory arrives carrying the lock a previous run presented the door as, which is what gives the opener's acquisition a lock to replace.
   const opener = makeOpener({ existing: [new Service.LockMechanism("Test Hub")] });
 
-  assert.equal(await openerService(opener).getCharacteristic(Characteristic.ObstructionDetected).handleGetRequest(), false);
+  assert.equal(await triggerGet(openerService(opener).getCharacteristic(Characteristic.ObstructionDetected)), false);
   assert.equal(opener.services.filter(entry => entry.UUID === Service.LockMechanism.UUID).length, 0, "acquiring the opener removes the lock it replaces");
 
   const lock = makeHub();
@@ -3591,7 +3506,10 @@ test("a UA Gate switched to the lock presentation beside the side door lock it c
 
   assert.doesNotThrow(() => {
 
-    gate = makeGate({ existing, options: ["Enable.Hub.Door.Service=Lock"] });
+    /* HAP keeps one primary service on an accessory, the last one marked, and the hub marks its door service and then its doorbell. This gate carries no
+     * doorbell, so the main door's lock is the primary service the last assertion reads.
+     */
+    gate = makeGate({ existing, options: [ "Enable.Hub.Door.Service=Lock", "Disable.Hub.Doorbell" ] });
   }, "the gate stands up as a lock beside its side door lock");
 
   assert.ok(gate);
@@ -3606,8 +3524,20 @@ test("a UA Gate switched to the lock presentation beside the side door lock it c
  */
 test("a UA Gate presented as a lock writes its main door's state to the main door's lock even where the side door's lock comes first", () => {
 
-  const gate = makeGate({ existing: [ carried(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE), new Service.LockMechanism("Test Hub") ],
-    options: ["Enable.Hub.Door.Service=Lock"] });
+  /* HAP's own add refuses a service with no subtype beside one of its type, so the order this arm is about is laid out the way the cache reaches it. Homebridge
+   * restores a cached accessory through HAP's deserialize, whose sideload sets the accessory's services array to the saved list as it stands, with no add to
+   * refuse it. The locks are added here in the order HAP admits, the main door's first, and then swapped inside that same array.
+   */
+  const accessory = makeTestAccessory("Test Hub", HUB_ID);
+  const cachedMain = accessory.addService(new Service.LockMechanism("Test Hub"));
+  const cachedSide = accessory.addService(carried(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE));
+  const mainAt = accessory.services.indexOf(cachedMain);
+  const sideAt = accessory.services.indexOf(cachedSide);
+
+  accessory.services[mainAt] = cachedSide;
+  accessory.services[sideAt] = cachedMain;
+
+  const gate = makeGate({ accessory, options: ["Enable.Hub.Door.Service=Lock"] });
   const mainLock = lockService(gate);
   const sideLock = lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE);
 
@@ -3616,17 +3546,17 @@ test("a UA Gate presented as a lock writes its main door's state to the main doo
   /* The writes are read rather than the values they leave behind, because a lock nothing has written reads unsecured by HAP's own default, which is the reading
    * the delivery below carries.
    */
-  const mainWrites = recordWrites(mainLock);
-  const sideWrites = recordWrites(sideLock);
   const lockStates = (writes: { characteristic: string; value: unknown }[]): unknown[] => {
 
     return writes.filter(write => write.characteristic === Characteristic.LockCurrentState.UUID).map(write => write.value);
   };
 
+  gate.accessory.clearObservations();
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlocked" });
 
-  assert.deepEqual(lockStates(mainWrites), [Characteristic.LockCurrentState.UNSECURED], "the main door's unlock is written to the main door's lock");
-  assert.deepEqual(lockStates(sideWrites), [], "and nothing is written to the side door's");
+  assert.deepEqual(lockStates(writesOn(gate.accessory, mainLock)), [Characteristic.LockCurrentState.UNSECURED],
+    "the main door's unlock is written to the main door's lock");
+  assert.deepEqual(lockStates(writesOn(gate.accessory, sideLock)), [], "and nothing is written to the side door's");
   assert.equal(sideLock.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED, "which still reads secured");
 });
 
@@ -3854,7 +3784,7 @@ test("a hub creates a terminal input's sensor the moment its wiring reports live
 
   const availability = await Promise.all(TERMINAL_SUBTYPES.map(async (subtype): Promise<unknown> => {
 
-    return contactSensor(harness, subtype).getCharacteristic(Characteristic.StatusActive).handleGetRequest();
+    return triggerGet(contactSensor(harness, subtype).getCharacteristic(Characteristic.StatusActive));
   }));
 
   assert.deepEqual(availability, TERMINAL_SUBTYPES.map(() => true), "and every sensor is dressed with the availability it answers reads from");
@@ -4331,15 +4261,16 @@ test("a tamper-capable hub carries a raise to the characteristic, the warning, a
 test("a delivery that changes nothing writes nothing to a sensor the hub already holds, and a change reaches it through one write", () => {
 
   const harness = makeHub({ record: tamperUltra({ "tamper_event": "false" }) });
-  const writes = recordWrites(contactSensor(harness, AccessReservedNames.CONTACT_REX));
+  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_REX);
 
+  harness.accessory.clearObservations();
   refreshRecord(harness, tamperRows({ "tamper_event": "false" }));
 
-  assert.deepEqual(writes, [], "a restated record is not a change, so a sensor the hub already holds is written nowhere");
+  assert.deepEqual(writesOn(harness.accessory, sensor), [], "a restated record is not a change, so a sensor the hub already holds is written nowhere");
 
   refreshRecord(harness, tamperRows({ "tamper_event": "true" }));
 
-  assert.deepEqual(writes, [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }],
+  assert.deepEqual(writesOn(harness.accessory, sensor), [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }],
     "and a raise reaches it through the sweep's one write, which a configure path that re-dressed every sensor on each delivery would fail by writing three more");
 });
 
@@ -4463,38 +4394,39 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
     "the reading the record carries replaces the stale one");
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
     "nothing established renders normal, which a dressing that skipped the sensor it found would fail by leaving it raised");
-  assert.equal(await sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(), true,
+  assert.equal(await triggerGet(sensor.getCharacteristic(Characteristic.StatusActive)), true,
     "the handler is registered on a sensor the hub never created, which a creation-only dressing would fail by answering the cached false");
-  assert.strictEqual(await sensor.getCharacteristic(Characteristic.StatusTampered).handleGetRequest(), Characteristic.StatusTampered.NOT_TAMPERED,
+  assert.strictEqual(await triggerGet(sensor.getCharacteristic(Characteristic.StatusTampered)), Characteristic.StatusTampered.NOT_TAMPERED,
     "and its tamper status is answered by the handler registered on that same sensor");
 
   harness.health.isHealthy = false;
 
-  await assert.rejects(sensor.getCharacteristic(Characteristic.StatusActive).handleGetRequest(),
-    (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+  await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.StatusActive)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "and a read once the connection moved is refused rather than answered from what was last written");
-  await assert.rejects(sensor.getCharacteristic(Characteristic.StatusTampered).handleGetRequest(),
-    (status: unknown) => status === HAPStatus.SERVICE_COMMUNICATION_FAILURE, "and so is its tamper status");
+  await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.StatusTampered)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+    "and so is its tamper status");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
 });
 
 test("a tamper capability appearing mid-run dresses every standing sensor once, from the verdict the delivery brings", () => {
 
   const harness = makeHub({ record: wiredHub("on") });
-  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+  const sensors = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype));
 
-  for(const { sensor } of recorded) {
+  harness.accessory.clearObservations();
+
+  for(const sensor of sensors) {
 
     assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "hardware reporting no capability carries the characteristic on no sensor");
   }
 
   restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ], configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] });
 
-  for(const { sensor, writes } of recorded) {
+  for(const sensor of sensors) {
 
     assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
       "the capability arriving reaches every sensor already standing, reading the verdict that same delivery established");
-    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+    assert.deepEqual(writesOn(harness.accessory, sensor).filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
       [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }],
       "written exactly once, which a pass run ahead of the projection would fail by writing normal and then the verdict over it");
   }
@@ -4506,15 +4438,17 @@ test("a tamper capability appearing mid-run dresses every standing sensor once, 
 test("a tamper capability appearing while alerts are off dresses every standing sensor as not tampered", () => {
 
   const harness = makeHub({ record: wiredHub("on") });
-  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+  const sensors = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype));
+
+  harness.accessory.clearObservations();
 
   restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ], configs: wiredRows("on") });
 
-  for(const { sensor, writes } of recorded) {
+  for(const sensor of sensors) {
 
     assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
       "a capability arriving with no reading behind it still puts the characteristic on the sensor, reading normal");
-    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+    assert.deepEqual(writesOn(harness.accessory, sensor).filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
       [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.NOT_TAMPERED }],
       "written once, which dropping the write the attach earns would fail by leaving the characteristic bare");
   }
@@ -4528,9 +4462,11 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
 
   const harness = makeHub({ record: testHub({ capabilities: [ "is_hub", "tamper_proofing" ],
     configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] }) });
-  const recorded = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype)).map(sensor => ({ sensor, writes: recordWrites(sensor) }));
+  const sensors = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype));
 
-  for(const { sensor } of recorded) {
+  harness.accessory.clearObservations();
+
+  for(const sensor of sensors) {
 
     assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
       "adoption dresses every sensor from the reading the record arrived with");
@@ -4541,10 +4477,10 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
   // The rows stand; the capability alone is gone, which is what tells hardware that stopped reporting from a reading that changed.
   restateRecord(harness, { capabilities: ["is_hub"] });
 
-  for(const { sensor, writes } of recorded) {
+  for(const sensor of sensors) {
 
     assert.ok(!sensor.testCharacteristic(Characteristic.StatusTampered), "the capability going takes the characteristic off every sensor");
-    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID), [],
+    assert.deepEqual(writesOn(harness.accessory, sensor).filter(write => write.characteristic === Characteristic.StatusTampered.UUID), [],
       "and nothing is written to a characteristic the pass is about to remove, which a sweep run without its capability guard would fail");
   }
 
@@ -4554,11 +4490,11 @@ test("a tamper capability withdrawn mid-run takes the characteristic off every s
 
   restateRecord(harness, { capabilities: [ "is_hub", "tamper_proofing" ] });
 
-  for(const { sensor, writes } of recorded) {
+  for(const sensor of sensors) {
 
     assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.TAMPERED,
       "the capability returning puts the characteristic back, reading what the record still reports");
-    assert.deepEqual(writes.filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
+    assert.deepEqual(writesOn(harness.accessory, sensor).filter(write => write.characteristic === Characteristic.StatusTampered.UUID),
       [{ characteristic: Characteristic.StatusTampered.UUID, value: Characteristic.StatusTampered.TAMPERED }], "written exactly once for the return");
   }
 
@@ -4580,17 +4516,6 @@ test("a sensor the accessory arrived carrying loses its tamper characteristic at
     "and takes the characteristic off it, hardware reporting no capability having nothing to say through it");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "a cached characteristic is not a held verdict, so nothing is published for its going");
   assert.equal(lineCount(harness, TAMPER_UNREPORTED), 0, "and nothing is said about it");
-});
-
-test("the services an arm hands the harness are copied, so what the hub creates never reaches the arm's own list", () => {
-
-  const own: Service[] = [];
-  const harness = makeHub({ existing: own });
-
-  restateRecord(harness, { configs: [ ...EVERY_PAIR_LIVE, ...inputRows({ "input_state_rel": "on", "input_state_ren": "on", "input_state_rex": "on" }) ] });
-
-  assert.ok(harness.services.length > 0, "the record puts services on the accessory, which is what gives this arm something to look for");
-  assert.equal(own.length, 0, "the accessory grew and the list the arm handed over did not, which a harness holding it by reference would fail");
 });
 
 test("the side door position sensor announces its creation at adoption and its retirement when the option turns it off", () => {
@@ -4687,27 +4612,31 @@ test("a sensor the re-gate creates on the delivery that changes the verdict read
 test("a hub delivers a doorbell ring to HomeKit, its trigger switch, the topic, and the log, and delivers a ring that is not its own nowhere", async () => {
 
   const harness = makeHub({ options: ["Enable.Hub.Doorbell.Trigger"] });
-  const presses = switchEvents(doorbellService(harness));
+  const press = doorbellService(harness).getCharacteristic(Characteristic.ProgrammableSwitchEvent);
   const trigger = switchService(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
 
-  assert.deepEqual(presses, [], "nothing is delivered before a ring arrives");
+  harness.accessory.clearObservations();
+
+  assert.deepEqual(eventsFrom(harness.accessory, press), [], "nothing is delivered before a ring arrives");
 
   harness.emit("access.remote_view", ringPacket([]));
 
-  assert.deepEqual(presses, [Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS], "the ring reaches HomeKit as a single press");
+  assert.deepEqual(eventsFrom(harness.accessory, press), [Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS], "the ring reaches HomeKit as a single press");
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "the trigger switch mirrors the ring");
-  assert.equal(await trigger.getCharacteristic(Characteristic.On).handleGetRequest(), true, "and answers a read from the ring the hub is holding");
+  assert.equal(await triggerGet(trigger.getCharacteristic(Characteristic.On)), true, "and answers a read from the ring the hub is holding");
   assert.deepEqual(topicPayloads(harness, "doorbell"), ["true"], "the ring is published");
   assert.equal(lineCount(harness, "Doorbell ring detected."), 1, "and announced once");
 
   // A ring the controller attributed to another hub is not this hub's to answer.
   const foreign = makeHub({ options: ["Enable.Hub.Doorbell.Trigger"] });
-  const foreignPresses = switchEvents(doorbellService(foreign));
+  const foreignPress = doorbellService(foreign).getCharacteristic(Characteristic.ProgrammableSwitchEvent);
+
+  foreign.accessory.clearObservations();
 
   foreign.emit("access.remote_view", { data: { channel: "ring", connected_uah_id: "another-hub", device_id: READER_ID, door_guard_ids: [], request_id: "ring-9" },
     event: "access.remote_view" });
 
-  assert.deepEqual(foreignPresses, [], "a ring naming another hub reaches HomeKit nowhere");
+  assert.deepEqual(eventsFrom(foreign.accessory, foreignPress), [], "a ring naming another hub reaches HomeKit nowhere");
   assert.equal(switchService(foreign, AccessReservedNames.SWITCH_DOORBELL_TRIGGER).getCharacteristic(Characteristic.On).value, false,
     "and moves no trigger switch");
   assert.deepEqual(topicPayloads(foreign, "doorbell"), [], "and publishes nothing");
@@ -4726,13 +4655,16 @@ test("a hub delivers a doorbell ring to HomeKit, its trigger switch, the topic, 
   assert.ok(!hasDoorbell(makeHub({ options: ["Disable.Hub.Doorbell"] })), "a hub told to carry no doorbell carries none");
 
   const untriggered = makeHub();
-  const untriggeredPresses = switchEvents(doorbellService(untriggered));
+  const untriggeredPress = doorbellService(untriggered).getCharacteristic(Characteristic.ProgrammableSwitchEvent);
+
+  untriggered.accessory.clearObservations();
 
   assert.ok(!hasSwitch(untriggered, AccessReservedNames.SWITCH_DOORBELL_TRIGGER), "the trigger switch is off by default");
 
   untriggered.emit("access.remote_view", ringPacket([]));
 
-  assert.deepEqual(untriggeredPresses, [Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS], "and a ring still reaches HomeKit without one");
+  assert.deepEqual(eventsFrom(untriggered.accessory, untriggeredPress), [Characteristic.ProgrammableSwitchEvent.SINGLE_PRESS],
+    "and a ring still reaches HomeKit without one");
   assert.equal(lineCount(untriggered, "Doorbell ring detected."), 1, "and is still announced");
 });
 
@@ -4768,7 +4700,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
 
   assert.ok(trigger, "the hub should have configured the doorbell trigger switch");
 
-  await trigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(trigger.getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(harness.rings, [{ cancel: false, readerId: READER_ID }], "a write while the doorbell is quiet rings the reader that carries the call surface");
 
@@ -4785,13 +4717,13 @@ test("the doorbell trigger switch rings and cancels through the official API and
   const confirmed = makeHub({ devices: [READER_RECORD], official: true, options: ["Enable.Hub.Doorbell.Trigger"] });
   const confirmedTrigger = switchService(confirmed, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
 
-  await confirmedTrigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(confirmedTrigger.getCharacteristic(Characteristic.On), true);
   confirmed.emit("access.remote_view", ringPacket([]));
   confirmed.clock.advance(DOORBELL_RECONCILE_DELAY_MS);
 
   assert.equal(confirmedTrigger.getCharacteristic(Characteristic.On).value, true, "the ring the controller confirmed is what the switch settles onto");
 
-  await confirmedTrigger.getCharacteristic(Characteristic.On).handleSetRequest(false);
+  await triggerSet(confirmedTrigger.getCharacteristic(Characteristic.On), false);
 
   assert.deepEqual(confirmed.rings, [ { cancel: false, readerId: READER_ID }, { cancel: true, readerId: READER_ID } ],
     "and a write against a live ring cancels it through the same reader");
@@ -4799,7 +4731,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
   // A write that agrees with the mirror asks for what is already true, which is nothing to dispatch and nothing to complain about.
   const agreeing = makeHub({ devices: [READER_RECORD], official: true, options: ["Enable.Hub.Doorbell.Trigger"] });
 
-  await switchService(agreeing, AccessReservedNames.SWITCH_DOORBELL_TRIGGER).getCharacteristic(Characteristic.On).handleSetRequest(false);
+  await triggerSet(switchService(agreeing, AccessReservedNames.SWITCH_DOORBELL_TRIGGER).getCharacteristic(Characteristic.On), false);
 
   assert.deepEqual(agreeing.rings, [], "a write agreeing with the mirror dispatches nothing");
   assert.deepEqual(agreeing.errors, [], "and is not an error the user has to read");
@@ -4808,7 +4740,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
   const unattached = makeHub({ official: true, options: ["Enable.Hub.Doorbell.Trigger"] });
   const unattachedTrigger = switchService(unattached, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
 
-  await unattachedTrigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(unattachedTrigger.getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(unattached.rings, [], "a hub with no doorbell-capable reader dispatches nothing");
   assert.deepEqual(unattached.errors, [LOG_PREFIX + "Unable to ring the doorbell: no doorbell-capable reader is connected to this hub."]);
@@ -4821,7 +4753,7 @@ test("the doorbell trigger switch rings and cancels through the official API and
   const tokenless = makeHub({ options: ["Enable.Hub.Doorbell.Trigger"] });
   const tokenlessTrigger = switchService(tokenless, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
 
-  await tokenlessTrigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(tokenlessTrigger.getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(tokenless.rings, [], "a hub with no official path dispatches nothing");
   assert.deepEqual(tokenless.errors, [LOG_PREFIX + "Ringing the doorbell requires the official Access API, which needs an API token to be configured."]);
@@ -4837,7 +4769,7 @@ test("a doorbell ring the controller refuses says so and puts the switch back on
     ringRefusal: new Error("The controller refused the ring.") });
   const trigger = switchService(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER);
 
-  await trigger.getCharacteristic(Characteristic.On).handleSetRequest(true);
+  await triggerSet(trigger.getCharacteristic(Characteristic.On), true);
 
   assert.deepEqual(harness.rings, [{ cancel: false, readerId: READER_ID }], "the ring reached the reader, so the refusal is the controller's answer to it");
   assert.deepEqual(harness.errors, [LOG_PREFIX + "Unable to ring the doorbell: The controller refused the ring."]);
@@ -4875,11 +4807,10 @@ test("a doorbell capability appearing mid-run creates the doorbell and its trigg
 
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "a ring puts the trigger on");
 
-  const writes = recordWrites(trigger);
-
+  harness.accessory.clearObservations();
   restateRecord(harness, {});
 
-  assert.deepEqual(writes, [], "a repeat pass finds both dressed and writes nothing to either");
+  assert.deepEqual(writesOn(harness.accessory, trigger), [], "a repeat pass finds both dressed and writes nothing to either");
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, true, "so the pending ring is still showing");
   assert.equal(doorbellGets(), 1, "and the topic is registered once rather than a second time beside the first");
   assert.equal(await harness.mqttGet("doorbell"), "true", "answering the ring the hub is holding");
@@ -4893,8 +4824,7 @@ test("a doorbell capability appearing mid-run creates the doorbell and its trigg
 
 test("a synchronized alias reaches the information service's names and the accessory's display name", () => {
 
-  const harness = makeHub({ existing: [new Service.AccessoryInformation("Test Hub")], options: ["Enable.Device.SyncName"],
-    record: testHub({ alias: "Front Gate \u{1F6AA}" }) });
+  const harness = makeHub({ options: ["Enable.Device.SyncName"], record: testHub({ alias: "Front Gate \u{1F6AA}" }) });
   const information = harness.hub.accessory.getService(Service.AccessoryInformation);
 
   assert.ok(information, "the accessory was stood up carrying an information service, which is what a rename writes into");

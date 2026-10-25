@@ -9,10 +9,12 @@
 /* eslint-disable camelcase */
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { AccessBootstrapConfig, AccessDoorConfig } from "unifi-access";
-import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, readerRecord } from "./testing.helpers.ts";
+import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi,
+  readerRecord } from "./testing.helpers.ts";
 import { TestClock, TestMqttClient } from "homebridge-plugin-utils/testing";
 import type { AccessAccessory } from "./types.ts";
 import { FeatureOptions } from "homebridge-plugin-utils";
+import type { PlatformAccessory } from "homebridge";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "./policy.ts";
 import test from "node:test";
@@ -180,9 +182,8 @@ test("every option given to makePlatformDouble reaches the member it names, over
   const aborted = new AbortController();
   const clock = new TestClock(5);
   const engine = makePlatformDouble().featureOptions;
-  const handed = { hap: { marker: "p2" } };
-  // The platform double reads an accessory by identity alone, so a stub carrying only a UUID stands in for one.
-  const held = [{ UUID: "uuid-held" } as unknown as AccessAccessory];
+  const handed = makeTestApi();
+  const held: AccessAccessory[] = [makeTestAccessory("Held")];
   const lines: string[] = [];
   const listener = (): never => {
 
@@ -225,33 +226,41 @@ test("every option given to makePlatformDouble reaches the member it names, over
   assert.equal(platform.webhookPort, 4242, "the webhook port is the number the arm named");
 });
 
-test("the accessory entry and exit of makePlatformDouble reach the api calls and the list the arm holds, in the real platform's own order", () => {
+test("the accessory entry and exit of makePlatformDouble reach the api calls and the list the arm holds, in the real platform's own order", (t) => {
 
-  const a = { UUID: "uuid-a" } as unknown as AccessAccessory;
-  const b = { UUID: "uuid-b" } as unknown as AccessAccessory;
-  const calls: { platformName: string; pluginName: string; targets: string[]; verb: string }[] = [];
+  const a = makeTestAccessory("A");
+  const b = makeTestAccessory("B");
+  const api = makeTestApi();
   const held: AccessAccessory[] = [];
   /* What the list held at the moment Homebridge was told about it, rather than what it holds once the call has returned. The real platform registers an arrival,
    * adds it to the list, and then refreshes Homebridge with the list, and a departure goes the same way - unregistered, removed, then refreshed - so only a reading
-   * taken inside the refresh tells that order from the reverse one.
+   * taken inside the refresh tells that order from the reverse one. The API double records a copy of each list it is handed, so whether the refresh was handed the
+   * arm's own list is read by a spy on the real member, which hands the call on to Homebridge.
    */
   const updates: { count: number; sameList: boolean }[] = [];
-  const platform = makePlatformDouble({ accessories: held, api: {
+  const update = api.updatePlatformAccessories.bind(api);
 
-    registerPlatformAccessories: (pluginName: string, platformName: string, targets: AccessAccessory[]): void => {
+  t.mock.method(api, "updatePlatformAccessories", (accessories: PlatformAccessory[]): void => {
 
-      calls.push({ platformName, pluginName, targets: targets.map((target: AccessAccessory): string => target.UUID), verb: "register" });
-    },
-    unregisterPlatformAccessories: (pluginName: string, platformName: string, targets: AccessAccessory[]): void => {
+    updates.push({ count: held.length, sameList: accessories === held });
+    update(accessories);
+  });
 
-      calls.push({ platformName, pluginName, targets: targets.map((target: AccessAccessory): string => target.UUID), verb: "unregister" });
-    },
-    updatePlatformAccessories: (accessories?: AccessAccessory[]): void => void updates.push({ count: held.length, sameList: accessories === held })
-  } });
+  // Every entry and exit Homebridge accepted, in the order it accepted them: the names each was made under, the accessories it named, and which way it went.
+  const calls = (): { platformName: string; pluginName: string; targets: string[]; verb: string }[] => api.calls.flatMap((call) => {
+
+    if((call.kind !== "register") && (call.kind !== "unregister")) {
+
+      return [];
+    }
+
+    return [{ platformName: call.platformName, pluginName: call.pluginIdentifier, targets: call.accessories.map((target): string => target.UUID), verb: call.kind }];
+  });
+  const platform = makePlatformDouble({ accessories: held, api });
 
   platform.registerAccessory(a);
 
-  assert.deepEqual(calls, [{ platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: ["uuid-a"], verb: "register" }],
+  assert.deepEqual(calls(), [{ platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: [a.UUID], verb: "register" }],
     "an adoption announces exactly the arriving accessory, under the plugin's own names");
   assert.deepEqual(updates.at(-1), { count: 1, sameList: true }, "and the refresh hands back the arm's own list, carrying that accessory already");
   assert.deepEqual(held, [a], "which is the list the arm reads afterward");
@@ -263,15 +272,15 @@ test("the accessory entry and exit of makePlatformDouble reach the api calls and
 
   platform.unregisterAccessory(a);
 
-  assert.deepEqual(calls.at(-1), { platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: ["uuid-a"], verb: "unregister" },
+  assert.deepEqual(calls().at(-1), { platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: [a.UUID], verb: "unregister" },
     "a retirement names the accessory it was handed rather than the one that arrived last");
-  assert.equal(calls.length, 3, "one api call per entry and per exit, and none besides");
+  assert.equal(calls().length, 3, "one api call per entry and per exit, and none besides");
   assert.deepEqual(updates.at(-1), { count: 1, sameList: true }, "and the refresh hands back a list that accessory has left");
   assert.deepEqual(held, [b], "so the arm's list holds the one that stayed");
 
   platform.unregisterAccessory(a);
 
-  assert.equal(calls.length, 3, "retiring an accessory the list does not hold reaches no api call at all");
+  assert.equal(calls().length, 3, "retiring an accessory the list does not hold reaches no api call at all");
   assert.equal(updates.length, 3, "and no refresh either, which is what makes a repeated retirement harmless");
   assert.deepEqual(held, [b], "with the list left where it was");
 
@@ -283,7 +292,7 @@ test("the accessory entry and exit of makePlatformDouble reach the api calls and
 
   bare.unregisterAccessory(a);
 
-  assert.deepEqual(bare.accessories, [], "and retires from that one, reaching an api it has none of rather than throwing");
+  assert.deepEqual(bare.accessories, [], "and retires from that one, through the API double it built for itself");
 });
 
 test("makeControllerDouble with no options answers the members the plugin reads from a token-only controller", async () => {
