@@ -1105,6 +1105,32 @@ test("every frame carries the decorated serial whatever spelling the boundary re
   assert.equal(frames.every((frame) => !("serialNumber" in frame) || !frame.serialNumber.includes(":")), true);
 });
 
+test("a view connects to its registry entry's address read trimmed, and establishes exactly as an unpadded one does", async () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
+
+  const record = store.snapshot().devices.get("device1");
+  const { client } = makeClient(store, [{ doorId: "door1", record }]);
+  const frames: StatusEvent[] = [];
+  const hosts: string[] = [];
+  const feed = new AccessStatusFeed({ connect: async (options): Promise<StatusFeedClient> => {
+
+    hosts.push(options.host);
+
+    return client;
+  }, log: noopLog, push: (event): void => void frames.push(event) });
+
+  // The page sends the address as the configuration spells it, so a hand edit's padding arrives here intact, and unifi-access refuses a host carrying it.
+  feed.context(contextRequest([SERIAL_ONE], { address: " " + ADDRESS + " " }));
+  await feed.view(SERIAL_ONE);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(hosts, [ADDRESS], "the connect names the controller the plugin connects to rather than the padded spelling the configuration holds");
+  assert.deepEqual(forSerial(frames, SERIAL_ONE).map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+});
+
 test("the connection wiring emits only the offline truth on lost and re-pushes state on recovery and reboot", async () => {
 
   const store = createStateStore({});

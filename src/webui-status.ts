@@ -751,12 +751,15 @@ export class AccessStatusFeed {
     /* Connect over the composed identity. A live feed takes the library's default refresh cadence - the member is omitted entirely rather than disabled - so the
      * refresh failsafe keeps the panel honest when the notification channel goes quiet. The composed identity is spread first so the connection facts stated here
      * cannot be overwritten by it.
+     *
+     * The host is the entry's address read trimmed, because the plugin reads a listed controller's address trimmed and connects to the controller that names. The
+     * entry itself keeps the address as the page sent it, the configuration's own spelling, which is what the same-controller reuse compares.
      */
     let client: StatusFeedClient;
 
     try {
 
-      client = await this.#connect({ ...identity.identity, host: entry.address, log: this.#log, verifyTls: entry.verifyTls === true });
+      client = await this.#connect({ ...identity.identity, host: entry.address.trim(), log: this.#log, verifyTls: entry.verifyTls === true });
     } catch(error) {
 
       // A superseded establish's failure is nobody's news - the successor owns the target now.

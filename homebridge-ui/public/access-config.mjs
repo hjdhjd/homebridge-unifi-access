@@ -640,11 +640,18 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
   /* The scope identifier a configured address answers by, or null for an address there is no identity to compose from. A configured item's address is typed
    * unknown because a hand-edited configuration file can carry anything under that name, and the framework's repair throws on a value that is not a string - so
-   * the string test runs first and an item with no usable address simply has no address identity. An empty string names no identity either: the repair answers it
-   * empty, the engine reads an empty identifier as addressing nothing, and a scope move refuses one as its destination with a throw, so it is answered null here
-   * rather than handed on. Every reader of that identity here asks through this one walk.
+   * the string test runs first and an item with no usable address simply has no address identity. The address is read trimmed, because the plugin composes a
+   * controller's identity from its trimmed address and the UI server stamps a token-only controller's row the same way, so the options of an entry padded by hand
+   * are written, and moved by a save or by the migration, under the name the runtime reads. An address left empty by the trim names no identity either: the repair
+   * answers an empty string empty, the engine reads an empty identifier as addressing nothing, and a scope move refuses one as its destination with a throw, so it
+   * is answered null here rather than handed on. Every reader of that identity here asks through this one walk.
    */
-  const addressIdentity = (address) => (((typeof address === "string") && address.length) ? scopeSafeId(address) : null);
+  const addressIdentity = (address) => {
+
+    const trimmed = (typeof address === "string") ? address.trim() : "";
+
+    return trimmed.length ? scopeSafeId(trimmed) : null;
+  };
 
   // The scope identifier a controller serial answers by, or null where the page learned none. A serial arrives in the decorated scope form the UI server stamped
   // the controller's row with, so it is read for presence and never repaired; an empty string is the absence a form field hands over, not a name.

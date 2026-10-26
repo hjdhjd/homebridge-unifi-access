@@ -52,6 +52,9 @@ const TOKEN_IDENTITY = "1-2-3-4";
 const SECOND_ADDRESS = "5.6.7.8";
 const SECOND_IDENTITY = "5-6-7-8";
 
+// The first of those addresses as a hand edit can leave it, padded with spaces. The plugin reads an address trimmed, so this answers by the same identity.
+const PADDED_TOKEN_ADDRESS = " " + TOKEN_ADDRESS + " ";
+
 // The scope identity the address at the top of this file answers by, spelled as a literal for the same reason and asserted against the repair the first time it is read.
 const ADDRESS_IDENTITY = "10-0-0-1";
 
@@ -277,6 +280,25 @@ test("an item carrying only address-keyed entries is awaiting migration, and its
   assert.equal(pairEngine.value("Mqtt.Topic", undefined, OTHER_MAC), LEGACY_TOPIC, "and the second item's own value lands at its own, rather than being skipped");
   assert.deepEqual(pair.options?.filter((entry) => [ TOKEN_IDENTITY, SECOND_IDENTITY ].some((id) => entry.toLowerCase().includes(id))), [],
     "and neither address identity is left holding anything");
+});
+
+test("a padded item is awaiting migration by its trimmed identity, and its entries move onto the MAC address its stored address resolved", () => {
+
+  const telemetry = "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY;
+  const topic = "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC;
+  const credentialed = { ...CREDENTIALS, address: PADDED_TOKEN_ADDRESS };
+
+  // The entries sit under the trimmed identity, which is the name the runtime reads and the UI server stamps the controller's row with, so the page writes there.
+  assert.deepEqual(controllersAwaitingMigration({ controllers: [credentialed], options: [telemetry] }).map((entry) => entry.address), [PADDED_TOKEN_ADDRESS],
+    "the item is named by the entry under its trimmed identity, and handed to the probe with its address as stored, since the probe's answer is keyed by it");
+
+  // The wiring keys each resolved MAC address by the address the probe was handed, so the map holds the stored spelling.
+  const moved = migrated({ controllers: [credentialed], options: [ telemetry, topic ] }, new Map([[ PADDED_TOKEN_ADDRESS, CONTROLLER_MAC ]]));
+  const engine = engineWith(moved.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, CONTROLLER_MAC), true, "the bare enable moved onto the controller's serial");
+  assert.equal(engine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "and so did the entry carrying a value");
+  assert.deepEqual(moved.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [], "and nothing is left under the trimmed identity");
 });
 
 test("a partial credential pair is never probed either, with or without a token beside it", () => {
@@ -819,6 +841,38 @@ test("a serial or an address that names no identity moves nothing, and an item a
     "an item that answers by a different serial names different hardware, whose entries stay where a removal without a sweep would leave them");
   assert.equal(engine.value("Mqtt.Topic", undefined, OTHER_MAC), ADDRESS_TOPIC, "while the address's entries land under the serial the item answers by");
   assert.notEqual(replacement.options, bothNames, "and the patch answers with an array of its own rather than the one it was given");
+});
+
+test("a save reads a padded address by its trimmed identity, carrying entries onto that name and from it as the runtime names the controller", () => {
+
+  const telemetry = "Enable.Controller.Publish.Telemetry." + TOKEN_IDENTITY;
+  const topic = "Enable.Mqtt.Topic." + TOKEN_IDENTITY + "=" + ADDRESS_TOPIC;
+
+  // (i) The destination: a token-only save writing a padded address over another carries the edited item's entries onto the trimmed identity, while the item
+  // it writes stores the address as given.
+  const onto = saved({ controllers: [{ address: SECOND_ADDRESS, tokens: TOKENS }], options: ["Enable.Mqtt.Topic." + SECOND_IDENTITY + "=" + ADDRESS_TOPIC] },
+    { address: PADDED_TOKEN_ADDRESS, originalAddress: SECOND_ADDRESS, tokens: TOKENS });
+
+  assert.equal(engineWith(onto.options).value("Mqtt.Topic", undefined, TOKEN_IDENTITY), ADDRESS_TOPIC,
+    "the entry lands under the trimmed identity, the name the runtime reads and the UI server stamps the controller's row with");
+  assert.deepEqual(onto.options?.filter((entry) => entry.toLowerCase().includes(SECOND_IDENTITY)), [], "and nothing is left under the address the save moved from");
+  assert.deepEqual(onto.controllers, [{ address: PADDED_TOKEN_ADDRESS, tokens: TOKENS }], "and the item stores its padded address as given");
+
+  // (ii) The source: a padded token-only item whose entries the page wrote under its trimmed identity gains a credential pair, and the entries follow it onto the
+  // serial its validation answered.
+  const item = { address: PADDED_TOKEN_ADDRESS, tokens: TOKENS };
+  const added = saved({ controllers: [item], options: [ telemetry, topic ] },
+    { ...CREDENTIALS, address: TOKEN_ADDRESS, originalAddress: PADDED_TOKEN_ADDRESS, serial: CONTROLLER_MAC, tokens: TOKENS });
+  const engine = engineWith(added.options);
+
+  assert.equal(engine.test("Controller.Publish.Telemetry", undefined, CONTROLLER_MAC), true, "the bare enable follows the controller onto the serial it answers by");
+  assert.equal(engine.value("Mqtt.Topic", undefined, CONTROLLER_MAC), ADDRESS_TOPIC, "and so does the entry carrying a value");
+  assert.deepEqual(added.options?.filter((entry) => entry.toLowerCase().includes(TOKEN_IDENTITY)), [], "and nothing is left under the trimmed identity");
+
+  // (iii) A token-only save writing the trimmed address over the padded one writes the identity the item already answered by, so there is no move to make.
+  assert.ok(!Object.hasOwn(saved({ controllers: [item], options: [ telemetry, topic ] },
+    { address: TOKEN_ADDRESS, originalAddress: PADDED_TOKEN_ADDRESS, tokens: TOKENS }), "options"),
+  "the padded and the trimmed spelling answer by one identity, so the save composes no options member");
 });
 
 test("the first-run save composes a complete identity as one patch and composes nothing for an incomplete one", () => {

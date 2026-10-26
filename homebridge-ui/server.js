@@ -187,6 +187,12 @@ class PluginUiServer extends HomebridgePluginUiServer {
         return { kind: "error", message: identity.error };
       }
 
+      /* The address is read trimmed, because the plugin reads a listed controller's address trimmed: the connect below and the token-only row's identity name the
+       * controller the plugin connects to, and the options the page writes under that identity are the ones the runtime reads. A hand edit can leave the address
+       * something other than a string, which is passed on as it stands so the client refuses it inside the try and the page reads the failure as an answer.
+       */
+      const address = (typeof controller.address === "string") ? controller.address.trim() : controller.address;
+
       try {
 
         /* Connect to the controller. AccessClient.connect() authenticates, fetches what the identity can reach, and seeds the state model as one ready-or-throws
@@ -196,7 +202,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
          *
          * The composed identity is spread first so the connection facts stated here cannot be overwritten by it.
          */
-        const client = await AccessClient.connect({ ...identity.identity, host: controller.address, log: log, refreshIntervalMs: false,
+        const client = await AccessClient.connect({ ...identity.identity, host: address, log: log, refreshIntervalMs: false,
           verifyTls: controller.verifyTls === true });
 
         try {
@@ -220,7 +226,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
             /* eslint-disable camelcase */
             const controllerRecord = {
 
-              alias: controller.address,
+              alias: address,
               capabilities: [],
               device_type: "",
               display_model: "controller",
@@ -228,9 +234,9 @@ class PluginUiServer extends HomebridgePluginUiServer {
               is_online: true,
               mac: "",
               model: "",
-              name: controller.address,
-              serialNumber: controllerIdentity({ address: controller.address }),
-              unique_id: controller.address
+              name: address,
+              serialNumber: controllerIdentity({ address }),
+              unique_id: address
             };
             /* eslint-enable camelcase */
 

@@ -76,12 +76,15 @@ const accessConfig = async () => {
  * configuration gate asks them separately: an address is where to connect, and an identity is how, and a configuration missing either is one the platform skips.
  * The framework injects our primary platform-config entry, so this is a pure predicate over the persisted config rather than a reach into the feature-options page's
  * state.
+ *
+ * The address is read as the platform reads it: only a string is an address, and it is read trimmed, so an address of spaces alone, or a hand edit that left
+ * something other than a string, is a configuration the platform skips and one first run asks for again.
  */
 const firstRunIsRequired = ({ config }) => {
 
   const controller = primaryController(config);
 
-  return !controller?.address?.length || !hasValidIdentity(controller);
+  return (typeof controller?.address !== "string") || !controller.address.trim().length || !hasValidIdentity(controller);
 };
 
 // Initialize our first run screen with any information from our existing configuration. The injected config is the primary platform entry; we pre-populate the form
