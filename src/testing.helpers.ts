@@ -31,6 +31,7 @@ import type { AccessBootstrapConfig, AccessClient, AccessDeviceEntryConfig, Acce
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
+import { AccessoryPersistence, FeatureOptions } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { TestClock, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
@@ -38,7 +39,6 @@ import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { AccessController } from "./controller/controller.ts";
 import type { AccessPlatform } from "./platform.ts";
-import { FeatureOptions } from "homebridge-plugin-utils";
 
 /**
  * The Homebridge runtime every suite runs on: the hap-nodejs copy and the classes Homebridge loads from this repository's tree, resolved once for the whole process.
@@ -289,8 +289,8 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
  * reads of its platform, so a member the plugin starts reading enters here by the same grep, and a double missing a listed member is a compile error in this one
  * place rather than a silent fallback at every site that stands one up.
  */
-type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "registerAccessory" |
-  "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
+type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "persistence" |
+  "registerAccessory" | "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
 
 // What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
 export interface PlatformDoubleOptions {
@@ -324,20 +324,27 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
 
   const accessories = options.accessories ?? [];
   const api = options.api ?? makeTestApi();
+  const clock = options.clock ?? new TestClock();
+  /* The real persistence, built over the double's api and on its clock as the platform builds its own over Homebridge's API and the plugin's clock, so every save
+   * production asks for lands among the api's update calls once its window comes due on that clock, and the exit below drops a save still pending for the
+   * accessory leaving. The persistence reaches only the part of the API homebridge-plugin-utils names for it, which the api double carries, so it takes the double
+   * as it is.
+   */
+  const persistence = new AccessoryPersistence({ api, clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
   const surface: PlatformSurface = {
 
     accessories,
     api: api as unknown as API,
-    clock: options.clock ?? new TestClock(),
+    clock,
     config: options.config ?? { controllers: [], options: [] },
     featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, options.entries ?? []),
     localAddressFor: options.localAddressFor ?? (async (): Promise<string> => "10.0.0.7"),
     log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
+    persistence,
     registerAccessory: (accessory: AccessAccessory): void => {
 
       api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       accessories.push(accessory);
-      api.updatePlatformAccessories(accessories);
     },
     signal: options.signal ?? new AbortController().signal,
     // A double never begins a shutdown of its own, so an arm ends the platform it stands up by aborting the signal it handed over.
@@ -351,9 +358,8 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
         return;
       }
 
-      api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      persistence.unregister([accessory]);
       accessories.splice(index, 1);
-      api.updatePlatformAccessories(accessories);
     },
     webhookListener: options.webhookListener ?? ((): HttpListener => {
 
@@ -363,6 +369,20 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
   };
 
   return surface as unknown as AccessPlatform;
+}
+
+/**
+ * The saves Homebridge accepted on an API double, in the order it accepted them, each read as the UUIDs of the accessories it named. A save is one update call, so
+ * the accessories one save window gathered read as one entry however often each was marked, and an accessory off the bridge, which the persistence never hands
+ * Homebridge, reads in none.
+ *
+ * @param api - The API double whose calls to read.
+ *
+ * @returns The UUIDs each save named.
+ */
+export function savesOn(api: TestHomebridgeApi): string[][] {
+
+  return api.calls.flatMap((call) => (call.kind === "update") ? [call.accessories.map((accessory) => accessory.UUID)] : []);
 }
 
 // The controller double.

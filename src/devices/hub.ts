@@ -13,8 +13,8 @@ import type { CharacteristicValue, Service } from "homebridge";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { capabilityGate, findService, formatErrorMessage, guardedDispatch, setServiceName, updateServices, validCharacteristic,
-  validService } from "homebridge-plugin-utils";
+import { capabilityGate, findService, formatErrorMessage, guardedDispatch, presenceChanged, setServiceName, updateServices,
+  validCharacteristic } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessConsumedWebhookDelivery } from "./device.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -578,12 +578,11 @@ export class AccessHub extends AccessDevice {
 
     /* Clean out the context object in case it's been polluted somehow, then record what an accessory carries for the life of the pairing: the hardware it names,
      * the controller that created it, and the device identity it was minted under - the last being what tells a startup sweep that this accessory is the
-     * identity's own rather than one created under an earlier form.
+     * identity's own rather than one created under an earlier form. The record is written through the persistence, which marks the accessory for the next save as
+     * it writes, and the save window that mark opens or joins carries whatever the rest of adoption sets up on the accessory with it.
      */
     this.accessory.context = {};
-    this.accessory.context.controller = this.controller.ownershipKey;
-    this.accessory.context.id = this.id;
-    this.accessory.context.mac = this.mac;
+    this.platform.persistence.persist(this.accessory, { controller: this.controller.ownershipKey, id: this.id, mac: this.mac });
 
     // A door left on the default relock behavior is not a choice the user made, so it is said at debug level. A configured interval is a deviation, and says so.
     if(this.lockDelayInterval === undefined) {
@@ -671,7 +670,7 @@ export class AccessHub extends AccessDevice {
     for(const accessMethod of accessMethods) {
 
       // Validate whether we should have this service enabled.
-      const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + accessMethod.name,
+      const { service, transition } = this.validService({ name: this.accessoryName + " " + accessMethod.name,
         serviceType: this.hap.Service.Switch, subtype: accessMethod.subtype,
         validate: isReader(this.uda) && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice) });
 
@@ -1117,7 +1116,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbell({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName, serviceType: this.hap.Service.Doorbell,
+    const { service, transition } = this.validService({ name: this.accessoryName, serviceType: this.hap.Service.Doorbell,
       validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell") });
 
     if(!service) {
@@ -1176,7 +1175,7 @@ export class AccessHub extends AccessDevice {
       const gate = capabilityGate({ capability: facts.wired === true, toggle: selected.includes(member) });
 
       // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
-      const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + label, serviceType: this.hap.Service.ContactSensor,
+      const { service, transition } = this.validService({ name: this.accessoryName + " " + label, serviceType: this.hap.Service.ContactSensor,
         subtype: reservedId, validate: (hasService: boolean) => {
 
           const isValid = gate(hasService);
@@ -1222,9 +1221,15 @@ export class AccessHub extends AccessDevice {
 
     /* The tamper characteristic's presence follows the capability in both directions on every pass: the library attaches it where the hardware reports tampering and
      * removes it where the hardware stopped, so a sensor dressed before the capability arrived gains the characteristic and one carried from a cache the hardware
-     * does not back loses it. The transition the call answers is what decides the one write below.
+     * does not back loses it. The transition the call answers is what decides the one write below, and the accessory is marked for the next save whenever the
+     * characteristic comes or goes, since that changes what Homebridge's accessory cache holds.
      */
     const tamper = validCharacteristic({ characteristic: this.hap.Characteristic.StatusTampered, service, validate: isTamperCapable(this.uda) });
+
+    if(presenceChanged(tamper)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
 
     if(dressing) {
 
@@ -1285,7 +1290,7 @@ export class AccessHub extends AccessDevice {
     const gate = capabilityGate({ capability: this.#positionReported, toggle: this.#selectedSensors().includes("DPS") });
 
     // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + DPS_LABEL, serviceType: this.hap.Service.ContactSensor,
+    const { service, transition } = this.validService({ name: this.accessoryName + " " + DPS_LABEL, serviceType: this.hap.Service.ContactSensor,
       subtype: AccessReservedNames.CONTACT_DPS, validate: (hasService: boolean) => {
 
         const isValid = gate(hasService);
@@ -1319,7 +1324,7 @@ export class AccessHub extends AccessDevice {
     // Validate whether we should have this service enabled. The selection is read here, on every configure pass, exactly as every other sensor's is, and a true
     // verdict acquires the sensor, creating it where the accessory carries none.
     const selected = this.#selectedSensors().includes("SideDoorDPS");
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName + " " + SIDE_DOOR_DPS_LABEL,
+    const { service, transition } = this.validService({ name: this.accessoryName + " " + SIDE_DOOR_DPS_LABEL,
       serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE, validate: (hasService: boolean) => {
 
         if(!selected && hasService) {
@@ -1352,12 +1357,12 @@ export class AccessHub extends AccessDevice {
 
       if(serviceType !== selectedService) {
 
-        validService({ accessory: this.accessory, name: this.accessoryName, serviceType, validate: false });
+        this.validService({ name: this.accessoryName, serviceType, validate: false });
       }
     }
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.accessoryName, serviceType: selectedService, validate: isHub(this.uda) });
+    const { service, transition } = this.validService({ name: this.accessoryName, serviceType: selectedService, validate: isHub(this.uda) });
 
     if(!service) {
 
@@ -1388,7 +1393,12 @@ export class AccessHub extends AccessDevice {
     const lockState = this._hkLockState;
 
     this._hkLockState = -1;
-    setServiceName(service, this.accessoryName);
+
+    if(setServiceName(service, this.accessoryName)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     this.hkLockState = lockState;
 
     service.setPrimaryService(true);
@@ -1528,7 +1538,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.#doorbellTriggerName, serviceType: this.hap.Service.Switch,
+    const { service, transition } = this.validService({ name: this.#doorbellTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER, validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
 
     if(!service) {
@@ -1614,7 +1624,11 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.#doorbellTriggerName);
+    if(setServiceName(service, this.#doorbellTriggerName)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1624,7 +1638,7 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.#lockTriggerName, serviceType: this.hap.Service.Switch,
+    const { service, transition } = this.validService({ name: this.#lockTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER, validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
 
     if(!service) {
@@ -1657,7 +1671,11 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.#lockTriggerName);
+    if(setServiceName(service, this.#lockTriggerName)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1666,7 +1684,7 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.#sideDoorLockName, serviceType: this.hap.Service.LockMechanism,
+    const { service, transition } = this.validService({ name: this.#sideDoorLockName, serviceType: this.hap.Service.LockMechanism,
       subtype: AccessReservedNames.LOCK_DOOR_SIDE, validate: this.hints.hasSideDoor });
 
     if(!service) {
@@ -1690,7 +1708,12 @@ export class AccessHub extends AccessDevice {
     // Initialize the lock from the relay reading. The backing value is first put where no reading can equal it, so the setter below writes the service even when the
     // state is the one we were already in.
     this._hkSideDoorLockState = -1;
-    setServiceName(service, this.#sideDoorLockName);
+
+    if(setServiceName(service, this.#sideDoorLockName)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     this.hkSideDoorLockState = this.hubSideDoorLockState;
   }
 
@@ -1700,7 +1723,7 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = validService({ accessory: this.accessory, name: this.#sideDoorLockTriggerName, serviceType: this.hap.Service.Switch,
+    const { service, transition } = this.validService({ name: this.#sideDoorLockTriggerName, serviceType: this.hap.Service.Switch,
       subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
 
     if(!service) {
@@ -1733,7 +1756,11 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    setServiceName(service, this.#sideDoorLockTriggerName);
+    if(setServiceName(service, this.#sideDoorLockTriggerName)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 

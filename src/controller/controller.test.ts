@@ -3,16 +3,16 @@
  * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
+import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, AccessConfigurationError, createStateStore,
   selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
-import { APIEvent, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
 import { EventEmitter, on } from "node:events";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
-import { ROOT_ID, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi } from "../testing.helpers.ts";
+import { ROOT_ID, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn } from "../testing.helpers.ts";
 import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
@@ -156,6 +156,8 @@ interface ControllerHarness {
   readonly registered: string[];
   // Hand cached accessories to the accessory list through Homebridge's own restore loop, which bridges each, so a later exit or save reaches one Homebridge holds.
   restore: (...cached: AccessAccessory[]) => void;
+  // The UUIDs each save Homebridge accepted named, in the order it accepted them.
+  readonly saves: string[][];
   shutdown: AbortController;
   // The UUIDs each unregister Homebridge accepted named, in the order it accepted them.
   readonly unregistered: string[];
@@ -216,6 +218,10 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
 
       api.restorePlatformAccessories({ accessories: cached, platform: { configureAccessory: (restored): void => void accessories.push(restored) },
         platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+    },
+    get saves(): string[][] {
+
+      return savesOn(api);
     },
     shutdown,
     get unregistered(): string[] {
@@ -969,6 +975,33 @@ test("a device adopted to a constructed accessory is spared by the sweep and sta
    * reduction normalizes it on the way in - which is what makes the accessories the sweep arms below hand-write spell it the same way.
    */
   assert.deepEqual(configured.accessory.context, { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
+});
+
+test("an adoption saves the accessory it registered once, a window after its device stamped the context and set up its services", async (t) => {
+
+  const store = createStateStore({});
+  const record = plainHubRecord();
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([record]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([[ "plain", deviceHandle(record) ]]), store });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const uuid = accessoryUuid("AABBCCDDEE01");
+
+  assert.deepEqual(harness.registered, [uuid], "the adoption registers the accessory, which Homebridge writes to its cache itself");
+
+  /* The device stamps the context and attaches its services after the registration, which saved none of them. The context write marks the accessory, and the
+   * window that mark opens carries every service the adoption attached with it, so the whole adoption reaches the cache in one save.
+   */
+  assert.deepEqual(harness.saves, [], "the adoption's changes wait for their window rather than saving at once");
+
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.deepEqual(harness.saves, [[uuid]], "then reach the cache in one save naming the adopted accessory");
 });
 
 test("the first start after an identity change retires every accessory created under the earlier form, and only those", async (t) => {

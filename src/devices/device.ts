@@ -3,13 +3,13 @@
  * device.ts: Base class for all UniFi Access devices.
  */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
-import type { API, HAP } from "homebridge";
+import type { API, HAP, Service } from "homebridge";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
 import type { DecoratedSerial, LogEventName } from "../policy.ts";
 import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
-  Nullable } from "homebridge-plugin-utils";
+  Nullable, ValidServiceOptions, ValidServiceResult } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog,
-  sanitizeName, setAccessoryName, updateServices } from "homebridge-plugin-utils";
+  presenceChanged, sanitizeName, setAccessoryName, updateServices, validService } from "homebridge-plugin-utils";
 import { deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -305,6 +305,23 @@ export abstract class AccessDevice extends AccessBase {
     return this.setInfo(this.accessory, this.uda, this.mac);
   }
 
+  /* Reconcile a service's presence on this device's accessory from one verdict, through homebridge-plugin-utils' gate with the accessory supplied. The answer is the
+   * library's own, so a caller narrows the service from it exactly as it would from the library's. A service the gate attaches or removes changes what Homebridge's
+   * accessory cache holds, so the wrapper marks the accessory for the next save...every service gate on the accessory passes through here, which is what lets one
+   * mark serve them all, whichever pass runs the gate.
+   */
+  protected validService<T extends Service>(options: Omit<ValidServiceOptions<T>, "accessory">): ValidServiceResult<T> {
+
+    const validated = validService({ ...options, accessory: this.accessory });
+
+    if(presenceChanged(validated.transition)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
+    return validated;
+  }
+
   // Clean up this device: release its event handlers, state it offline on its availability topic, and end its lifetime, which drains its timers and releases its
   // MQTT registrations.
   public cleanup(): void {
@@ -518,10 +535,13 @@ export abstract class AccessDevice extends AccessBase {
 
   /* Set the current accessory name of this device. homebridge-plugin-utils owns every write a rename reaches: both display names through Homebridge's own setter, and
    * the information service's configured name beside its name through the per-service rule. A name with nothing left once HomeKit's naming rules are applied is
-   * refused rather than applied blank.
+   * refused rather than applied blank. A rename that wrote anything changed what Homebridge's accessory cache holds, so the accessory is marked for the next save.
    */
   public set accessoryName(name: string) {
 
-    setAccessoryName(this.accessory, name);
+    if(setAccessoryName(this.accessory, name)) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
   }
 }

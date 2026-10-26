@@ -10,15 +10,15 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import { AccessApiError, AccessCapabilityError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, runtime,
-  writesOn } from "../testing.helpers.ts";
+import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime,
+  savesOn, writesOn } from "../testing.helpers.ts";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
-import { FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -158,6 +158,8 @@ interface HubHarness {
   requests: string[];
   // Every doorbell ring or cancel the hub dispatched through the official API, in the order it dispatched them.
   rings: { cancel: boolean; readerId: string }[];
+  // The UUIDs each save Homebridge accepted named, in the order it accepted them, which only an arm that put the accessory on the bridge can see.
+  readonly saves: string[][];
   // The accessory's own service list, HAP's array, so a creation or a retirement the hub makes is read here as it happens.
   services: Service[];
   setDoorState: (entry: AccessDoorStateEntry) => void;
@@ -172,6 +174,10 @@ interface HubOptions {
    * none gets a fresh one carrying its existing services.
    */
   accessory?: TestAccessAccessory;
+  /* Register the accessory before the hub is stood up, as a controller's adoption does, for an arm about what reaches Homebridge's accessory cache: the persistence
+   * saves only an accessory the bridge holds, so a hub on an accessory left off it saves nothing an arm could read.
+   */
+  bridged?: boolean;
   credentials?: boolean;
   defer?: string;
   // The device roster the client's snapshot carries, keyed by unique_id, which is what the doorbell reader lookup searches.
@@ -310,8 +316,11 @@ function makeHub(options: HubOptions = {}): HubHarness {
     // Nothing observes in these arms.
   }, peek: (): undefined => undefined };
 
+  // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this hub's persistence made.
+  const api = makeTestApi();
   const platform = makePlatformDouble({
 
+    api,
     /* The clock every timer this hub arms is registered on, stated here rather than left to the double's own default, because a hub reading a clock no arm holds is
      * a hub whose relocks and travels an advance would never reach.
      */
@@ -332,6 +341,11 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const doors = new Map((options.doors ?? []).map(door => [ door.unique_id, door ]));
   const accessory = options.accessory ?? makeAccessory(options.existing ?? []);
+
+  if(options.bridged) {
+
+    platform.registerAccessory(accessory);
+  }
 
   /* The official device surface, held only by a client an arm gave one to. The settings read is what seeds a reader whose record carries no configuration rows, the
    * settings write is what an access method switch dispatches, and the doorbell dispatch is what the trigger switch's manual direction sends, so each of them is
@@ -484,6 +498,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     requests,
     rings,
+    get saves(): string[][] {
+
+      return savesOn(api);
+    },
     services: accessory.services,
     setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry),
     updates
@@ -5080,4 +5098,158 @@ test("a synchronized alias reaches the information service's names and the acces
 
   assert.equal(harness.hub.accessoryName, "Front Gate");
   assert.equal(harness.hub.accessory.displayName, "Front Gate", "and Homebridge's own display name follows through its own setter");
+});
+
+/* The saves a bridged hub makes over the next save window: whatever the arm changed before asking is marked already, and the window that change opened closes
+ * inside the advance, so an arm reads exactly what its change saved. Adoption marks the accessory as it writes its context, so a hub's first window carries
+ * everything adoption set up with that mark, and an arm reads past it with this same call before it changes anything of its own.
+ *
+ * @param harness - The bridged hub.
+ *
+ * @returns The UUIDs each save over the window named.
+ */
+function windowSaves(harness: HubHarness): string[][] {
+
+  const before = harness.saves.length;
+
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  return harness.saves.slice(before);
+}
+
+// The services an accessory carries, each by its type and subtype, so an arm can show a device update left every one of them standing where it stood.
+function serviceIdentities(harness: HubHarness): string[] {
+
+  return harness.services.map(service => service.UUID + "/" + (service.subtype ?? ""));
+}
+
+/* A restart onto an accessory already carrying everything the hub presents, restored the way Homebridge restores its cache, through a serialize and deserialize
+ * round trip. Adoption attaches nothing to it, so the context its write replaces is the one change the accessory cache has to hear about.
+ */
+test("a hub adopted onto an accessory already carrying its services saves the accessory once, for the context its adoption rewrote", () => {
+
+  const earlier = makeHub();
+
+  // The plugin and the platform are what Homebridge's cache stamps on an accessory, and what its serialization requires. The context is one a stale run wrote.
+  earlier.accessory._associatedPlugin = PLUGIN_NAME;
+  earlier.accessory._associatedPlatform = PLATFORM_NAME;
+  earlier.accessory.context = { controller: "5.6.7.8" };
+
+  const restored = runtime.PlatformAccessory.deserialize(runtime.PlatformAccessory.serialize(earlier.accessory)) as TestAccessAccessory;
+  const harness = makeHub({ accessory: restored, bridged: true });
+
+  assert.deepEqual(harness.accessory.context, { controller: "1.2.3.4", id: HUB_SERIAL, mac: HUB_MAC }, "adoption rewrites the context the stale run left");
+  assert.deepEqual(serviceIdentities(harness), serviceIdentities(earlier), "and attaches or removes nothing, the accessory already carrying every service");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "so the context's own mark is what saves the accessory, once");
+});
+
+test("a device update that attaches a terminal input's sensor saves the accessory once, one that retires it saves once more, and one changing nothing " +
+  "saves nothing", () => {
+
+  const harness = makeHub({ bridged: true });
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once, a window after it began");
+
+  refreshRecord(harness, [ ...REL_PAIR_LIVE, ...inputRows({ "input_state_rel": "on" }) ]);
+
+  assert.ok(hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the pair reporting live attaches the sensor on the update that carries it");
+  assert.equal(harness.saves.length, 1, "and the attach waits for its window rather than saving at once");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "then saves the accessory once, when that window closes");
+
+  harness.reconfigure([listLess("Hub.Sensors", hubSensorChoices(), "REL")]);
+  restateRecord(harness, {});
+
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_REL), "the user's toggle retires the sensor on the next update");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the retirement saves the accessory once as well");
+
+  restateRecord(harness, {});
+
+  assert.deepEqual(windowSaves(harness), [], "an update that changes nothing on the accessory saves nothing");
+});
+
+test("a device update that creates one access method switch and retires another saves the creation and the retirement together, once", () => {
+
+  const harness = makeReader({ bridged: true, record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code", "qr_code" ],
+    configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once");
+  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "the reader adopted with a QR switch to retire");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ] });
+
+  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "the capability arriving creates its switch");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "and the one going retires its own");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "the creation and the retirement reach the cache in the one save their window gathers");
+});
+
+test("a device update that retires the side door position sensor saves the gate's accessory once", () => {
+
+  const harness = makeGate({ bridged: true });
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once");
+
+  harness.reconfigure([listLess("Hub.Sensors", hubSensorChoices(), "SideDoorDPS")]);
+  restateRecord(harness, {});
+
+  assert.ok(!hasContactSensor(harness, AccessReservedNames.CONTACT_DPS_SIDE), "the selection turned off retires the sensor on the next update");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the retirement saves the accessory once");
+});
+
+test("a doorbell capability arriving mid-run saves the doorbell and its trigger in one save, and its withdrawal saves their retirement in another", () => {
+
+  const harness = makeHub({ bridged: true, options: ["Enable.Hub.Doorbell.Trigger"], record: testHub({ capabilities: ["is_hub"] }) });
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "door_bell" ] });
+
+  assert.ok(hasDoorbell(harness), "the capability arriving creates the doorbell");
+  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER), "and its trigger");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the doorbell and its trigger reach the cache in one save");
+
+  restateRecord(harness, { capabilities: ["is_hub"] });
+
+  assert.ok(!hasDoorbell(harness), "the capability going retires the doorbell");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_DOORBELL_TRIGGER), "and its trigger");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and their retirement reaches the cache in one save of its own");
+});
+
+/* The door's presentation moving under a running hub removes the service it is leaving through the removal pass ahead of the door's own gate, and attaches the one
+ * it moves to, so the one pass makes a removal and an attach the accessory cache has to hear about.
+ */
+test("a presentation change under a running hub saves the presentation it left and the one it took in a single save", () => {
+
+  const harness = makeHub({ bridged: true });
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once");
+
+  harness.reconfigure(["Enable.Hub.Door.Service=GarageDoorOpener"]);
+  restateRecord(harness, {});
+
+  assert.equal(harness.services.filter(service => service.UUID === Service.LockMechanism.UUID).length, 0, "the update removes the lock the door is leaving");
+  assert.ok(openerService(harness), "and presents the door as an opener");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the removal and the attach reach the cache in one save");
+});
+
+test("a tamper characteristic attached or withdrawn by a device update saves the accessory once each, with every service standing where it stood", () => {
+
+  const harness = makeHub({ bridged: true, record: wiredHub("on") });
+  const sensors = TERMINAL_SUBTYPES.map(subtype => contactSensor(harness, subtype));
+
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "adoption saves the accessory once");
+
+  const standing = serviceIdentities(harness);
+
+  // The doorbell's capability is restated beside the tamper capability, so the update moves the characteristic alone.
+  restateRecord(harness, { capabilities: [ "is_hub", "door_bell", "tamper_proofing" ], configs: [ ...wiredRows("on"), ...tamperRows({ "tamper_event": "true" }) ] });
+
+  assert.ok(sensors.every(sensor => sensor.testCharacteristic(Characteristic.StatusTampered)), "the capability arriving puts the characteristic on every sensor");
+  assert.deepEqual(serviceIdentities(harness), standing, "while every service stands where it stood, so the save below is the characteristic's alone");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the attach saves the accessory once");
+
+  restateRecord(harness, { capabilities: [ "is_hub", "door_bell" ] });
+
+  assert.ok(sensors.every(sensor => !sensor.testCharacteristic(Characteristic.StatusTampered)), "the capability going takes it off every sensor");
+  assert.deepEqual(serviceIdentities(harness), standing, "with every service still standing");
+  assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the withdrawal saves the accessory once");
 });

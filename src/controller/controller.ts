@@ -1186,10 +1186,10 @@ export class AccessController {
    * controller the user disabled takes every accessory it answered for with it while a device the user disabled gives up the accessory under its identity.
    *
    * Whether the accessory is still in the list is read first, so one already gone returns here rather than narrating a departure that has already happened. The
-   * mechanics of leaving - the unregister, the list, and the cache refresh - belong to the platform's one exit, which answers the same question for itself.
+   * mechanics of leaving - the unregister and the list - belong to the platform's one exit, which answers the same question for itself.
    *
-   * Each retirement refreshes the accessory cache once, so a start that retires several accessories refreshes once per retirement. The refresh is what makes each
-   * unregister durable, and a retirement is a one-time event per accessory.
+   * Homebridge writes its accessory cache as it handles each unregister, so a retirement is on disk once that exit returns, and the exit drops any save still
+   * pending for the accessory first, so no later save can bring it back.
    *
    * A caller with something to add beyond the departure itself hands over a reason, which is said after the removal line's own sentence.
    */

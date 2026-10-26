@@ -9,7 +9,7 @@ import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { TestMqttClient, freePort, settle, settleUntil } from "homebridge-plugin-utils/testing";
-import { accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi } from "./testing.helpers.ts";
+import { accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, savesOn } from "./testing.helpers.ts";
 import { mock, test } from "node:test";
 import type { AccessClient } from "unifi-access";
 import { AccessController } from "./controller/controller.ts";
@@ -33,8 +33,8 @@ interface Harness {
   restore: (platform: AccessPlatform, ...accessories: AccessAccessory[]) => void;
   // The accessories each unregister Homebridge accepted named, in the order it accepted them.
   readonly unregistered: string[];
-  /* How many accessories each cache refresh was handed, in the order the refreshes happened. The count rather than the list, because what an arm reads here is
-   * whether the refresh saw the list as it stood after the mutation beside it - a position the list itself, read later, could never answer.
+  /* How many accessories each save Homebridge accepted was handed, in the order the saves happened. The platform makes no save of its own, so each entry is one its
+   * accessory persistence made, and what an arm reads here is whether a save had gone out by a given moment, which the count answers as well as the list would.
    */
   readonly updated: number[];
 }
@@ -206,7 +206,7 @@ test("an accessory the platform is not carrying leaves its one exit untouched, w
   assert.deepEqual(platform.accessories, [], "and takes nothing else with it");
 });
 
-test("an accessory entering HomeKit is registered, appended, and saved with the list it was appended to, in that order", () => {
+test("an accessory entering HomeKit is registered and appended, and the platform saves nothing of its own until its persistence does", () => {
 
   const harness = makeHarness();
   const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
@@ -219,16 +219,23 @@ test("an accessory entering HomeKit is registered, appended, and saved with the 
   assert.deepEqual(harness.registered, [accessoryUuid("first")], "the accessory is announced to HomeKit");
   assert.deepEqual(platform.accessories, [first], "and joins the list we track it by");
 
-  /* The refresh was handed a list of one, which is what says it ran after the push rather than before it. A cache saved ahead of the append would have been handed
-   * an empty list here and would leave the new accessory out of what Homebridge writes down.
-   */
-  assert.deepEqual(harness.updated, [1], "the cache refresh sees the list the push has already grown");
-
   platform.registerAccessory(second);
 
   assert.deepEqual(harness.registered, [ accessoryUuid("first"), accessoryUuid("second") ]);
   assert.deepEqual(platform.accessories, [ first, second ]);
-  assert.deepEqual(harness.updated, [ 1, 2 ], "and each registration refreshes once, against the list as it stands");
+
+  /* Homebridge writes its cache as it registers an accessory, so a save of the platform's own would only write that cache again. What changes on an accessory
+   * afterward is marked through the persistence, which saves it once its window closes or a flush runs.
+   */
+  assert.deepEqual(harness.updated, [], "a registration makes no save of its own");
+
+  platform.persistence.persist(first);
+
+  assert.deepEqual(harness.updated, [], "and a mark waits for its window rather than saving at once");
+
+  platform.persistence.flush();
+
+  assert.deepEqual(harness.updated, [1], "the flush saves the one accessory marked, which its registration had already placed on the bridge");
 
   // The negative control: an accessory registered once appears once, so nothing here announces or appends twice.
   assert.equal(harness.registered.filter(uuid => uuid === accessoryUuid("first")).length, 1);
@@ -632,6 +639,25 @@ test("a clean shutdown ends each controller's MQTT client before the plugin's li
 
   assert.deepEqual(atAbort, [[{ payload: "offline", retain: true, topic: WORD_TOPIC }]], "the broker held the word before the lifetime ended");
   assert.equal(mqtt.aborted, true, "and the client's end tore it down, which is what fires its will for the plugin-level topic");
+});
+
+test("Homebridge's shutdown saves a change still waiting for its window before the plugin's lifetime ends, with no MQTT client for the shutdown to wait on", () => {
+
+  const harness = makeHarness();
+  // No controller is configured, so the constructor returns early and the shutdown has no end to await: the plugin's lifetime ends inside the event itself.
+  const platform = harness.make({ options: [], platform: "UniFi Access" });
+  const cached = cachedAccessory("cached", "Cached", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:01" });
+  // The saves Homebridge had accepted at the moment the plugin's lifetime ended, which is the order this arm is about.
+  const atAbort: number[][] = [];
+
+  harness.restore(platform, cached);
+  onAbort(platform.signal, () => void atAbort.push([...harness.updated]));
+  platform.persistence.persist(cached);
+  harness.api.emit(APIEvent.SHUTDOWN);
+
+  assert.equal(platform.signal.aborted, true, "with nothing to wait on, the lifetime ends inside the shutdown event");
+  assert.deepEqual(atAbort, [[1]], "and the change waiting for its window was saved before it did");
+  assert.deepEqual(savesOn(harness.api), [[accessoryUuid("cached")]], "in the one save the shutdown made, naming the accessory that was marked");
 });
 
 test("a controller whose first connect resolves inside the final words' grace builds no MQTT client, because the shutdown has already begun", async (t) => {

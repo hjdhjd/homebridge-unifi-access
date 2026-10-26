@@ -4,8 +4,8 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, FeatureOptions, HttpListener, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch, localAddressFor,
-  systemClock } from "homebridge-plugin-utils";
+import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch,
+  localAddressFor, systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
@@ -42,6 +42,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   private readonly controllers: AccessController[];
   public readonly featureOptions: FeatureOptions;
   public readonly log: Logging;
+  public readonly persistence: AccessoryPersistence;
   /* The accessories this plugin carries, restored by Homebridge or minted by a controller. The restore path and the registration methods below are its only
    * writers, and everyone else reads it through the view beside them.
    */
@@ -90,6 +91,12 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     }
 
     this.#webhookPort = webhookPort.port;
+
+    /* Every change our accessories make to what Homebridge's accessory cache holds after registration is marked here, and the changes each save window gathers
+     * reach the cache in one write. It is built ahead of the shutdown listener below, so its own final save at the shutdown event runs before our shutdown can end
+     * the plugin's lifetime, which with no MQTT client to wait on ends inside that same event.
+     */
+    this.persistence = new AccessoryPersistence({ api, clock: this.clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
 
     // Arm the plugin's shutdown before anything below can return early, so the signal every controller and every listener composes against always reaches its end.
     api.on(APIEvent.SHUTDOWN, () => void this.#shutdown());
@@ -226,7 +233,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
    * mints the accessory and names it before handing it here. An accessory Homebridge restores from its own cache takes the other road into the list, through
    * `configureAccessory()` above - that is Homebridge telling us about an accessory that already exists rather than us creating one, so it registers nothing.
    *
-   * The cache refresh follows the push, so what Homebridge is handed to save is the list that already carries the new accessory.
+   * Homebridge writes its accessory cache as part of the registration itself, so nothing here saves again. What the caller then sets up on the accessory reaches
+   * the cache through the persistence, marked where it changes.
    *
    * @param accessory - The accessory to add.
    */
@@ -234,9 +242,6 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
     this.#accessories.push(accessory);
-
-    // Tell Homebridge to save the updated list of accessories.
-    this.api.updatePlatformAccessories(this.#accessories);
   }
 
   /**
@@ -260,12 +265,11 @@ export class AccessPlatform implements DynamicPlatformPlugin {
       return;
     }
 
-    // Unregister the accessory and delete its remnants from HomeKit and the plugin.
-    this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+    /* Unregister the accessory and delete its remnants from HomeKit and the plugin. The persistence drops any save still pending for the accessory before Homebridge
+     * lets it go, so no later save can return it to the cache, and Homebridge writes the cache as it handles the removal.
+     */
+    this.persistence.unregister([accessory]);
     this.#accessories.splice(index, 1);
-
-    // Tell Homebridge to save the updated list of accessories.
-    this.api.updatePlatformAccessories(this.#accessories);
   }
 
   /* Launch our configured controllers once all accessories have been loaded. Once we do, they will sustain themselves.

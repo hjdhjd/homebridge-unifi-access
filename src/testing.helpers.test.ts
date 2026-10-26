@@ -7,14 +7,13 @@
  * a distinguishing input per arm that a builder ignoring the option could not coincide with.
  */
 /* eslint-disable camelcase */
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions } from "homebridge-plugin-utils";
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { AccessBootstrapConfig, AccessDoorConfig } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi,
-  readerRecord } from "./testing.helpers.ts";
+  readerRecord, savesOn } from "./testing.helpers.ts";
 import { TestClock, TestMqttClient } from "homebridge-plugin-utils/testing";
 import type { AccessAccessory } from "./types.ts";
-import { FeatureOptions } from "homebridge-plugin-utils";
-import type { PlatformAccessory } from "homebridge";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "./policy.ts";
 import test from "node:test";
@@ -226,25 +225,12 @@ test("every option given to makePlatformDouble reaches the member it names, over
   assert.equal(platform.webhookPort, 4242, "the webhook port is the number the arm named");
 });
 
-test("the accessory entry and exit of makePlatformDouble reach the api calls and the list the arm holds, in the real platform's own order", (t) => {
+test("the accessory entry and exit of makePlatformDouble reach the api calls and the list the arm holds, and neither saves the cache on its own account", () => {
 
   const a = makeTestAccessory("A");
   const b = makeTestAccessory("B");
   const api = makeTestApi();
   const held: AccessAccessory[] = [];
-  /* What the list held at the moment Homebridge was told about it, rather than what it holds once the call has returned. The real platform registers an arrival,
-   * adds it to the list, and then refreshes Homebridge with the list, and a departure goes the same way - unregistered, removed, then refreshed - so only a reading
-   * taken inside the refresh tells that order from the reverse one. The API double records a copy of each list it is handed, so whether the refresh was handed the
-   * arm's own list is read by a spy on the real member, which hands the call on to Homebridge.
-   */
-  const updates: { count: number; sameList: boolean }[] = [];
-  const update = api.updatePlatformAccessories.bind(api);
-
-  t.mock.method(api, "updatePlatformAccessories", (accessories: PlatformAccessory[]): void => {
-
-    updates.push({ count: held.length, sameList: accessories === held });
-    update(accessories);
-  });
 
   // Every entry and exit Homebridge accepted, in the order it accepted them: the names each was made under, the accessories it named, and which way it went.
   const calls = (): { platformName: string; pluginName: string; targets: string[]; verb: string }[] => api.calls.flatMap((call) => {
@@ -262,27 +248,30 @@ test("the accessory entry and exit of makePlatformDouble reach the api calls and
 
   assert.deepEqual(calls(), [{ platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: [a.UUID], verb: "register" }],
     "an adoption announces exactly the arriving accessory, under the plugin's own names");
-  assert.deepEqual(updates.at(-1), { count: 1, sameList: true }, "and the refresh hands back the arm's own list, carrying that accessory already");
   assert.deepEqual(held, [a], "which is the list the arm reads afterward");
 
   platform.registerAccessory(b);
 
-  assert.deepEqual(updates.at(-1), { count: 2, sameList: true }, "a second adoption refreshes a list carrying both");
-  assert.deepEqual(held, [ a, b ], "in the order they arrived");
+  assert.deepEqual(held, [ a, b ], "a second adoption joins the list in the order they arrived");
 
   platform.unregisterAccessory(a);
 
   assert.deepEqual(calls().at(-1), { platformName: PLATFORM_NAME, pluginName: PLUGIN_NAME, targets: [a.UUID], verb: "unregister" },
     "a retirement names the accessory it was handed rather than the one that arrived last");
   assert.equal(calls().length, 3, "one api call per entry and per exit, and none besides");
-  assert.deepEqual(updates.at(-1), { count: 1, sameList: true }, "and the refresh hands back a list that accessory has left");
   assert.deepEqual(held, [b], "so the arm's list holds the one that stayed");
 
   platform.unregisterAccessory(a);
 
-  assert.equal(calls().length, 3, "retiring an accessory the list does not hold reaches no api call at all");
-  assert.equal(updates.length, 3, "and no refresh either, which is what makes a repeated retirement harmless");
+  assert.equal(calls().length, 3, "retiring an accessory the list does not hold reaches no api call at all, which is what makes a repeated retirement harmless");
   assert.deepEqual(held, [b], "with the list left where it was");
+
+  /* Homebridge writes its cache as it handles a registration or an unregister, so the real platform saves nothing of its own on an entry or an exit, and the double
+   * may not. The persistence is flushed first, so a save an entry or an exit had only marked shows here as surely as one it made at once.
+   */
+  platform.persistence.flush();
+
+  assert.deepEqual(savesOn(api), [], "neither an entry nor an exit saves the cache itself");
 
   const bare = makePlatformDouble();
 
@@ -293,6 +282,28 @@ test("the accessory entry and exit of makePlatformDouble reach the api calls and
   bare.unregisterAccessory(a);
 
   assert.deepEqual(bare.accessories, [], "and retires from that one, through the API double it built for itself");
+});
+
+test("the persistence of makePlatformDouble saves on the arm's api once a window closes on the arm's clock, and an exit inside the window drops its save", () => {
+
+  const api = makeTestApi();
+  const clock = new TestClock();
+  const kept = makeTestAccessory("Kept");
+  const leaving = makeTestAccessory("Leaving");
+  const platform = makePlatformDouble({ api, clock });
+
+  platform.registerAccessory(kept);
+  platform.registerAccessory(leaving);
+  platform.persistence.persist(kept);
+  platform.persistence.persist(leaving);
+
+  assert.equal(clock.nextDeadline, ACCESSORY_SAVE_WINDOW_MS, "the first mark opens a window on the clock the arm holds, which is what an advance there reaches");
+
+  // The accessory leaves inside the window, the moment a save could otherwise return it to the cache once it had gone.
+  platform.unregisterAccessory(leaving);
+  clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.deepEqual(savesOn(api), [[kept.UUID]], "the window's one save reaches the arm's api, naming the accessory that stayed and not the one that left");
 });
 
 test("makeControllerDouble with no options answers the members the plugin reads from a token-only controller", async () => {

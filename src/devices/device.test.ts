@@ -4,9 +4,10 @@
  * timers and listeners bound to the device lifetime, and name synchronization.
  */
 /* eslint-disable camelcase */
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, MqttOfflineError, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, writesOn } from "../testing.helpers.ts";
-import { FeatureOptions, HAPStatus, MqttOfflineError, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
+import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn,
+  writesOn } from "../testing.helpers.ts";
 import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -130,6 +131,8 @@ interface Harness {
   // What the device attached to the bridge and what it later detached, by event name, so a registration and its teardown can be read as a pair.
   registrations: string[];
   removals: string[];
+  // The UUIDs each save Homebridge accepted named, in the order it accepted them, which only an arm that put the accessory on the bridge can see.
+  readonly saves: string[][];
   // What the device wrote to the service carrying availability, which is every availability statement HomeKit was shown.
   readonly statusWrites: { characteristic: string; value: unknown }[];
   warnings: string[];
@@ -149,11 +152,11 @@ interface Harness {
  * The accessory is built here, once per harness, so the writes an arm reads are the ones its own device made to it.
  *
  * @param script - The records the projection yields, in order.
- * @param init   - The accessory's name, the device record construction seeds this device from, the broker double the controller publishes through where an arm
- *                 reads what reached the broker, the feature-option entries the engine resolves against, and whether the accessory carries a service with no
- *                 availability characteristic beside the one that has it.
+ * @param init   - The accessory's name, whether it is registered so its saves reach Homebridge, the device record construction seeds this device from, the
+ *                 broker double the controller publishes through where an arm reads what reached the broker, the feature-option entries the engine resolves
+ *                 against, and whether the accessory carries a service with no availability characteristic beside the one that has it.
  */
-function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessoryName?: string; construction?: AccessStateDevice & { mac: string };
+function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessoryName?: string; bridged?: boolean; construction?: AccessStateDevice & { mac: string };
   mqtt?: TestMqttClient; options?: string[]; otherService?: boolean; } = {}): Harness {
 
   const clock = new TestClock();
@@ -183,6 +186,23 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     peek: (): AccessStateDevice | undefined => script[peekIndex++]
   };
 
+  // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this device's persistence made.
+  const api = makeTestApi();
+  const platform = makePlatformDouble({
+
+    api,
+    clock,
+    featureOptions: engine,
+    log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
+      warn: (message: string): void => { warnings.push(message); } }
+  });
+
+  // The persistence saves only an accessory the bridge holds, so an arm about what reaches Homebridge's accessory cache registers the accessory first, as adoption does.
+  if(init.bridged) {
+
+    platform.registerAccessory(stood.accessory);
+  }
+
   const controller = makeControllerDouble({
 
     /* The client the availability composition reads its controller-wide half through. The nesting is the composition's own read path, and it matters because the
@@ -207,13 +227,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     },
     id: controllerIdentity({ address: "1.2.3.4", mac: CONTROLLER_ID }),
     mqtt: init.mqtt,
-    platform: makePlatformDouble({
-
-      clock,
-      featureOptions: engine,
-      log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
-        warn: (message: string): void => { warnings.push(message); } }
-    }),
+    platform,
     spawnLoop: (_title: string, body: () => Promise<void>): void => { loop = body; }
   });
 
@@ -239,6 +253,10 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     projection: projection as unknown as AccessDeviceProjection,
     registrations,
     removals,
+    get saves(): string[][] {
+
+      return savesOn(api);
+    },
     get statusWrites(): { characteristic: string; value: unknown }[] {
 
       return writesOn(stood.accessory, stood.carrier);
@@ -907,4 +925,42 @@ test("a record whose alias changed re-synchronizes the accessory name through th
   assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")),
     ["Test Hub [UA Hub]: Detected a name change on the controller; updating the HomeKit name to Back Door."],
     "and the change is reported once, naming the name it settled on");
+});
+
+test("a rename the loop applies saves the accessory once, a window later, and setting the name it already carries saves nothing", async () => {
+
+  const harness = makeHarness([record({ alias: "Back Door" })], { accessoryName: "Front Door", bridged: true, construction: record({ alias: "Front Door" }),
+    options: ["Enable.Device.SyncName"] });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+
+  assert.equal(device.accessoryName, "Back Door", "the loop applied the alias the yield carried");
+  assert.deepEqual(harness.saves, [], "and the rename waits for its window rather than saving at once");
+
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.deepEqual(harness.saves, [[harness.accessory.UUID]], "then saves the accessory once, when that window closes");
+
+  // The library writes nothing for a name every place already carries, and a rename that wrote nothing has nothing to save.
+  device.accessoryName = "Back Door";
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.equal(harness.saves.length, 1, "so setting the name the accessory already carries saves nothing more");
+});
+
+test("a record whose alias empties out under HomeKit's naming rules saves nothing", async () => {
+
+  const harness = makeHarness([record({ alias: "..." })], { bridged: true, construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.equal(device.uda.alias, "...", "the loop wrote the record the yield carried");
+  assert.deepEqual(harness.saves, [], "and a name the rules empty out is never applied, so there is nothing to save");
 });
