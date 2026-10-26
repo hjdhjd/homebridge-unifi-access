@@ -530,11 +530,13 @@ let cardInstances = 0;
  * @param options.onCancel       - Invoked by the Cancel control, when the caller offers one.
  * @param options.onRemove       - Invoked with the scoping identities to strip once a removal is confirmed, when the caller offers removal.
  * @param options.onSave         - Invoked by the Save control, when the caller offers one. A card offering a Save carries the save flow its presses run through.
+ * @param options.removalAddress - A read of the configured address the card stands for, which a removal acts on and its confirmation names, when the caller offers
+ *                                 removal.
  * @param options.signal         - The caller's own lifecycle, when it has one. The card's teardown composes with it.
  *
  * @returns The card's surface: close, its save flow or null, populate, values, and the verdict line.
  */
-const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", onCancel, onRemove, onSave, signal }) => {
+const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", onCancel, onRemove, onSave, removalAddress, signal }) => {
 
   const card = document.getElementById("hbuaConnectionCard").content.firstElementChild.cloneNode(true);
   const fields = {};
@@ -640,15 +642,17 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
   // the controller it was naming.
   const disarmRemoval = () => removeConfirm.classList.add("d-none");
 
-  /* Arm the removal confirmation, naming the controller in words rather than in a browser dialog. The sweep is offered as the follow-on choice it is: the settings
-   * a user configured for a controller's devices are worth keeping when that controller is coming back under a new address, and worth deleting when it is gone for
-   * good, and only the user knows which. Without a device list there is nothing to offer, so the card says why instead of pretending the choice exists.
+  /* Arm the removal confirmation, naming the controller in words rather than in a browser dialog. The name is the configured address the removal acts on, read as
+   * the confirmation arms, rather than whatever the address field holds, so an unsaved edit of the field cannot make the prompt name one controller while the
+   * removal drops another. The sweep is offered as the follow-on choice it is: the settings a user configured for a controller's devices are worth keeping when
+   * that controller is coming back under a new address, and worth deleting when it is gone for good, and only the user knows which. Without a device list there
+   * is nothing to offer, so the card says why instead of pretending the choice exists.
    */
   const armRemoval = () => {
 
     const sweepable = removalMacs.length > 0;
 
-    card.querySelector("[data-role='removePrompt']").textContent = "Remove " + fields.address.value + " from this plugin? " + (sweepable ?
+    card.querySelector("[data-role='removePrompt']").textContent = "Remove " + removalAddress() + " from this plugin? " + (sweepable ?
       "You can also delete every feature option that was set for this controller and the devices it brought with it." : noSweepReason);
     control("removeSwept").classList.toggle("d-none", !sweepable);
     removeConfirm.classList.remove("d-none");
@@ -824,6 +828,7 @@ const mountControllerEditor = ({ collapsible = false, container, heading, helper
         configAddress = saved;
       }
     },
+    removalAddress: () => configAddress,
     signal
   });
 
