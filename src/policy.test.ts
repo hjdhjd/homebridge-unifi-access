@@ -14,7 +14,8 @@ import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, Acces
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
-  createMembershipIdsSelector, describeUnlock, deviceHasCapability, deviceModel, deviceRecord, deviceSerial, discoverDoorLocations, doorGuardChoices, doorServiceChoices,
+  createMembershipIdsSelector, describeUnlock, deviceDisplayName, deviceHasCapability, deviceModel, deviceName, deviceRecord, deviceSerial, discoverDoorLocations,
+  doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, hubSensorChoices, hubSensorModels,
   isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
   reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
@@ -1079,6 +1080,50 @@ test("deviceModel answers from the richest thing the record carries and reads an
 
   // Both members empty falls through the same way, and a type the mapping does not name answers itself.
   assert.equal(deviceModel({ device_type: "XYZ", display_model: "", model: "" } as AccessStateDevice), "XYZ");
+});
+
+test("deviceName answers the alias an administrator gave the hardware, and the record's own name where the alias is empty", () => {
+
+  assert.equal(deviceName(coreRecord({ alias: "Front Door" })), "Front Door");
+  assert.equal(deviceName(coreRecord()), "UA-HUB-5B9C", "an empty alias is no alias, so the controller's own name for the device answers");
+});
+
+test("deviceDisplayName answers the device's own name HomeKit can carry, sanitized as HomeKit carries it, and passes nothing over", () => {
+
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Door" })), { name: "Front Door", passedOver: null });
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Gate \u{1F6AA}" })), { name: "Front Gate", passedOver: null },
+    "an alias HomeKit cleans names the device as HomeKit carries it, which is no name passed over");
+  assert.deepEqual(deviceDisplayName(coreRecord()), { name: "UA-HUB-5B9C", passedOver: null },
+    "an empty alias is no alias, so the record's name answers, and there was nothing there to pass over");
+});
+
+test("deviceDisplayName passes over the device's own names HomeKit can display nothing of, reporting the first, down to the model", () => {
+
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "\u{1F6AA}", name: "Front Door" })), { name: "Front Door", passedOver: "\u{1F6AA}" },
+    "an alias HomeKit can display nothing of falls to the record's name, and is the name reported");
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "\u{1F6AA}", name: "!!!" })), { name: "UA Hub", passedOver: "\u{1F6AA}" },
+    "with the record's name passed over too, the model names the device, and the alias, the first of them, is the name reported");
+  assert.deepEqual(deviceDisplayName(coreRecord({ name: "..." })), { name: "UA Hub", passedOver: "..." },
+    "an empty alias is skipped rather than passed over, so the record's name is the one reported");
+});
+
+test("deviceDisplayName names a device with nothing HomeKit can carry by the literal last step, the model included", () => {
+
+  // The topology answers a display model HomeKit can display nothing of, so the model step falls through as the names before it did.
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "\u{1F6AA}", display_model: "\u{1F6AA}", name: "" })), { name: "Access Device", passedOver: "\u{1F6AA}" });
+  assert.deepEqual(deviceDisplayName(coreRecord({ display_model: "---", name: "" })), { name: "Access Device", passedOver: null },
+    "a device whose own names are empty passes nothing over, whatever the model makes of it");
+});
+
+test("deviceDisplayName puts a resolved custom name ahead of every other candidate, sanitized, and passes nothing over to reach it", () => {
+
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Door" }), { override: "Porch" }), { name: "Porch", passedOver: null });
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Door" }), { override: "Porch \u{1F319}" }), { name: "Porch", passedOver: null },
+    "the custom name arrives trimmed rather than sanitized, so the rule applies HomeKit's naming rules to it");
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "\u{1F6AA}" }), { override: "Porch" }), { name: "Porch", passedOver: null },
+    "a custom name names the device before the walk reaches the alias, so an alias HomeKit cannot carry is not reported");
+  assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Door" }), { override: null }), { name: "Front Door", passedOver: null },
+    "no custom name is the device's own name");
 });
 
 test("isManagedRecord admits only a managed record whose hardware identity is established", () => {

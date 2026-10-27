@@ -10,7 +10,7 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
-import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic } from "homebridge-plugin-utils";
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic, setAccessoryName } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import { AccessApiError, AccessCapabilityError } from "unifi-access";
@@ -149,6 +149,8 @@ interface HubHarness {
   health: { isHealthy: boolean };
   hub: AccessHub;
   lines: string[];
+  // The hub's own record loop, as the construction handed it to the controller, which walks the arm's record script once per call.
+  loop: () => Promise<void>;
   mqtt: TestMqttClient;
   mqttGet: (tail: string) => Promise<string | undefined>;
   mqttSet: (tail: string, value: string) => Promise<void>;
@@ -207,6 +209,8 @@ interface HubOptions {
   rejectFrom?: number;
   // The error a doorbell ring or cancel rejects with, standing in for a controller that refuses the dispatch. The ring is recorded before it is thrown.
   ringRefusal?: Error;
+  // The records the hub's own observation yields, one per entry, when an arm drives its record loop. An arm naming none observes nothing.
+  script?: AccessStateDevice[];
   // What the official settings read answers, called with the ordinal of the read so an arm can answer a retry differently from the attempt that failed.
   settings?: (fetch: number) => Promise<unknown>;
   // The error an unlock naming an actor rejects with, standing in for a client that cannot carry the attribution. An unlock naming none is answered normally.
@@ -312,10 +316,20 @@ function makeHub(options: HubOptions = {}): HubHarness {
     warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters))
   } });
 
+  /* The hub's own observation yields once per scripted record and answers peek() with that record, so an arm naming no script observes nothing. The loop the
+   * construction hands the controller is held rather than run, so an arm drives it when it is ready to read what a record changed.
+   */
+  const script = options.script ?? [];
+  let peekIndex = 0;
+  let loop: () => Promise<void> = async (): Promise<void> => undefined;
+
   const projection = { config: record, observe: async function *(): AsyncGenerator {
 
-    // Nothing observes in these arms.
-  }, peek: (): undefined => undefined };
+    for(const _entry of script) {
+
+      yield projection;
+    }
+  }, peek: (): AccessStateDevice | undefined => script[peekIndex++] };
 
   // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this hub's persistence made.
   const api = makeTestApi();
@@ -423,7 +437,11 @@ function makeHub(options: HubOptions = {}): HubHarness {
       publishes.push({ init, payload, topic });
       mqtt.publishGuarded(topic, payload, init);
     },
-    platform
+    platform,
+    spawnLoop: (_title: string, body: () => Promise<void>): void => {
+
+      loop = body;
+    }
   });
 
   const hub = new AccessHub(controller, projection as unknown as AccessDeviceProjection, accessory, record,
@@ -471,6 +489,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     health,
     hub,
     lines,
+    loop: (): Promise<void> => loop(),
     mqtt,
     mqttGet: async (tail: string): Promise<string | undefined> => mqtt.invokeGet(mqttGetTopic(HUB_SERIAL + "/" + tail)),
     mqttSet: async (tail: string, value: string): Promise<void> => mqtt.invokeSet(mqttSetTopic(HUB_SERIAL + "/" + tail), value),
@@ -5147,6 +5166,77 @@ test("a synchronized alias reaches the information service's names and the acces
 
   assert.equal(harness.hub.accessoryName, "Front Gate");
   assert.equal(harness.hub.accessory.displayName, "Front Gate", "and Homebridge's own display name follows through its own setter");
+});
+
+// The warning adoption gives a hub whose controller name HomeKit can display nothing of, as a user reads it.
+function fallbackWarning(passedOver: string, name: string): string {
+
+  return "The name \"" + passedOver + "\" leaves nothing HomeKit can display, so this device is named " + name + ".";
+}
+
+// How many lines the hub warned about a name falling back, whatever names the line carries, so an arm expecting none cannot miss one worded otherwise.
+function fallbackWarnings(harness: HubHarness): number {
+
+  return harness.debugs.filter(line => line.includes("leaves nothing HomeKit can display")).length;
+}
+
+test("a hub whose alias HomeKit can display nothing of warns once at adoption, naming the name it carries in its place", () => {
+
+  // A fresh accessory is minted under the name the rule falls back to, so it carries that name when its hub is adopted.
+  const minted = makeHub({ accessory: makeTestAccessory("UA-HUB-5B9C", HUB_ID), keepAdoptionLines: true, record: testHub({ alias: "\u{1F6AA}" }) });
+
+  assert.equal(warnCount(minted, fallbackWarning("\u{1F6AA}", "UA-HUB-5B9C")), 1);
+  assert.equal(fallbackWarnings(minted), 1, "and nothing else about the name");
+
+  // With name synchronization on, adoption applies the fallback name itself, so a cached accessory under another name carries it by the time the warning is weighed.
+  const synced = makeHub({ keepAdoptionLines: true, options: ["Enable.Device.SyncName"], record: testHub({ alias: "\u{1F6AA}" }) });
+
+  assert.equal(synced.hub.accessoryName, "UA-HUB-5B9C", "synchronization applied the record's own name in place of the alias");
+  assert.equal(warnCount(synced, fallbackWarning("\u{1F6AA}", "UA-HUB-5B9C")), 1);
+  assert.equal(fallbackWarnings(synced), 1);
+});
+
+test("a hub whose cached accessory carries another name is not warned about a name it does not carry", () => {
+
+  /* The accessory carries a name of its own, minted under an earlier alias, and with name synchronization off it keeps that name. A Home app rename is the arm
+   * below, because the Home app writes the information service's configured name and leaves this name alone.
+   */
+  const harness = makeHub({ keepAdoptionLines: true, record: testHub({ alias: "\u{1F6AA}" }) });
+
+  assert.equal(harness.hub.accessoryName, "Test Hub", "the accessory keeps the name it carries");
+  assert.equal(fallbackWarnings(harness), 0, "so the fallback name it does not carry goes unmentioned");
+});
+
+test("a hub whose configured name carries a Home app rename is not warned, though its name still reads the fallback", () => {
+
+  /* The accessory was minted under the name the rule falls back to, and an earlier rename by the plugin wrote its information service's configured name, which is
+   * where the Home app then wrote the user's own name. The Home app never writes the name beside it, so that name still reads the fallback, and a warning weighing
+   * it alone would speak at every start about a fallback the user has already renamed.
+   */
+  const accessory = makeTestAccessory("UA-HUB-5B9C", HUB_ID);
+  const information = accessory.getService(Service.AccessoryInformation);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+  assert.equal(setAccessoryName(accessory, "UA-HUB-5B9C"), true, "the plugin's rename adds the configured name the accessory was minted without");
+
+  information.updateCharacteristic(Characteristic.ConfiguredName, "My Door");
+
+  const harness = makeHub({ accessory, keepAdoptionLines: true, record: testHub({ alias: "\u{1F6AA}" }) });
+
+  assert.equal(harness.hub.accessoryName, "UA-HUB-5B9C", "the name still reads the fallback");
+  assert.equal(fallbackWarnings(harness), 0, "yet the configured name carries the user's rename, so the fallback goes unmentioned");
+});
+
+test("a rename the record loop applies never warns, whatever the name falls back to", async () => {
+
+  const harness = makeHub({ accessory: makeTestAccessory("Front Door", HUB_ID), keepAdoptionLines: true, options: ["Enable.Device.SyncName"],
+    record: testHub({ alias: "Front Door" }), script: [testHub({ alias: "\u{1F6AA}" })] });
+
+  await harness.loop();
+
+  assert.equal(harness.hub.accessoryName, "UA-HUB-5B9C", "the loop applied the name the rule fell back to");
+  assert.equal(lineCount(harness, "Detected a name change on the controller; updating the HomeKit name to UA-HUB-5B9C."), 1, "and said so as a rename");
+  assert.equal(fallbackWarnings(harness), 0, "but warned nothing, since the warning is adoption's alone");
 });
 
 /* The saves a bridged hub makes over the next save window: whatever the arm changed before asking is marked already, and the window that change opened closes

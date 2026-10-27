@@ -4,13 +4,13 @@
  */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import type { API, HAP, Service } from "homebridge";
+import type { AccessDeviceDisplayName, DecoratedSerial, LogEventName } from "../policy.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
-import type { DecoratedSerial, LogEventName } from "../policy.ts";
 import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
   Nullable, ValidServiceOptions, ValidServiceResult } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, prefixedLog,
-  presenceChanged, sanitizeName, setAccessoryName, updateServices, validService } from "homebridge-plugin-utils";
-import { deviceSerial, serialForm } from "../policy.ts";
+  presenceChanged, setAccessoryName, updateServices, validService } from "homebridge-plugin-utils";
+import { deviceDisplayName, deviceSerial, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -213,13 +213,19 @@ export abstract class AccessDevice extends AccessBase {
         // Project availability from the composed reachability, which is the one statement of that projection wherever it is triggered from.
         this.refreshReachability();
 
-        // Sync names, if configured to do so.
-        const synced = this.syncedName;
+        /* Sync the controller's name for this device into HomeKit, if configured to do so. homebridge-plugin-utils writes only the names that differ, the information
+         * service's cut to HomeKit's length limit as that service carries them, so a yield whose names all match writes and saves nothing, a name past that limit
+         * included. The rename line is logged only when the accessory's display name moved: the plugin alone writes that name and the Home app never touches it, so
+         * a move means the controller's name for the device changed, while a write restoring the information service's names over a Home app rename says nothing.
+         */
+        if(this.hints.syncName) {
 
-        if((synced !== undefined) && (this.accessoryName !== synced)) {
+          const previousName = this.accessory.displayName;
 
-          this.log.info("Detected a name change on the controller; updating the HomeKit name to %s.", synced);
-          this.configureInfo();
+          if(this.renameAccessory(this.homeKitName) && (this.accessory.displayName !== previousName)) {
+
+            this.log.info("Detected a name change on the controller; updating the HomeKit name to %s.", this.accessory.displayName);
+          }
         }
 
         /* Deliver the update to the accessory's own handlers, post-fold, through the same chokepoint the wire bridge uses. Doing it from here rather than from the raw
@@ -294,12 +300,12 @@ export abstract class AccessDevice extends AccessBase {
   // Configure the device information details for HomeKit.
   public configureInfo(): boolean {
 
-    // Sync the Access name with HomeKit, if configured.
-    const synced = this.syncedName;
+    /* Name the accessory as HomeKit should carry it when the user enabled name syncing. With it off, the accessory keeps the name it carries, the user's own Home app
+     * rename included. The rename writes only the names that differ, so a steady start writes and saves nothing.
+     */
+    if(this.hints.syncName) {
 
-    if(synced !== undefined) {
-
-      this.accessoryName = synced;
+      this.renameAccessory(this.homeKitName);
     }
 
     return this.setInfo(this.accessory, this.uda, this.mac);
@@ -509,39 +515,46 @@ export abstract class AccessDevice extends AccessBase {
     return this.platform.featureOptions.test("Log.Debug", this.id, this.controller.id);
   }
 
-  /* The name the controller would have HomeKit show for this device, or nothing to synchronize at all - synchronization is off, the record carries no alias, or the
-   * alias has nothing left once HomeKit's naming rules are applied to it. Every synchronization consumer reads this one derivation rather than deciding for itself,
-   * because homebridge-plugin-utils refuses to write an empty name...a site deciding on its own would read that refusal as a change on every update and say so each
-   * time.
+  /* The name the plugin applies to this device's accessory in HomeKit, and the device's own name the rule passed over to reach it, through the one name rule the
+   * accessory is minted under, so the mint, every configure pass and the record loop cannot name a device differently. Adoption reads the whole answer, to tell the
+   * user when the controller's name for the device has nothing HomeKit can display.
    */
-  protected get syncedName(): string | undefined {
+  protected get homeKitNaming(): AccessDeviceDisplayName {
 
-    if(!this.hints.syncName || !this.uda.alias) {
-
-      return undefined;
-    }
-
-    const sanitized = sanitizeName(this.uda.alias);
-
-    return (sanitized.length > 0) ? sanitized : undefined;
+    return deviceDisplayName(this.uda);
   }
 
-  // Utility function to return the current accessory name of this device.
+  /* The name the plugin applies to this device's accessory in HomeKit. It is the name to apply rather than the name HomeKit carries, which accessoryName below
+   * reads: with name synchronization off nothing applies this one, so the two part once the controller's name for the device moves on. The rule always answers a
+   * name HomeKit can carry, so homebridge-plugin-utils never refuses the write, and a refused write can never read as a change on every update.
+   */
+  protected get homeKitName(): string {
+
+    return this.homeKitNaming.name;
+  }
+
+  // Utility function to return the current accessory name of this device: the name HomeKit carries, where homeKitName above is the name the plugin applies. The
+  // information service's Name characteristic is the primary source and is always present, and the name the plugin applies stands in where it is not.
   public get accessoryName(): string {
 
     return (this.accessory.getService(this.hap.Service.AccessoryInformation)?.getCharacteristic(this.hap.Characteristic.Name).value as string | undefined) ??
-      this.uda.alias;
+      this.homeKitName;
   }
 
-  /* Set the current accessory name of this device. homebridge-plugin-utils owns every write a rename reaches: both display names through Homebridge's own setter, and
-   * the information service's configured name beside its name through the per-service rule. A name with nothing left once HomeKit's naming rules are applied is
-   * refused rather than applied blank. A rename that wrote anything changed what Homebridge's accessory cache holds, so the accessory is marked for the next save.
+  /* Apply a name to this device's accessory, answering whether anything was written. homebridge-plugin-utils owns every write a rename reaches: both display names
+   * through Homebridge's own setter, and the information service's configured name beside its name through the per-service rule, each only where it differs. A
+   * name with nothing left once HomeKit's naming rules are applied is refused rather than applied blank. A rename that wrote anything changed what Homebridge's
+   * accessory cache holds, so the accessory is marked for the next save.
    */
-  public set accessoryName(name: string) {
+  protected renameAccessory(name: string): boolean {
 
-    if(setAccessoryName(this.accessory, name)) {
+    if(!setAccessoryName(this.accessory, name)) {
 
-      this.platform.persistence.persist(this.accessory);
+      return false;
     }
+
+    this.platform.persistence.persist(this.accessory);
+
+    return true;
   }
 }

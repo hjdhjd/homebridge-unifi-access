@@ -579,6 +579,52 @@ test("a delayed removal whose retirement throws costs the removal due beside it 
     "and the fault is said once, through the controller's log, naming the accessory");
 });
 
+// The display name the accessory a seed derives was registered under, read from the accessory Homebridge accepted rather than from anything the mint returned.
+function registeredName(harness: ControllerHarness, seed: string): string | undefined {
+
+  return harness.accessories.find(accessory => accessory.UUID === accessoryUuid(seed))?.displayName;
+}
+
+test("a device whose alias HomeKit can display nothing of is minted under the next name HomeKit can carry", () => {
+
+  const store = createStateStore({});
+
+  // No handle answers any device here, so adoption stops at the accessory it minted and registered, and what the arm reads is the mint's name alone.
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ hubRecord({ alias: "\u{1F6AA}", mac: "aabbccddee04", name: "Front Door",
+    unique_id: "front" }), hubRecord({ alias: "\u{1F6AA}", mac: "aabbccddee05", name: "...", unique_id: "bare" }) ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const front = store.snapshot().devices.get("front");
+  const bare = store.snapshot().devices.get("bare");
+
+  assert.ok(front && bare, "the store should hold each hub");
+
+  assert.equal(harness.controller.addHomeKitDevice(front), true, "an alias HomeKit cannot carry leaves the mint to the next name it can");
+  assert.equal(harness.controller.addHomeKitDevice(bare), true);
+
+  assert.equal(registeredName(harness, "AABBCCDDEE04"), "Front Door", "the record's own name stands in for the alias");
+  assert.equal(registeredName(harness, "AABBCCDDEE05"), "UA Hub", "and the model stands in where the alias and the record's name are each beyond HomeKit");
+});
+
+test("a device whose alias carries a character HomeKit cannot display is named in the log by the alias as the controller has it", () => {
+
+  const store = createStateStore({});
+
+  // The alias keeps a name HomeKit can carry once its naming rules clean it, so the name the accessory is registered under and the log's name for the device part.
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([hubRecord({ alias: "Porch \u{1F6AA}", mac: "aabbccddee04", name: "Front Door",
+    unique_id: "porch" })]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const porch = store.snapshot().devices.get("porch");
+
+  assert.ok(porch, "the store should hold the hub");
+  assert.equal(harness.controller.addHomeKitDevice(porch), true);
+
+  assert.equal(registeredName(harness, "AABBCCDDEE04"), "Porch", "HomeKit carries the alias as its naming rules leave it");
+  assert.deepEqual(harness.logged.filter(line => line.includes("Adding")), ["1.2.3.4: Porch \u{1F6AA} [UA Hub]: Adding UA Hub to HomeKit."],
+    "while the line naming the device carries the alias whole");
+});
+
 test("the connection observer's lifetime is the controller's own terminal signal", async () => {
 
   const monitor = connectionDouble();

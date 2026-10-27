@@ -12,10 +12,10 @@ import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoi
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, membershipDelta,
-  mqttConnectionSettings, onAbort, prefixedLog, retry, sanitizeName, superviseLoop } from "homebridge-plugin-utils";
-import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceModel,
-  deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac, serialForm,
-  webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
+  mqttConnectionSettings, onAbort, prefixedLog, retry, superviseLoop } from "homebridge-plugin-utils";
+import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
+  deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac,
+  serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import { AccessDeliveryLedger } from "../webhooks.ts";
 import type { AccessDevice } from "../devices/device.ts";
@@ -1130,10 +1130,10 @@ export class AccessController {
       this.#removals.clear(accessory.UUID);
     }
 
-    // We've got a new device, let's add it to HomeKit.
+    // We've got a new device, let's add it to HomeKit. It is minted under the name rule its configure pass applies, which always answers a name HomeKit can carry.
     if(!accessory) {
 
-      accessory = new this.platform.api.platformAccessory<AccessAccessoryContext>(sanitizeName(this.resolveDeviceName(device)), uuid);
+      accessory = new this.platform.api.platformAccessory<AccessAccessoryContext>(deviceDisplayName(device).name, uuid);
 
       this.log.info("%s: Adding %s to HomeKit.", this.getDeviceName(device), this.resolveDeviceModel(device));
 
@@ -1308,7 +1308,7 @@ export class AccessController {
    * official API's inventory reports no address at all, and a device it names by an identifier that is not address-shaped carries no hardware identity either, so
    * each clause is present only where its own fact is rather than rendering a label over an absent value.
    */
-  public getDeviceName(device: AccessStateDevice, name = device.alias.length ? device.alias : device.name, deviceInfo = false): string {
+  public getDeviceName(device: AccessStateDevice, name = deviceName(device), deviceInfo = false): string {
 
     const details: string[] = [];
 
@@ -1325,11 +1325,11 @@ export class AccessController {
     return name + " [" + this.resolveDeviceModel(device) + "]" + ((deviceInfo && details.length) ? " (" + details.join(" ") + ")" : "");
   }
 
-  // Utility to retrieve a reasonable device name for an Access device. The alias an administrator gave the hardware where there is one, and the controller's own
-  // name for it otherwise - both are members every census establishes, so there is nothing further to fall back to.
+  // Utility to retrieve a reasonable device name for an Access device: the alias an administrator gave the hardware where there is one, and the controller's own
+  // name for it otherwise. The rule lives in the policy module, beside the name HomeKit carries, which starts from the alias and the record's name as well.
   public resolveDeviceName(device: AccessStateDevice): string {
 
-    return device.alias.length ? device.alias : device.name;
+    return deviceName(device);
   }
 
   // Utility to retrieve a reasonable device model for an Access device. The resolution itself lives in the policy module, so the webUI server and the plugin's own

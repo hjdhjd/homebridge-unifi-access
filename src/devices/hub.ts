@@ -13,7 +13,7 @@ import type { CharacteristicValue, Service } from "homebridge";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { capabilityGate, findService, formatErrorMessage, guardedDispatch, presenceChanged, setServiceName, updateServices,
+import { capabilityGate, findService, formatErrorMessage, getServiceName, guardedDispatch, presenceChanged, setServiceName, updateServices,
   validCharacteristic } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessConsumedWebhookDelivery } from "./device.ts";
@@ -620,6 +620,19 @@ export class AccessHub extends AccessDevice {
 
     // Configure accessory information.
     this.configureInfo();
+
+    /* Tell the user, once at adoption, when the controller's name for this device has nothing HomeKit can display and the accessory carries the name the rule fell
+     * back to in its place. The name weighed is the information service's as homebridge-plugin-utils reads it, the configured name where the service carries one
+     * and its name otherwise, never adding a configured name the service lacks. That is what tells the fallback apart from a Home app rename written into the
+     * configured name, which exists once a plugin rename has written one, while the name beside it stays on the fallback. An accessory carrying any other name is
+     * left unwarned, because the line would describe a name it does not carry, and the record loop never warns, so a rename later in the run does not repeat it.
+     */
+    const { name, passedOver } = this.homeKitNaming;
+
+    if((passedOver !== null) && (getServiceName(this.accessory.getService(this.hap.Service.AccessoryInformation)) === name)) {
+
+      this.log.warn("The name \"%s\" leaves nothing HomeKit can display, so this device is named %s.", passedOver, name);
+    }
 
     // Configure access method switches, if we're a reader device.
     this.configureAccessMethodSwitches();

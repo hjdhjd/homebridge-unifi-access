@@ -22,7 +22,7 @@ import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOffic
   AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
 import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
 import type { FeatureOptionChoice, Nullable, RetryBackoff } from "homebridge-plugin-utils";
-import { formatErrorMessage, sameEntries, scopeSafeId } from "homebridge-plugin-utils";
+import { formatErrorMessage, sameEntries, sanitizeName, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
@@ -351,6 +351,82 @@ export function deviceModel(device: AccessStateDevice): string {
   }
 
   return officialDeviceModel(device.device_type);
+}
+
+/**
+ * The name the controller gives a device: the alias an administrator gave the hardware where there is one, and the controller's own name for it otherwise. Every
+ * log line naming a device reads it, and the name HomeKit carries below starts from the alias and the record's name in the same order.
+ *
+ * @param device - The device record whose name is wanted.
+ *
+ * @returns The alias, or the record's name where the alias is empty.
+ */
+export function deviceName(device: AccessStateDevice): string {
+
+  return device.alias.length ? device.alias : device.name;
+}
+
+// The name HomeKit is handed for a device when every other candidate, the model included, has nothing left once HomeKit's naming rules are applied.
+const ACCESS_FALLBACK_NAME = "Access Device";
+
+/**
+ * The name HomeKit carries for a device, and the controller's name for it that the rule passed over to reach that name.
+ */
+export interface AccessDeviceDisplayName {
+
+  /** The name HomeKit carries, as HomeKit's naming rules leave it, which is never empty. */
+  readonly name: string;
+
+  /** The device's own name the rule passed over because HomeKit can display nothing of it, or `null` when the rule passed over none. */
+  readonly passedOver: Nullable<string>;
+}
+
+/**
+ * The name HomeKit carries for a device: the first of the custom name the user set, the alias, the record's name, the model, and the literal "Access Device"
+ * that has anything left once HomeKit's naming rules are applied, as those rules leave it. This is the one statement of the rule, read by the mint and by every
+ * configure pass and rename the device makes, so none of them can name a device differently.
+ *
+ * HAP refuses to mint an accessory whose display name is empty, and a name that is empty, blank, or made only of characters HomeKit disallows sanitizes to
+ * nothing, so each step falls through on an empty sanitized result rather than on an absent member alone. The custom name arrives resolved, already refused
+ * where HomeKit could carry nothing of it, so the walk never passes one over. The device's own name is what a passed-over name reports: the first of the alias and
+ * the record's name that carries something and still sanitizes to nothing, which is the name a user set on the controller and would look for in HomeKit.
+ *
+ * @param device           - The device record to name.
+ * @param options          - Optional. The device's custom name.
+ * @param options.override - Optional. The custom HomeKit name the user set for the device, resolved through homebridge-plugin-utils' custom-name rule, or `null`
+ *                           when none resolves.
+ *
+ * @returns The name HomeKit carries, and the device's own name the rule passed over to reach it.
+ */
+export function deviceDisplayName(device: AccessStateDevice, { override = null }: { override?: Nullable<string> } = {}): AccessDeviceDisplayName {
+
+  const custom = (override === null) ? "" : sanitizeName(override);
+
+  if(custom.length) {
+
+    return { name: custom, passedOver: null };
+  }
+
+  let passedOver: Nullable<string> = null;
+
+  for(const candidate of [ device.alias, device.name ]) {
+
+    if(!candidate) {
+
+      continue;
+    }
+
+    const name = sanitizeName(candidate);
+
+    if(name.length) {
+
+      return { name, passedOver };
+    }
+
+    passedOver ??= candidate;
+  }
+
+  return { name: sanitizeName(deviceModel(device)) || ACCESS_FALLBACK_NAME, passedOver };
 }
 
 // The brand's carrier symbol. Declared rather than defined because the brand is a compile-time statement alone: nothing at runtime ever reads it, so no symbol

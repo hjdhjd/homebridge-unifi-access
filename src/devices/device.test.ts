@@ -32,8 +32,9 @@ const TIMER_DELAY_MS = 10;
 const AVAILABILITY_TOPIC = "AABBCCDDEE01/availability";
 
 /* AccessDevice supplies every abstract member AccessBase declares and adds none of its own, so a near-bare subclass is the whole harness the loop needs. The
- * wrappers expose the protected Not Responding rule, the protected hint configuration, and the protected synchronized-name derivation, which is how an arm drives
- * the real rule, the real option reads, the real deviation log, and the real derivation rather than paths it wrote itself.
+ * wrappers expose the protected Not Responding rule, the protected hint configuration, the protected derivation of the name the device applies, and the protected
+ * rename, which is how an arm drives the real rule, the real option reads, the real deviation log, the real derivation and the real write rather than paths it wrote
+ * itself.
  */
 class TestDevice extends AccessDevice {
 
@@ -47,9 +48,14 @@ class TestDevice extends AccessDevice {
     return this.configureHints();
   }
 
-  public synced(): string | undefined {
+  public homeKit(): string {
 
-    return this.syncedName;
+    return this.homeKitName;
+  }
+
+  public renameTo(name: string): boolean {
+
+    return this.renameAccessory(name);
   }
 }
 
@@ -851,40 +857,50 @@ test("a typed delivery registration lands in the same map that cleanup drains", 
   assert.deepEqual(harness.removals, [ACCESS_WEBHOOK_EVENT_PREFIX + ACCESS_WEBHOOK_EVENTS.doorUnlock]);
 });
 
-test("a device with name synchronization off derives no name to synchronize, whatever its alias reads", () => {
+// The writes a rename makes to the information service's names, read in the order HAP raised them.
+function nameWrites(harness: Harness): { characteristic: string; value: unknown }[] {
+
+  return harness.infoWrites.filter(write => [ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID ].includes(write.characteristic));
+}
+
+test("a device with name synchronization off leaves its accessory's name as it stands, whatever its alias reads", () => {
 
   const harness = makeHarness([], { construction: record({ alias: "Front Door" }) });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
+  device.configureInfo();
 
-  assert.equal(device.synced(), undefined, "a user who did not ask for synchronization has nothing synchronized, however plainly the alias reads");
+  assert.equal(device.homeKit(), "Front Door", "the name the device would apply is its alias");
+  assert.equal(device.accessoryName, "Test Hub", "yet a user who did not ask for synchronization keeps the name the accessory carries, however plainly the alias reads");
+  assert.deepEqual(nameWrites(harness), [], "so nothing is written to the information service's names");
 });
 
-test("a synchronized name is the alias as HomeKit's naming rules leave it", () => {
+test("the name a device applies is its alias as HomeKit's naming rules leave it", () => {
 
   const harness = makeHarness([], { construction: record({ alias: "Front Gate \u{1F6AA}" }), options: ["Enable.Device.SyncName"] });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
-  assert.equal(device.synced(), "Front Gate", "the alias carries a character HomeKit will not take, so what is synchronized is what survives the rules");
+  assert.equal(device.homeKit(), "Front Gate", "the alias carries a character HomeKit will not take, so what applies is what survives the rules");
 });
 
-test("an alias with nothing left under HomeKit's naming rules derives no name to synchronize", () => {
+test("an alias with nothing left under HomeKit's naming rules gives way to the record's own name", () => {
 
-  const harness = makeHarness([], { construction: record({ alias: "..." }), options: ["Enable.Device.SyncName"] });
+  const harness = makeHarness([], { construction: record({ alias: "...", name: "Gate Hub" }), options: ["Enable.Device.SyncName"] });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   device.configure();
 
-  assert.equal(device.synced(), undefined, "the rules empty this alias out, and a write the library would refuse must never be attempted");
+  assert.equal(device.homeKit(), "Gate Hub", "the rules empty this alias out, so the name that applies is the next one HomeKit can carry");
 });
 
-test("a record whose alias empties out under HomeKit's naming rules is neither written nor reported as a change", async (t) => {
+test("a record whose alias empties out under HomeKit's naming rules synchronizes the accessory to the record's own name, and says so once", async (t) => {
 
-  const harness = makeHarness([record({ alias: "..." })], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
-  // Every name Homebridge's own display-name setter is handed, so a rename the arm expects to be refused shows up here rather than passing silently.
+  const harness = makeHarness([record({ alias: "...", name: "Back Door" })], { accessoryName: "Front Door", construction: record({ alias: "Front Door" }),
+    options: ["Enable.Device.SyncName"] });
+  // Every name Homebridge's own display-name setter is handed, so the arm reads how many times the rename reached it as well as what it was handed.
   const renames = t.mock.method(harness.accessory, "updateDisplayName");
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
@@ -892,14 +908,51 @@ test("a record whose alias empties out under HomeKit's naming rules is neither w
 
   await harness.loop();
 
-  // The tick genuinely moved the held record, which is what makes the assertions below mean something.
+  /* The tick genuinely moved the held record, which is what makes the assertions below mean something. The record's own name differs from the name the accessory
+   * carries, so a loop that left the accessory alone, as it would for an alias with nothing to fall back to, fails here.
+   */
   assert.equal(device.uda.alias, "...", "the loop must have written the record the yield carried");
 
-  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [],
-    "a name the rules empty out is not a change, so the loop has nothing to report and cannot report it on every update");
-  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), [], "and the accessory is never handed a name HomeKit would refuse");
-  assert.deepEqual(harness.infoWrites.filter(write => [ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID ].includes(write.characteristic)), [],
-    "nor does the information service inside the accessory's services carry a name write, because the rename was never attempted");
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), ["Back Door"], "the record's own name stands in for the alias, handed over once");
+  assert.deepEqual(nameWrites(harness), [ { characteristic: Characteristic.ConfiguredName.UUID, value: "Back Door" },
+    { characteristic: Characteristic.Name.UUID, value: "Back Door" } ], "and reaches the information service's names");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")),
+    ["Test Hub [UA Hub]: Detected a name change on the controller; updating the HomeKit name to Back Door."], "and the change is reported once");
+});
+
+test("a name past HomeKit's length limit renames the accessory once, however many records repeat it", async (t) => {
+
+  // The information service carries a name cut to HomeKit's length limit, so a loop comparing that cut name with the whole one would rename on every record.
+  const long = "Front Door Of The Main Building Facing The North Parking Lot Entrance Gate";
+  const harness = makeHarness([ record({ alias: long }), record({ alias: long }) ], { accessoryName: "Front Door", construction: record({ alias: "Front Door" }),
+    options: ["Enable.Device.SyncName"] });
+  const renames = t.mock.method(harness.accessory, "updateDisplayName");
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+
+  assert.notEqual(device.accessoryName, long, "the information service carries the name cut, which is what makes the second record the case under test");
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), [long], "Homebridge's own setter is handed the name once");
+  assert.equal(harness.infoLines.filter(line => line.includes("Detected a name change")).length, 1, "and the change is reported once rather than on every record");
+});
+
+test("a record whose alias changed leaves the accessory's name as it stands with name synchronization off, and reports nothing", async (t) => {
+
+  // Name synchronization is off, its default, so the controller's rename the yield carries is one the user never asked HomeKit to follow.
+  const harness = makeHarness([record({ alias: "Back Door" })], { accessoryName: "Front Door", construction: record({ alias: "Front Door" }) });
+  const renames = t.mock.method(harness.accessory, "updateDisplayName");
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+
+  await harness.loop();
+
+  assert.equal(device.uda.alias, "Back Door", "the loop must have written the record the yield carried");
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), [], "Homebridge's own setter is never handed the controller's new name");
+  assert.deepEqual(nameWrites(harness), [], "nor is anything written to the information service's names");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [], "and no change is reported");
 });
 
 test("a record whose alias changed re-synchronizes the accessory name through the loop and says so once", async (t) => {
@@ -945,13 +998,14 @@ test("a rename the loop applies saves the accessory once, a window later, and se
   assert.deepEqual(harness.saves, [[harness.accessory.UUID]], "then saves the accessory once, when that window closes");
 
   // The library writes nothing for a name every place already carries, and a rename that wrote nothing has nothing to save.
-  device.accessoryName = "Back Door";
+  assert.equal(device.renameTo("Back Door"), false, "a rename to the name the accessory already carries answers that it wrote nothing");
+
   harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
 
-  assert.equal(harness.saves.length, 1, "so setting the name the accessory already carries saves nothing more");
+  assert.equal(harness.saves.length, 1, "so it saves nothing more");
 });
 
-test("a record whose alias empties out under HomeKit's naming rules saves nothing", async () => {
+test("a record whose alias empties out to the name the accessory already shows saves the configured name it adds, and reports no change", async () => {
 
   const harness = makeHarness([record({ alias: "..." })], { bridged: true, construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
@@ -962,5 +1016,13 @@ test("a record whose alias empties out under HomeKit's naming rules saves nothin
   harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
 
   assert.equal(device.uda.alias, "...", "the loop wrote the record the yield carried");
-  assert.deepEqual(harness.saves, [], "and a name the rules empty out is never applied, so there is nothing to save");
+  assert.equal(device.homeKit(), harness.accessory.displayName, "the record's own name the alias gives way to is the name the accessory already shows");
+
+  /* What the write and the line each answer to tells them apart here: the accessory has never carried a configured name, so applying the name writes one and the
+   * write is saved, while the name the accessory shows did not move, so there is no change on the controller to report.
+   */
+  assert.deepEqual(nameWrites(harness), [{ characteristic: Characteristic.ConfiguredName.UUID, value: "Test Hub" }],
+    "the only write is the configured name the accessory has never carried");
+  assert.deepEqual(harness.saves, [[harness.accessory.UUID]], "which is saved once");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [], "and no change is reported");
 });
