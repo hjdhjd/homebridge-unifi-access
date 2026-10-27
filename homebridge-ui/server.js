@@ -14,7 +14,7 @@ import { accessMethodChoices, composeConnectIdentity, controllerIdentity, device
   membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
-import { officialUsers } from "./users-census.js";
+import { officialUsers } from "../dist/users-census.js";
 import util from "node:util";
 
 // The adapter's process generation: an opaque per-process value whose only requirement is uniqueness across this plugin's helper processes, so a panel that outlived

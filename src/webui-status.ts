@@ -4,8 +4,8 @@
  *
  * This module runs exclusively inside the transient custom-UI child process that Config UI X forks for the plugin's settings modal - never inside Homebridge. It is
  * the Access adapter for the shared status wire contract: the StatusEvent union, the StatusRow shape, and the classified StatusErrorReason live in
- * homebridge-plugin-utils, while this module owns the Access projection - the context registry and its additive route, the connect-on-view lifecycle, the row policy,
- * and the error classification.
+ * homebridge-plugin-utils, while this module owns the Access projection - the context registry and the handling of its additive route, the connect-on-view
+ * lifecycle, the row policy, and the error classification. The route's name itself lives in webui/status-route.ts, the one module each end of the bridge reads it from.
  *
  * The lifecycle is connect-on-view rather than a per-device connection pool, because Access devices are reached over a controller connection whose identity lives in the
  * plugin configuration: the browser sends the feed a context - each configured controller's identity beside the decorated serials of the devices it answered for - and a
@@ -25,11 +25,9 @@ import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity
 import { formatErrorMessage, formatSeconds, sameEntries } from "homebridge-plugin-utils";
 import type { DecoratedSerial } from "./policy.ts";
 
-// The onRequest route the context extension registers - the plugin's addition to the shared status protocol. It carries the browser's controller context: each
-// configured controller's identity beside the decorated serials of the devices its kept probe answer listed, which is what lets a view request resolve the
-// controller serving a serial. server.js and ui.mjs both address the bridge through this constant (ui.mjs mirrors the literal in its own module, because browser
-// code cannot import from dist/), so this module is its one owner. The push-event name and the view route are the shared homebridge-plugin-utils contract.
-export const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
+// The onRequest route the context extension registers, owned by the webUI module the settings page imports and re-exported here, so server.js addresses the
+// bridge through this module as it reaches the rest of the adapter.
+export { ACCESS_STATUS_CONTEXT_ROUTE } from "./webui/status-route.ts";
 
 /**
  * One controller in a status context request: a controller the browser holds a kept probe answer for. The identity members are spelled exactly as a `controllers[]`

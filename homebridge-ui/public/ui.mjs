@@ -5,12 +5,13 @@
 "use strict";
 
 import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection,
-  staleSelectionVerdict } from "./access-config.mjs";
+  staleSelectionVerdict } from "./lib/webui/access-config.js";
 import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
   scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
-import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./controller-actions.mjs";
+import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./lib/webui/controller-actions.js";
 import { addressListedElsewhere, addressListingForm } from "homebridge-plugin-utils/webui/address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
+import { ACCESS_STATUS_CONTEXT_ROUTE } from "./lib/webui/status-route.js";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
@@ -54,11 +55,6 @@ const CONNECTION_CHECK_DEADLINE = 30;
  */
 const TOKEN_ONLY_NOTICE = "These devices are listed through this controller's API token and are in HomeKit already. Adding a local user's username and password " +
   "lets the plugin read the controller's own document as well: its name and uptime on this panel, and an Access Enterprise hub's ports.";
-
-// The context-route literal, the plugin's addition to the shared status protocol. It must stay in step with ACCESS_STATUS_CONTEXT_ROUTE in src/webui-status.ts,
-// the route's owner, because browser code cannot import from dist/. The route carries each configured controller's identity beside the decorated serials of the
-// devices its kept probe answer listed; the shared push event and view route belong to homebridge-plugin-utils and arrive through the imported panel component.
-const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 
 /* The configuration interpreters that need the served catalog, built over the framework's own page-lifetime read of it. A save and a removal reach them through
  * here rather than holding an instance, so a removal that happens long after the load-time wiring builds against the same catalog the boot read: the accessor
@@ -373,7 +369,7 @@ const commitConfig = (compose, options) => ui.featureOptions.commitConfig(compos
  * connection check and the status-context send, which travel over the UI-server bridge, and the row shape the UI server writes a controller into, which the serial
  * read interprets. The listed-address check comes from the controller list bound above and its sentence from the interpretation module, rather than through the
  * interpreters, because neither needs the catalog and a save's refusal must not wait on a catalog read. The error text rule is homebridge-plugin-utils', handed in
- * beside them because the module takes no imports. What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
+ * beside them because the module imports types alone. What the actions keep about each controller stays theirs, and the page reads it back through the handle alone.
  */
 const { answers, removeController, saveController } = makeControllerActions({
 

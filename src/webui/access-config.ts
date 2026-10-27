@@ -1,8 +1,9 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * access-config.mjs: Pure interpreters over the injected Access platform configuration.
+ * access-config.ts: Pure interpreters over the injected Access platform configuration.
  */
-"use strict";
+import type { CatalogIndex, FeatureCategoryEntry, FeatureOptionEntry, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName,
+  enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, scopeSafeId } from "homebridge-plugin-utils";
 
 /* The single home for our plugin-config shape. Every function here is pure - no I/O, no global reach - and reads the primary platform-config entry the webUI
  * framework injects into our hooks or what the UI server's probe answered. The framework owns reading and writing the persisted config through its session; this
@@ -13,20 +14,261 @@
  * Two settings substrates meet here. A feature option is where a setting lives, and a set of per-controller configuration properties are a second home the plugin
  * honors so that a configuration nobody has opened the webUI on keeps working. The migration reconciles the two, moving each property's value into the option that
  * supersedes it and rebuilding the item without it, and the same pass folds the retired 1.x per-member booleans into the lists that supersede them and carries the
- * entries keyed by a controller's address onto its MAC address. The module takes no imports at all - the engine class, the served catalog, homebridge-plugin-utils'
- * listed-address and display-name rules, and every framework helper the interpreters use are handed in - so the whole of it is exercisable under Node against the
- * real engine, the real catalog, and the real rules, with no network and no DOM.
+ * entries keyed by a controller's address onto its MAC address. The module imports types alone, which the compiler erases, so it stays browser-safe: the engine
+ * class, the served catalog, homebridge-plugin-utils' listed-address and display-name rules, and every framework helper the interpreters use are handed in, so the
+ * whole of it is exercisable under Node against the real engine, the real catalog, and the real rules, with no network and no DOM.
+ *
+ * A configuration arrives as whatever a user's `config.json` holds, so the shapes below type its members unknown. Where a reader takes one of those members as the
+ * shape an editor writes - a string with a length, the tokens object - a type assertion states that reading and nothing more. An assertion compiles away and
+ * changes no expression, so a value of another shape that a hand edit left meets the same read: a number or a boolean carries no length and reads as absent,
+ * rather than throwing.
  */
 
-/* The keys a controllers[] item converges to: everything the plugin's own controller options type declares, less the properties that migrate into feature
- * options. Each item's successor is rebuilt from this list rather than edited down from the original, which is what retires a key by simply never carrying it - a
- * consumed legacy key leaves that way, as does any key a hand-edit left behind that neither the plugin nor its configuration schema reads. An item key therefore
- * deletes by OMISSION, and the migration's assertions read it that way.
+/**
+ * One configured controller, as it actually arrives from the Homebridge UI. Every property is declared as an unknown-valued optional because that is the honest shape
+ * of an object read back from a user's `config.json`: a property may be absent, may carry a hand-edited value of any type, and may be a retired name no part of the
+ * plugin reads any more. Interpreting exactly that is what the module is for.
+ */
+export interface AccessControllerConfig {
+
+  [key: string]: unknown;
+  address?: unknown;
+  mqttTopic?: unknown;
+  mqttUrl?: unknown;
+  name?: unknown;
+  password?: unknown;
+  tokens?: unknown;
+  username?: unknown;
+  verifyTls?: unknown;
+}
+
+/**
+ * The primary platform-configuration entry, on the same terms the controller shape above states: a user's `config.json` is free to carry anything at all under these
+ * names, and telling an active choice apart from a hand-edit we decline to interpret is the migration's job rather than the type system's.
+ */
+export interface AccessConfig {
+
+  controllers?: unknown;
+  options?: unknown;
+}
+
+/**
+ * The identity fields an editor writes onto a controller item, and the shape the identity predicate reads. The values stay unknown because they are carried straight
+ * through from the configuration or from a form field without being validated: the UI server's own connect is what finds out whether they work.
+ */
+export interface AccessIdentity {
+
+  address?: unknown;
+  password?: unknown;
+  tokens?: unknown;
+  username?: unknown;
+  verifyTls?: unknown;
+}
+
+/**
+ * A failure verdict: no devices, the user-facing reason, the headline the surfaces render it under, and a guidance line where the surfaces' own standing guidance
+ * would send the user after the wrong thing.
+ */
+export interface AccessProbeFailure {
+
+  devices: Record<string, unknown>[];
+  guidance?: string;
+  headline: string;
+  kind: "error";
+  message: string;
+}
+
+/**
+ * A success verdict: the list the controller answered with - the controller's own row first, then the topology's devices or, for a token-only connect, the official API's
+ * adopted inventory - and an empty message.
+ */
+export interface AccessProbeSuccess {
+
+  devices: Record<string, unknown>[];
+  kind: "connected" | "token-only";
+  message: string;
+
+  /** Whether the controller refused the API token supplied beside a connected answer's credentials; a token-only answer always carries false. */
+  tokenRefused: boolean;
+}
+
+/** The UI server's device probe, read into the one verdict every consumer branches on. */
+export type AccessProbeVerdict = AccessProbeFailure | AccessProbeSuccess;
+
+/**
+ * A device-list outcome as the framework's hook contract carries it: the devices, the failure text (empty on a success), and only the copy members the outcome
+ * carries - a failure's headline and its guidance.
+ */
+export interface AccessDeviceListResult {
+
+  devices: Record<string, unknown>[];
+  error: string;
+  guidance?: string;
+  headline?: string;
+}
+
+/**
+ * The commit-shaped patch the migration, the controller save, and the controller removal produce. No per-item key appears here, because a key leaves an item by
+ * OMISSION - the migration rebuilds each successor from CONTROLLER_KEYS, and an identity write deletes the fields an editor left empty - so the whole controllers
+ * array travels rather than a per-item change. The migration carries the controllers array only when at least one item's successor differs from the item it
+ * replaces, and the options array only when it changed the entries. A save and a removal always carry the controllers array; a save carries the options array
+ * only when it moved an entry, and a removal only when the user asked for the sweep.
+ */
+export interface AccessConfigPatch {
+
+  controllers?: AccessControllerConfig[];
+  options?: string[];
+}
+
+/**
+ * One device row of the UI server's answer, as the page names it. Every other field a row carries is the controller's record or the page's own processing, which
+ * the namer reads nothing of.
+ */
+export interface AccessDeviceRow {
+
+  [key: string]: unknown;
+
+  /** The name the UI server composed for the device as HomeKit names its accessory with no custom name applied, absent on the controller's own row. */
+  homeKitName?: string;
+
+  /** The name the controller reports. */
+  name?: string;
+
+  /** The device's decorated serial, the scope the framework addresses the row's options at. */
+  serialNumber?: string;
+}
+
+/**
+ * The interpreters that need the served catalog. Each is declared as a property carrying a function rather than as a method, which is what the module actually
+ * builds - an object of arrow functions closed over the injected catalog - so a consumer is free to read one off the holder and call it on its own. The controller
+ * save answers null rather than composing a patch when another configured controller already holds the address it writes.
+ */
+export interface AccessConfigInterpreter {
+
+  controllersAwaitingMigration: (config?: AccessConfig) => AccessIdentity[];
+
+  /**
+   * The namer for one configuration's device rows, over one engine for the whole list. A row shows its name as HomeKit carries it: the custom name the user set where
+   * HomeKit can carry it, and the name the UI server composed otherwise, falling back to the name the row carries where it carries no composed one, by
+   * homebridge-plugin-utils' display-name rule.
+   */
+  deviceNamer: (config?: AccessConfig) => (row: AccessDeviceRow) => string;
+  migrate: (config?: AccessConfig, macByAddress?: ReadonlyMap<string, string>) => AccessConfigPatch | null;
+  withControllerRemoved: (config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }) => AccessConfigPatch;
+  withControllerSaved: (config: AccessConfig | undefined,
+    controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }) => AccessConfigPatch | null;
+}
+
+/**
+ * The interpreters of the configured controller list, which makeControllerList builds over homebridge-plugin-utils' listed-address rule. Each is declared as a
+ * property carrying a function, which is what the factory builds, so a consumer is free to read one off the object and call it on its own.
+ */
+export interface AccessControllerList {
+
+  /**
+   * Whether a controller save would be refused because another configured controller already holds the address it writes, compared in homebridge-plugin-utils'
+   * listing form and asked of the configuration the page last received, so a save can answer before its connection test. A save that writes its own item's
+   * address, in any spelling, is never refused, and an address the rule gives no form is never listed. The composer's own refusal, made against the
+   * configuration at the write, is the one that decides.
+   */
+  controllerListedElsewhere: (config: AccessConfig | null | undefined, save: { address?: unknown; originalAddress?: unknown }) => boolean;
+
+  /**
+   * The configured controllers, one entry per listed address: the stored entries themselves in their stored order, keeping the first entry at each address and
+   * every entry whose address has no form, and leaving out every later entry at an address and every entry that is not an object, or an empty list when the
+   * configuration holds no list.
+   */
+  controllers: (config?: AccessConfig) => AccessControllerConfig[];
+
+  /**
+   * The controllers array that writes one controller's identity onto the item its original address names, or appends it where that names none, composed over the
+   * list one entry per listed address. Null means the address is already listed and nothing is to be written.
+   */
+  controllersWithSave: (config: AccessConfig | undefined, save: AccessIdentity & { originalAddress?: unknown }) => AccessControllerConfig[] | null;
+
+  /** The primary controller entry (the first), or undefined on a fresh configuration. */
+  primaryController: (config?: AccessConfig) => AccessControllerConfig | undefined;
+
+  /** Whether the first-run save would be refused because a controller after the primary already holds the address it writes, the primary being the rule's target. */
+  primaryListedElsewhere: (config: AccessConfig | null | undefined, identity: { address?: unknown }) => boolean;
+
+  /**
+   * The controllers patch that writes an identity onto the primary controller, preserving the additional controllers the configured list holds, one entry per
+   * listed address, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary holds the address the
+   * identity writes.
+   */
+  withPrimaryIdentity: (config: AccessConfig | undefined, identity: AccessIdentity) => { controllers: AccessControllerConfig[] } | null;
+}
+
+// The tokens object a controller item carries, as an editor writes it: the access token alone.
+interface ConfiguredTokens {
+
+  access?: string;
+}
+
+// The UI server's probe answer, in the members its reading takes from it. The answer arrives unknown, so the reading asserts this shape at each read.
+interface ProbeAnswer {
+
+  devices?: unknown;
+  kind?: unknown;
+  message?: unknown;
+}
+
+// A success answer, as the server writes one under a success tag, which is how the reading takes an answer once its tag and its list check out.
+interface ProbeSuccessAnswer {
+
+  devices: Record<string, unknown>[];
+  kind: "connected" | "token-only";
+  tokenRefused?: unknown;
+}
+
+// What a rejected probe request may carry, read off whatever was thrown.
+interface ProbeRejection {
+
+  message?: unknown;
+}
+
+// One retired family: the list option that supersedes it, and each of its members as the list's own value paired with the boolean that switched that member.
+interface RetiredFamily {
+
+  readonly members: readonly (readonly [ string, string ])[];
+  readonly option: string;
+}
+
+// What makeControllerList is built over. It is declared here at module scope, where `typeof addressListingForm` names the imported rule, rather than in the factory's
+// parameter, where the same words would name the parameter itself.
+interface ControllerListDependencies {
+
+  addressListedElsewhere: typeof addressListedElsewhere;
+  addressListingForm: typeof addressListingForm;
+}
+
+// What makeAccessConfig is built over, declared at module scope for the same reason as the dependencies above: `typeof FeatureOptions` here names the imported class.
+interface AccessConfigDependencies {
+
+  FeatureOptions: typeof FeatureOptions;
+  buildCatalogIndex: typeof buildCatalogIndex;
+  catalog: CatalogIndex;
+  controllers: AccessControllerList["controllers"];
+  controllersWithSave: AccessControllerList["controllersWithSave"];
+  displayedName: typeof displayedName;
+  enumerateConfiguredEntries: typeof enumerateConfiguredEntries;
+  enumerateScopeEntries: typeof enumerateScopeEntries;
+  formatValueList: typeof formatValueList;
+  scopeSafeId: typeof scopeSafeId;
+}
+
+/**
+ * The keys a controllers[] item converges to - every controller property except the ones that migrate into feature options.
+ *
+ * A controller property is one the plugin's own controller options type declares. Each item's successor is rebuilt from this list rather than edited down from the
+ * original, which is what retires a key by simply never carrying it - a consumed legacy key leaves that way, as does any key a hand-edit left behind that neither
+ * the plugin nor its configuration schema reads. An item key therefore deletes by OMISSION, and the migration's assertions read it that way.
  *
  * The list is wider than a connection triple deliberately. An item carries an API token and a TLS-verification preference alongside its credentials, and a rebuild
  * that carried only the credentials would silently delete both.
  */
-export const CONTROLLER_KEYS = [ "address", "name", "password", "tokens", "username", "verifyTls" ];
+export const CONTROLLER_KEYS = [ "address", "name", "password", "tokens", "username", "verifyTls" ] as const;
 
 /* The legacy PER-CONTROLLER configuration properties, each paired with the feature option that supersedes it at controller scope. These cannot move on the strength
  * of the configuration alone: an option entry is addressed by the controller's MAC address, and a configuration file records only the address the plugin connects
@@ -46,7 +288,7 @@ const PER_CONTROLLER_SETTINGS = {
  * Each member is a pair of the list's own value, which is what a composed entry stores, against the boolean that switched it. They are an ordered array because the
  * order is the order the list offers its members, and that is the order a composed entry has to read in.
  */
-const RETIRED_FAMILIES = [
+const RETIRED_FAMILIES: readonly RetiredFamily[] = [
 
   {
 
@@ -67,21 +309,22 @@ const DEVICE_NAME_OPTION = "Device.Name";
 // The plain string identity fields an editor writes onto a controller item. Each one deletes by omission when the user leaves it empty, which is what makes clearing
 // a field in the editor mean the same thing as never having filled it in. The tokens object and the TLS preference are written by arms of their own below, since
 // neither is a string this presence test could read.
-const IDENTITY_KEYS = [ "address", "password", "username" ];
+const IDENTITY_KEYS = [ "address", "password", "username" ] as const;
 
-/* Whether a controller item describes an identity the plugin can connect with, which is the browser-side statement of the plugin's own composeConnectIdentity rule
- * and is checked against it by this module's test suite.
+/**
+ * Whether a controller item describes an identity the plugin can connect with, mirroring composeConnectIdentity's verdict exactly: it is the browser-side
+ * statement of the plugin's own rule, and this module's test suite checks it against that rule.
  *
  * The rule reads in one order and that order is the whole of it: a complete credential pair is an identity, with or without a token beside it; half a pair describes
  * no way of authenticating and is rejected BEFORE the token is ever considered, so a username with no password is invalid even with a perfectly good token in the
  * same item; and a token on its own is an identity. An address is a separate requirement the caller asks about separately, exactly as the platform's own
  * configuration gate does.
  */
-export const hasValidIdentity = (controller) => {
+export const hasValidIdentity = (controller?: AccessIdentity): boolean => {
 
-  const password = controller?.password;
-  const token = controller?.tokens?.access;
-  const username = controller?.username;
+  const password = controller?.password as string | undefined;
+  const token = (controller?.tokens as ConfiguredTokens | undefined)?.access;
+  const username = controller?.username as string | undefined;
 
   if(username?.length && password?.length) {
 
@@ -96,16 +339,16 @@ export const hasValidIdentity = (controller) => {
   return Boolean(token?.length);
 };
 
-// The headline for a controller the plugin could not reach, rendered on the connection card's result line and as the framework's error-view headline.
+/** The headline a controller the plugin could not reach is rendered under: the connection card's result line and the framework's error-view headline. */
 export const CONNECTION_FAILURE_HEADLINE = "Unable to connect to the UniFi Access controller.";
 
-// The headline for a UI server answering in a shape it never writes, rendered on the card's result line and as the framework's error-view headline.
+/** The headline a UI server answering in a shape it never writes is rendered under: the card's result line and the framework's error-view headline. */
 export const SERVER_FAILURE_HEADLINE = "The plugin's UI server did not answer as expected.";
 
 // Why the UI server failed when nothing more specific is known: an answer in a shape it never writes, or a rejected probe request that carried no message of its own.
 const SERVER_FAILURE_MESSAGE = "The plugin's UI server answered in an unrecognized shape.";
 
-// What to do about a UI server answering in a shape it never writes, rendered beneath the headline above on the card and in the error view.
+/** What to do about a UI server answering in a shape it never writes, rendered beneath the headline above on the card and in the error view. */
 export const SERVER_FAILURE_GUIDANCE = "Reload this page. If it keeps happening, restart Homebridge and check its log for the reason.";
 
 // The headline for a sidebar entry whose controller left the configuration, rendered as the framework's error-view headline.
@@ -117,7 +360,9 @@ const STALE_SELECTION_MESSAGE = "Its entry left the configuration after the side
 // What to do about a sidebar entry whose controller left the configuration, rendered as the error view's guidance.
 const STALE_SELECTION_GUIDANCE = "Refresh the controller list to take it off the sidebar.";
 
-/* Read the UI server's device probe, which is the ONE place the server's kind-tagged response protocol is interpreted.
+/**
+ * Read the UI server's kind-tagged device probe into the verdict every consumer branches on. This is the ONE place the server's kind-tagged response protocol is
+ * interpreted.
  *
  * The server answers a kind-tagged union rather than a device list the browser has to interpret, because its successful outcomes differ in what a user can do with
  * them rather than in what they look like. Each leads with the controller's own row: a credentialed connect fills it from the controller's information document and
@@ -131,9 +376,9 @@ const STALE_SELECTION_GUIDANCE = "Refresh the controller list to take it off the
  * verdict also carries the headline its surfaces render it under, and a guidance line only where each surface's own standing guidance would send the user after the
  * wrong thing.
  */
-export const classifyProbeResponse = (response) => {
+export const classifyProbeResponse = (response?: unknown): AccessProbeVerdict => {
 
-  switch(response?.kind) {
+  switch((response as ProbeAnswer | null | undefined)?.kind) {
 
     /* Both successes carry a device list, so one arm validates the shape for each and the tag is carried through to tell the two apart downstream. Whether the
      * controller refused a token supplied beside the credentials is carried through as well, and an answer that does not state it reads as false rather than
@@ -142,13 +387,15 @@ export const classifyProbeResponse = (response) => {
     case "connected":
     case "token-only":
 
-      return Array.isArray(response.devices) ? { devices: response.devices, kind: response.kind, message: "", tokenRefused: response.tokenRefused === true } :
+      return Array.isArray((response as ProbeAnswer).devices) ? { devices: (response as ProbeSuccessAnswer).devices, kind: (response as ProbeSuccessAnswer).kind,
+        message: "", tokenRefused: (response as ProbeSuccessAnswer).tokenRefused === true } :
         { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
           message: "The plugin's UI server answered a connection without a device list." };
 
     case "error":
 
-      return { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error", message: (typeof response.message === "string") ? response.message : "" };
+      return { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error",
+        message: (typeof (response as ProbeAnswer).message === "string") ? (response as ProbeAnswer).message as string : "" };
 
     default:
 
@@ -156,8 +403,10 @@ export const classifyProbeResponse = (response) => {
   }
 };
 
-/* Read the detail a rejected probe request carries, which is the one place such a rejection is interpreted, so every surface that runs the connection check reads
- * it the same way.
+/**
+ * The detail a rejected probe request carries: its message where that is a string, the rejection itself where it is a string, and the unrecognized-shape sentence
+ * wherever neither leaves a non-empty string. This is the one place such a rejection is interpreted, so every surface that runs the connection check reads it the
+ * same way.
  *
  * The bridge rejects with the plain object the host's UI server sends, which carries a message, and a thrown error carries one too, so the message is read off
  * whatever was thrown rather than off an error alone. A rejection that is itself a string is its own detail. Anything that leaves no non-empty string carries the
@@ -167,31 +416,36 @@ export const classifyProbeResponse = (response) => {
  *
  * @returns The detail the connection check's failure shows beneath its sentence.
  */
-export const readProbeRejection = (reason) => {
+export const readProbeRejection = (reason: unknown): string => {
 
-  const message = reason?.message;
+  const message = (reason as ProbeRejection | null | undefined)?.message;
   const detail = (typeof message === "string") ? message : ((typeof reason === "string") ? reason : "");
 
   return detail.length ? detail : SERVER_FAILURE_MESSAGE;
 };
 
-/* The verdict of a sidebar entry whose controller left the configuration after the sidebar was built. It is composed here beside the probe verdicts because it is
- * one: every device-list outcome the page hands the framework for a selected controller goes through the one result composition below, so the copy for this
- * failure lives with the copy for every other. Fresh per call, so no two results share a device array.
+/**
+ * The verdict of a sidebar entry whose controller left the configuration after the sidebar was built, fresh per call.
+ *
+ * It is composed here beside the probe verdicts because it is one: every device-list outcome the page hands the framework for a selected controller goes through
+ * the one result composition below, so the copy for this failure lives with the copy for every other. A fresh verdict per call is what keeps results from
+ * sharing a device array.
  */
-export const staleSelectionVerdict = () => ({ devices: [], guidance: STALE_SELECTION_GUIDANCE, headline: STALE_SELECTION_HEADLINE, kind: "error",
+export const staleSelectionVerdict = (): AccessProbeFailure => ({ devices: [], guidance: STALE_SELECTION_GUIDANCE, headline: STALE_SELECTION_HEADLINE, kind: "error",
   message: STALE_SELECTION_MESSAGE });
 
-/* Map a probe verdict onto the device list and connection outcome the framework's own hook contract carries, with each outcome's own copy beside it. A success
- * carries its devices and an empty message, and a failure carries no devices, its reason, its headline, and its guidance where it has one. Only the members an
- * outcome carries are written, because an absent member is how the contract says the framework's own wording applies.
+/**
+ * Map a probe verdict onto the device list and connection outcome the framework's hook contract carries, with each outcome's own copy beside it.
+ *
+ * A success carries its devices and an empty message, and a failure carries no devices, its reason, its headline, and its guidance where it has one. Only the
+ * members an outcome carries are written, because an absent member is how the contract says the framework's own wording applies.
  *
  * No success needs a nothing-to-list notice: every device list a controller answers with opens with that controller's own row, whichever way it was reached, so
  * the shortest list a reachable controller can produce still carries a node to select and an options table to render against it.
  */
-export const deviceListResult = (verdict) => {
+export const deviceListResult = (verdict: AccessProbeVerdict): AccessDeviceListResult => {
 
-  const result = { devices: verdict.devices, error: verdict.message };
+  const result: AccessDeviceListResult = { devices: verdict.devices, error: verdict.message };
 
   if(verdict.kind === "error") {
 
@@ -222,23 +476,28 @@ export const deviceListResult = (verdict) => {
  * TLS verification is written only when it is on. An absent property and a false one mean the same thing to the plugin, and carrying the false form would add a key
  * to every item the editor touches for no reading anything makes.
  */
-const withIdentityApplied = (base, identity) => {
+const withIdentityApplied = (base: AccessControllerConfig | undefined, identity: AccessIdentity): AccessControllerConfig => {
 
   const successor = { ...base };
 
   for(const key of IDENTITY_KEYS) {
 
-    if(identity[key]?.length) {
+    if((identity[key] as string | undefined)?.length) {
 
       successor[key] = identity[key];
 
       continue;
     }
 
+    /* The key is one of the identity field names above, so this deletes a member the item declares rather than an arbitrary one. Deleting it is what leaves a
+     * cleared field absent, the shape a cleared field is read by everywhere the configuration is consulted, where a write of undefined in its place would leave the
+     * key present.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
     delete successor[key];
   }
 
-  const access = identity.tokens?.access;
+  const access = (identity.tokens as ConfiguredTokens | undefined)?.access;
 
   if(access?.length) {
 
@@ -260,19 +519,23 @@ const withIdentityApplied = (base, identity) => {
   return successor;
 };
 
-// What a save says when the address it writes is one another configured controller already holds. It is stated once, here beside the rule that refuses such a
-// save, and the page hands it to every surface that speaks the refusal.
+/**
+ * What a save says when the address it writes is one another configured controller already holds, stated once for every surface that speaks the refusal. It lives
+ * beside the rule that refuses such a save, and the page hands it to each of those surfaces.
+ */
 export const CONTROLLER_LISTED_WARNING = "This controller is already listed.";
 
 // The index of the item a save writes onto: the one whose address is exactly the address the save started from, or -1 for an add and for an original address no
 // item holds. The composer and the early check find their target here alike, so they ask the rule about the same item.
-const saveTarget = (items, originalAddress) => (originalAddress === undefined) ? -1 : items.findIndex((item) => item?.address === originalAddress);
+const saveTarget = (items: readonly AccessControllerConfig[], originalAddress: unknown): number => (originalAddress === undefined) ? -1 :
+  items.findIndex((item) => item.address === originalAddress);
 
-/* Build the interpreters of the configured controller list over homebridge-plugin-utils' listed-address rule: its listing form, the form addresses are compared
+/**
+ * Build the interpreters of the configured controller list over homebridge-plugin-utils' listed-address rule: its listing form, the form addresses are compared
  * in, and its check of whether a saved address is already listed at another position. Every interpreter here reads the list one entry per listed address, so each
- * one needs the rule, and handing the rule in is what keeps this module import-free while the page, its suites, and the plugin all read a controller's address
- * through the one rule. What counts as one address is the rule's to state; what this module states is which entry at an address is kept, and what a save may
- * write. None of these needs the served catalog, so a save's refusal never waits on a catalog read.
+ * one needs the rule, and handing the rule in is what keeps this module's imports to types alone while the page, its suites, and the plugin all read a
+ * controller's address through the one rule. What counts as one address is the rule's to state; what this module states is which entry at an address is kept,
+ * and what a save may write. None of these needs the served catalog, so a save's refusal never waits on a catalog read.
  *
  * Every lookup on the page stays exact, because a lookup asks which stored entry a key names and the stored string is that key. The refusal asks a different
  * question - whether a new entry would name a controller already listed - and the plugin uses only the first entry at an address, skipping every later one at
@@ -285,7 +548,7 @@ const saveTarget = (items, originalAddress) => (originalAddress === undefined) ?
  *
  * @returns The interpreters of the configured controller list, each under the name the page calls it by.
  */
-export const makeControllerList = ({ addressListedElsewhere, addressListingForm }) => {
+export const makeControllerList = ({ addressListedElsewhere, addressListingForm }: ControllerListDependencies): AccessControllerList => {
 
   /* The configured controllers, one entry per listed address: the stored entries in their stored order, with every entry after the first at one listing form left
    * out, and an empty list when the configuration holds no list at all, so a caller never branches on what a hand edit left there. An entry that is not an object
@@ -295,23 +558,23 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    * edits, lists, and removes that same entry, and every write composed over this list persists the list as read, which is how a repeated entry leaves the
    * configuration file. The entries are the stored objects themselves rather than copies, so a writer carries each entry it does not name across untouched.
    */
-  const controllers = (config) => {
+  const controllers = (config?: AccessConfig | null): AccessControllerConfig[] => {
 
     if(!Array.isArray(config?.controllers)) {
 
       return [];
     }
 
-    const listed = new Set();
+    const listed = new Set<string>();
 
-    return config.controllers.filter((item) => {
+    return config.controllers.filter((item: unknown): item is AccessControllerConfig => {
 
       if((typeof item !== "object") || (item === null)) {
 
         return false;
       }
 
-      const form = addressListingForm(item.address);
+      const form = addressListingForm((item as AccessControllerConfig).address);
 
       if(form === null) {
 
@@ -330,7 +593,7 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
   };
 
   // The primary controller entry (the first), or undefined on a fresh configuration.
-  const primaryController = (config) => controllers(config)[0];
+  const primaryController = (config?: AccessConfig): AccessControllerConfig | undefined => controllers(config)[0];
 
   /* Whether the address a save writes onto the item at `index` is held by any other configured item, where an index of -1 names no target and the save appends.
    * This is the one question the save's composer, the first-run composer, and the page's early checks all ask of the rule, so none of them can disagree about
@@ -339,7 +602,8 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    * The items are the configured controllers as the page reads them, one entry per listed address, so no position but the target's own holds the target's form,
    * and a save that writes its target's own address in any spelling is never refused.
    */
-  const heldElsewhere = (items, index, address) => addressListedElsewhere({ address, addresses: items.map((item) => item.address), index });
+  const heldElsewhere = (items: AccessControllerConfig[], index: number, address: unknown): boolean => addressListedElsewhere({ address,
+    addresses: items.map((item) => item.address), index });
 
   /* Compose the controllers array that writes one controller's identity, either onto the item it already has or as a new item at the end.
    *
@@ -356,7 +620,8 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    *
    * @returns The controllers array to write, one entry per listed address, or null when the address is already listed and nothing is to be written.
    */
-  const controllersWithSave = (config, { address, originalAddress, password, tokens, username, verifyTls }) => {
+  const controllersWithSave = (config: AccessConfig | undefined, { address, originalAddress, password, tokens, username, verifyTls }: AccessIdentity &
+    { originalAddress?: unknown }): AccessControllerConfig[] | null => {
 
     const identity = { address, password, tokens, username, verifyTls };
     const items = controllers(config);
@@ -389,7 +654,8 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    *
    * @returns True when another configured controller already holds the written address.
    */
-  const controllerListedElsewhere = (config, { address, originalAddress }) => {
+  const controllerListedElsewhere = (config: AccessConfig | null | undefined,
+    { address, originalAddress }: { address?: unknown; originalAddress?: unknown }): boolean => {
 
     const items = controllers(config);
 
@@ -405,7 +671,8 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    *
    * @returns True when another configured controller already holds the written address.
    */
-  const primaryListedElsewhere = (config, { address }) => heldElsewhere(controllers(config), 0, address);
+  const primaryListedElsewhere = (config: AccessConfig | null | undefined, { address }: { address?: unknown }): boolean => heldElsewhere(controllers(config), 0,
+    address);
 
   /* Produce the patch that writes an identity onto the primary controller, preserving the additional controllers the configured list holds, one entry per listed
    * address, and the primary's other fields. This is the first-run save, and it composes nothing at all for an identity the plugin could not connect with: a
@@ -420,9 +687,9 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
    * @returns The `{ controllers }` patch, or null when the identity is not one the plugin can connect with, and null as well when a controller after the primary
    *          holds the address the identity writes, by the rule a controller save is refused under.
    */
-  const withPrimaryIdentity = (config, identity) => {
+  const withPrimaryIdentity = (config: AccessConfig | undefined, identity: AccessIdentity): { controllers: AccessControllerConfig[] } | null => {
 
-    if(!identity?.address?.length || !hasValidIdentity(identity)) {
+    if(!(identity.address as string | undefined)?.length || !hasValidIdentity(identity)) {
 
       return null;
     }
@@ -442,12 +709,17 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
   return { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity };
 };
 
-/* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, the predicate
- * naming which controllers still have settings to migrate, and the device-row namer. Injecting the engine class, the catalog index, the catalog builder, the entry
- * enumerators, the list formatter, the identifier repair, and homebridge-plugin-utils' display-name rule is what keeps this module import-free and exercisable under
- * Node against the real engine, the real catalog, and the real rule, rather than against a stand-in that could drift from any of them. The configured controller
- * list's reader and its save composer are handed in as makeControllerList built them, so every interpreter here reads and writes the entry at each address the page
- * shows and the plugin uses.
+/**
+ * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its entry
+ * enumerators, its list formatter, its scope-identifier repair, homebridge-plugin-utils' display-name rule, and the configured controller list's reader and save
+ * composer.
+ *
+ * The interpreters are the legacy-settings migration, the controller save, the controller removal, the predicate naming which controllers still have settings to
+ * migrate, and the device-row namer. Injecting those collaborators rather than importing them is what keeps this module's imports to types alone, which the
+ * compiler erases, so it stays browser-safe and exercisable under Node against the real engine, the real catalog, and the real rule, rather than against a
+ * stand-in that could drift from any of them. The
+ * configured controller list's reader and its save composer are handed in as makeControllerList built them, so every interpreter here reads and writes the entry
+ * at each address the page shows and the plugin uses.
  *
  * @param injected.FeatureOptions              - The feature-option engine class.
  * @param injected.buildCatalogIndex           - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
@@ -465,20 +737,21 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
  *          names its device links through.
  */
 export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, displayedName, enumerateConfiguredEntries,
-  enumerateScopeEntries, formatValueList, scopeSafeId }) => {
+  enumerateScopeEntries, formatValueList, scopeSafeId }: AccessConfigDependencies): AccessConfigInterpreter => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: every engine transform this
   // module drives - the option set, the scope clear, the scope move - composes a fresh array and reassigns its own field, and where this module assigns the
   // engine's entries itself it hands over a fresh filtered array, so the array it was given is never written to.
-  const engineFor = (config) => new FeatureOptions(catalog.categories, catalog.options, Array.isArray(config?.options) ? config.options : []);
+  const engineFor = (config?: AccessConfig): FeatureOptions => new FeatureOptions(catalog.categories as FeatureCategoryEntry[],
+    catalog.options as Record<string, FeatureOptionEntry[]>, Array.isArray(config?.options) ? config.options as string[] : []);
 
   /* The served catalog's options with every retired boolean added back to the category its name begins with, each as the default-on boolean it was. This is what the
    * retired-family composition reads a 1.x entry through: the served catalog declares none of these names, so the framework's grammar would decline to parse such an
    * entry at all, and a name-matching read of the raw array would be this module re-implementing the storage format.
    */
-  const legacyOptions = () => {
+  const legacyOptions = (): Record<string, FeatureOptionEntry[]> => {
 
-    const options = { ...catalog.options };
+    const options = { ...catalog.options } as Record<string, FeatureOptionEntry[]>;
 
     for(const family of RETIRED_FAMILIES) {
 
@@ -498,9 +771,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
    * option, addressed by the bare category name exactly as the framework's expandOption composes it. Every question about one option's own declaration - its
    * default state and its registered value - resolves through this one walk, so no two readings of a declaration can disagree.
    */
-  const catalogEntry = (option) => {
+  const catalogEntry = (option: string): FeatureOptionEntry | undefined => {
 
-    for(const [ category, entries ] of Object.entries(catalog?.options ?? {})) {
+    for(const [ category, entries ] of Object.entries(catalog.options)) {
 
       for(const entry of entries) {
 
@@ -516,12 +789,12 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
   // The value the catalog registers as an option's default, read off the served entry's own defaultValue field through the walk above. The engine's same-named
   // method answers a different question - the boolean enabled-state default - while its valueDefault reads this same declaration, rendered as a string.
-  const registeredDefault = (option) => catalogEntry(option)?.defaultValue;
+  const registeredDefault = (option: string): number | string | undefined => catalogEntry(option)?.defaultValue;
 
   // Whether an option is enabled by default, which is what decides whether its registered default is already the answer the user gets. A default-on value option
   // resolves to that default when nothing is configured; a default-off one resolves to nothing of its own, so its registered default is never the answer an
   // unconfigured read gets.
-  const defaultsOn = (option) => catalogEntry(option)?.default === true;
+  const defaultsOn = (option: string): boolean => catalogEntry(option)?.default === true;
 
   /* Whether a per-controller legacy value composes a controller-scoped entry. Configured-ness is asked through scope() rather than exists(), because the compose
    * target is a controller-scoped entry and ANY entry that already answers this controller's read outranks the property at runtime - the same expression the
@@ -531,7 +804,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
    * read already answers the registered default, so an entry restating it would manufacture configuration out of nothing. The MQTT topic prefix is such an
    * option, and reading the default off the catalog rather than naming it keeps that comparison honest if the plugin ever changes what it publishes under.
    */
-  const composesScoped = ({ engine, mac, option, value }) => {
+  const composesScoped = ({ engine, mac, option, value }: { engine: FeatureOptions; mac: string; option: string; value: unknown }): boolean => {
 
     if((typeof value !== "string") || !value.length || (engine.scope(option, undefined, mac) !== "none")) {
 
@@ -563,17 +836,17 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
    *
    * @returns True when a list was composed or a retired entry dropped.
    */
-  const composeRetiredFamilies = (engine, configuredOptions) => {
+  const composeRetiredFamilies = (engine: FeatureOptions, configuredOptions: string[]): boolean => {
 
     // One options record serves both, so the index the entries are read through and the engine they are resolved against describe the same catalog by construction.
     const options = legacyOptions();
     const legacyCatalog = buildCatalogIndex(catalog.categories, options);
-    const legacyEngine = new FeatureOptions(catalog.categories, options, configuredOptions);
+    const legacyEngine = new FeatureOptions(catalog.categories as FeatureCategoryEntry[], options, configuredOptions);
 
     // Whether a raw entry addresses any retired name, asked through the legacy enumerator over that entry alone rather than by matching text, so every spelling the
     // grammar accepts is caught by the same reading that composed from it. The loop is how a generator is asked whether it yields anything: it answers true on the
     // first entry and false when there is none.
-    const retired = (rawEntry) => RETIRED_FAMILIES.some((family) => family.members.some(([ , option ]) => {
+    const retired = (rawEntry: string): boolean => RETIRED_FAMILIES.some((family) => family.members.some(([ , option ]) => {
 
       for(const _entry of enumerateConfiguredEntries({ catalog: legacyCatalog, configuredOptions: [rawEntry], option })) {
 
@@ -588,7 +861,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
     for(const family of RETIRED_FAMILIES) {
 
       const members = family.members.map(([member]) => member);
-      const selectionAt = (scope) => family.members.filter(([ , option ]) => legacyEngine.test(option, scope || undefined)).map(([member]) => member);
+      const selectionAt = (scope: string): string[] => family.members.filter(([ , option ]) => legacyEngine.test(option, scope || undefined)).map(([member]) => member);
 
       /* The global scope is always composed, because a retired entry there is what every named scope's composition is measured against. Its key in this set is the
        * empty string, which becomes no scope at all wherever it is handed to the engine. Every named scope is collected in lower case: the storage format matches a
@@ -639,11 +912,11 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
   // Whether a rebuilt successor carries exactly what the item it replaces carried. This decides whether the controllers array joins the patch at all, and it is what
   // makes the rewrite converge: once every item is already its own allowlisted shape, no successor differs and a later pass leaves the array alone.
-  const unchanged = (item, successor) => {
+  const unchanged = (item: AccessControllerConfig, successor: AccessControllerConfig): boolean => {
 
     const keys = Object.keys(successor);
 
-    return (Object.keys(item ?? {}).length === keys.length) && keys.every((key) => item[key] === successor[key]);
+    return (Object.keys(item).length === keys.length) && keys.every((key) => item[key] === successor[key]);
   };
 
   /* The scope identifier a configured address answers by, or null for an address there is no identity to compose from. A configured item's address is typed
@@ -654,7 +927,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
    * answers an empty string empty, the engine reads an empty identifier as addressing nothing, and a scope move refuses one as its destination with a throw, so it
    * is answered null here rather than handed on. Every reader of that identity here asks through this one walk.
    */
-  const addressIdentity = (address) => {
+  const addressIdentity = (address: unknown): string | null => {
 
     const trimmed = (typeof address === "string") ? address.trim() : "";
 
@@ -663,7 +936,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
   // The scope identifier a controller serial answers by, or null where the page learned none. A serial arrives in the decorated scope form the UI server stamped
   // the controller's row with, so it is read for presence and never repaired; an empty string is the absence a form field hands over, not a name.
-  const serialIdentity = (serial) => (((typeof serial === "string") && serial.length) ? serial : null);
+  const serialIdentity = (serial: unknown): string | null => (((typeof serial === "string") && serial.length) ? serial : null);
 
   return {
 
@@ -689,14 +962,14 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
      *
      * @returns Each awaiting controller's identity and TLS preference.
      */
-    controllersAwaitingMigration: (config) => {
+    controllersAwaitingMigration: (config?: AccessConfig): AccessIdentity[] => {
 
-      const configuredOptions = Array.isArray(config?.options) ? config.options : [];
+      const configuredOptions = Array.isArray(config?.options) ? config.options as string[] : [];
       const properties = Object.keys(PER_CONTROLLER_SETTINGS);
 
-      const hasAddressEntry = (item) => {
+      const hasAddressEntry = (item: AccessControllerConfig): boolean => {
 
-        const identity = addressIdentity(item?.address);
+        const identity = addressIdentity(item.address);
 
         if(identity === null) {
 
@@ -713,8 +986,8 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
       // The controllers as the page reads them, one entry per listed address, so a repeated address is probed for the entry the plugin uses and for no other.
       return controllers(config)
-        .filter((item) => item?.username?.length && item?.password?.length &&
-          (properties.some((property) => item?.[property] !== undefined) || hasAddressEntry(item)))
+        .filter((item) => (item.username as string | undefined)?.length && (item.password as string | undefined)?.length &&
+          (properties.some((property) => item[property] !== undefined) || hasAddressEntry(item)))
         .map((item) => ({ address: item.address, password: item.password, tokens: item.tokens, username: item.username, verifyTls: item.verifyTls }));
     },
 
@@ -731,11 +1004,12 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
      *
      * @returns The namer: a device row in, the name the page shows for it out.
      */
-    deviceNamer: (config) => {
+    deviceNamer: (config?: AccessConfig): ((row: AccessDeviceRow) => string) => {
 
       const engine = engineFor(config);
 
-      return (row) => displayedName({ fallback: row?.homeKitName ?? row?.name ?? "", override: engine.value(DEVICE_NAME_OPTION, row?.serialNumber) });
+      return (row: AccessDeviceRow): string => displayedName({ fallback: row.homeKitName ?? row.name ?? "",
+        override: engine.value(DEVICE_NAME_OPTION, row.serialNumber) });
     },
 
     /* Move the legacy per-controller configuration properties into their feature options, as a patch for the session to stage. This is transitional work with a
@@ -768,7 +1042,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
      *
      * @returns The patch to commit, or null when there is nothing to do.
      */
-    migrate: (config, macByAddress) => {
+    migrate: (config?: AccessConfig, macByAddress?: ReadonlyMap<string, string>): AccessConfigPatch | null => {
 
       if(!config || ((config.controllers !== undefined) && !Array.isArray(config.controllers)) ||
         ((config.options !== undefined) && !Array.isArray(config.options))) {
@@ -777,11 +1051,11 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
       }
 
       const engine = engineFor(config);
-      const patch = {};
-      const successors = [];
+      const patch: AccessConfigPatch = {};
+      const successors: AccessControllerConfig[] = [];
 
       // The composition reads the entries as the user wrote them, so it is handed the raw array rather than whatever the engine holds once this pass starts writing.
-      let composed = composeRetiredFamilies(engine, Array.isArray(config.options) ? config.options : []);
+      let composed = composeRetiredFamilies(engine, Array.isArray(config.options) ? config.options as string[] : []);
       let rewritten = false;
 
       /* The items are the controllers as the page reads them, one entry per listed address, so at a repeated address a pass reads, composes, and carries forward the
@@ -790,13 +1064,13 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
        */
       for(const item of controllers(config)) {
 
-        const mac = macByAddress?.get(item?.address);
-        const successor = {};
-        const identity = addressIdentity(item?.address);
+        const mac = macByAddress?.get(item.address as string);
+        const successor: AccessControllerConfig = {};
+        const identity = addressIdentity(item.address);
 
         for(const key of CONTROLLER_KEYS) {
 
-          if(item?.[key] !== undefined) {
+          if(item[key] !== undefined) {
 
             successor[key] = item[key];
           }
@@ -811,7 +1085,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
         for(const [ property, option ] of Object.entries(PER_CONTROLLER_SETTINGS)) {
 
-          const value = item?.[property];
+          const value = item[property] as string | undefined;
 
           if(value === undefined) {
 
@@ -868,9 +1142,9 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
      *
      * @returns The patch for the session's commit to merge onto the platform entry.
      */
-    withControllerRemoved: (config, { address, macs = [] }) => {
+    withControllerRemoved: (config: AccessConfig | undefined, { address, macs = [] }: { address: unknown; macs?: readonly string[] }): AccessConfigPatch => {
 
-      const remaining = controllers(config).filter((item) => item?.address !== address);
+      const remaining = controllers(config).filter((item) => item.address !== address);
 
       if(!macs.length) {
 
@@ -881,7 +1155,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
 
       for(const mac of macs) {
 
-        engine.clearScope({ id: String(mac) });
+        engine.clearScope({ id: mac });
       }
 
       return { controllers: remaining, options: engine.configuredOptions };
@@ -920,7 +1194,8 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
      * @returns The patch for the session's commit to merge onto the platform entry, or null when another configured controller already holds the address this
      *          save writes, whether the save appends or moves its item onto it; nothing is composed.
      */
-    withControllerSaved: (config, controller) => {
+    withControllerSaved: (config: AccessConfig | undefined, controller: AccessIdentity & { originalAddress?: unknown; originalSerial?: unknown; serial?: unknown }):
+      AccessConfigPatch | null => {
 
       const items = controllersWithSave(config, controller);
 
@@ -929,7 +1204,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
         return null;
       }
 
-      const patch = { controllers: items };
+      const patch: AccessConfigPatch = { controllers: items };
       const serial = serialIdentity(controller.serial);
       const to = serial ?? addressIdentity(controller.address);
 
@@ -941,7 +1216,7 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
        * is absent - an add carries no original address, and a hand-edited value that is not a string names no identity.
        */
       const from = [ (serial === null) ? serialIdentity(controller.originalSerial) : null, addressIdentity(controller.originalAddress) ]
-        .filter((name) => (name !== null) && (name !== to));
+        .filter((name): name is string => (name !== null) && (name !== to));
 
       if((to === null) || !from.length) {
 

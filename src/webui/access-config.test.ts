@@ -17,14 +17,14 @@
  */
 import { ALL_CHOICES, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName, enumerateConfiguredEntries, enumerateScopeEntries,
   formatValueList, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
-import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
+import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "./access-config.ts";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse,
-  deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection, staleSelectionVerdict } from "../homebridge-ui/public/access-config.mjs";
-import { featureOptionCategories, featureOptions } from "./options.ts";
-import { ACCESS_MQTT_TOPIC } from "./settings.ts";
-import type { AccessControllerOptions } from "./options.ts";
+  deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection, staleSelectionVerdict } from "./access-config.ts";
+import { featureOptionCategories, featureOptions } from "../options.ts";
+import { ACCESS_MQTT_TOPIC } from "../settings.ts";
+import type { AccessControllerOptions } from "../options.ts";
 import assert from "node:assert/strict";
-import { composeConnectIdentity } from "./policy.ts";
+import { composeConnectIdentity } from "../policy.ts";
 import test from "node:test";
 
 // The controller these assertions migrate, a sibling that proves one controller's entries never answer for another, and a device beneath the first for the scope corner.

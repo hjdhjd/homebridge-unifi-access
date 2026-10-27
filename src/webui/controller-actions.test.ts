@@ -26,11 +26,11 @@
  * The connection check's rows run the real probe classifier, identity rule, and rejection reading behind a request double, so each failure's sentences and detail
  * are read where the check composes them.
  */
-import type { AccessConfig, AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "../homebridge-ui/public/access-config.mjs";
+import type { AccessConfig, AccessConfigPatch, AccessIdentity, AccessProbeSuccess, AccessProbeVerdict } from "./access-config.ts";
 import type { CommitConfig, CommitConfigResult, SaveAction } from "homebridge-plugin-utils";
-import type { ControllerActions, ControllerCard, ControllerProbe } from "../homebridge-ui/public/controller-actions.mjs";
-import { classifyProbeResponse, hasValidIdentity, readProbeRejection } from "../homebridge-ui/public/access-config.mjs";
-import { makeControllerActions, makeControllerProbe } from "../homebridge-ui/public/controller-actions.mjs";
+import type { ControllerActions, ControllerCard, ControllerProbe } from "./controller-actions.ts";
+import { classifyProbeResponse, hasValidIdentity, readProbeRejection } from "./access-config.ts";
+import { makeControllerActions, makeControllerProbe } from "./controller-actions.ts";
 import assert from "node:assert/strict";
 import { createSaveFlow } from "homebridge-plugin-utils";
 import test from "node:test";

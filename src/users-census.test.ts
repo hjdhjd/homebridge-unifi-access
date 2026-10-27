@@ -11,7 +11,7 @@
  */
 /* eslint-disable camelcase */
 import type { AccessOfficialResult, AccessOfficialUser, AccessOfficialUserListOptions } from "unifi-access";
-import { USERS_PAGE_SIZE, officialUsers } from "../homebridge-ui/users-census.js";
+import { USERS_PAGE_SIZE, officialUsers } from "./users-census.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
