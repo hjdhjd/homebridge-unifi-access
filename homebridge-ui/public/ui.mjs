@@ -14,6 +14,7 @@ import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-l
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
 import { createSaveFlow } from "homebridge-plugin-utils/webui/saveflow.js";
+import { displayedName } from "homebridge-plugin-utils/homekit-name.js";
 import { errorMessage } from "homebridge-plugin-utils/webUi-errors.mjs";
 import { webUi } from "homebridge-plugin-utils/webUi.mjs";
 
@@ -59,16 +60,18 @@ const TOKEN_ONLY_NOTICE = "These devices are listed through this controller's AP
 // devices its kept probe answer listed; the shared push event and view route belong to homebridge-plugin-utils and arrive through the imported panel component.
 const ACCESS_STATUS_CONTEXT_ROUTE = "/statusContext";
 
-// The configuration interpreters that need the served catalog, built over the framework's own page-lifetime read of it. Every caller reaches them through here
-// rather than holding an instance, so a removal that happens long after the load-time wiring builds against the same catalog the boot read: the accessor memoizes
-// one fetch for the page, bounds it, validates its shape once, and clears its memo on rejection so a later read retries rather than holding a transient fault for
-// the session. The index is rebuilt per call because it is a pure walk over a fixed catalog and its readers are the load-time wiring, a save, and a removal, each
-// rare.
+/* The configuration interpreters that need the served catalog, built over the framework's own page-lifetime read of it. A save and a removal reach them through
+ * here rather than holding an instance, so a removal that happens long after the load-time wiring builds against the same catalog the boot read: the accessor
+ * memoizes one fetch for the page, bounds it, validates its shape once, and clears its memo on rejection so a later read retries rather than holding a transient
+ * fault for the session. The index is rebuilt per call because it is a pure walk over a fixed catalog and its readers are the load-time wiring, a save, and a
+ * removal, each rare. The one instance anything keeps is the one the load-time wiring builds, which the sidebar's device links are named through, because they
+ * render synchronously and cannot wait on the catalog.
+ */
 const accessConfig = async () => {
 
   const { categories, options } = await ui.featureOptions.catalog();
 
-  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), controllers, controllersWithSave,
+  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), controllers, controllersWithSave, displayedName,
     enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, scopeSafeId });
 };
 
@@ -470,6 +473,75 @@ const getDevices = async (selectedController, { config }) => {
   }
 
   return deviceListResult(answer);
+};
+
+/* The configuration interpreter the load-time wiring built once the catalog resolved, or null before it lands. The sidebar renders a device link synchronously and
+ * cannot wait on the catalog, so retaining the interpreter here is what lets a link be named the moment it renders.
+ */
+let configInterpreter = null;
+
+/* The namer the sidebar last named device links through, and the options array it was built over. The edited configuration is composed afresh on every read, but its
+ * options array keeps its identity until an edit or a rollback moves it, so a sidebar build names every link through one engine and an edit builds one more.
+ */
+let linkNamer = { name: null, options: null };
+
+/* The text one device link shows: the name the plugin gives the device's accessory in HomeKit, with the custom name being edited applied where HomeKit can carry it,
+ * read from the edited configuration. Before the interpreter lands, a link shows the name the UI server composed for the device. Nothing here writes a row: the kept
+ * answers are the rows themselves, and a name written onto one would go on showing after its custom name was cleared.
+ */
+const deviceLinkName = (row) => {
+
+  if(!configInterpreter) {
+
+    return row.homeKitName ?? row.name ?? "";
+  }
+
+  const config = ui.featureOptions.editedConfig[0];
+
+  if(linkNamer.options !== config?.options) {
+
+    linkNamer = { name: configInterpreter.deviceNamer(config), options: config?.options };
+  }
+
+  return linkNamer.name(row);
+};
+
+// The class each device link's name node wears, which is how the repaint finds every one of them on the page.
+const DEVICE_LINK_NAME_CLASS = "hbua-device-name";
+
+/* Every device link's name node, mapped to the raw row it names. The framework rebuilds its links on its own schedule, so the repaint finds the nodes on the page
+ * as it stands rather than holding them, and a node the framework drops leaves this map with it.
+ */
+const linkRows = new WeakMap();
+
+// Compose one device link's content: the device's name, in a node of its own that the repaint can find again.
+const deviceContent = (device) => {
+
+  const node = document.createElement("span");
+
+  node.className = DEVICE_LINK_NAME_CLASS;
+  node.textContent = deviceLinkName(device);
+  linkRows.set(node, device);
+
+  return node;
+};
+
+/* Repaint every device link's name, once an edit or a refused write moved the configured options. A custom name is applied in the browser, so a rename needs this
+ * rather than a round trip. It runs synchronously inside the framework's hook, which reads the edited configuration as the change left it, and it changes no option
+ * and re-reads nothing, so it is as safe inside a drain as outside one. Each node is named from the raw row it rendered from, so a cleared custom name shows that
+ * row's own name again.
+ */
+const repaintDeviceLinks = () => {
+
+  for(const node of document.querySelectorAll("#devicesContainer ." + DEVICE_LINK_NAME_CLASS)) {
+
+    const row = linkRows.get(node);
+
+    if(row) {
+
+      node.textContent = deviceLinkName(row);
+    }
+  }
 };
 
 // Only show feature options that are valid for the capabilities of this device. Every read of the metadata channel is guarded at each step: the channel itself and
@@ -988,9 +1060,21 @@ const featureOptionsParams = {
   connectionErrorPanel: showControllerErrorPanel,
   getControllers: getControllers,
   getDevices: getDevices,
+
+  // Repaint the device names an options edit moved, the moment the framework announces it, so a custom name shows in the sidebar as soon as it is entered and before
+  // it is saved.
+  onOptionsEdited: () => repaintDeviceLinks(),
+
+  // Repaint the device names a refused write rolled back. The host refusing a write restores the configuration it last accepted without announcing an edit, so a
+  // custom name that never landed would otherwise stay on screen.
+  onOptionsRolledBack: () => repaintDeviceLinks(),
+
   sidebar: {
 
     controllerLabel: "Access Controllers",
+
+    // Each device link shows the device's name as the plugin names its accessory, the custom name being edited applied.
+    deviceContent: deviceContent,
 
     /* Where each group of the device list sits: the hubs first, then the readers that hang off them. The framework hands this comparator only the names that render
      * as sections, so neither a controller's own group nor the reserved hidden group ever reaches it, and a group the order above does not name sorts after every
@@ -1340,7 +1424,12 @@ const wiringSignal = wiringController.signal;
  */
 const wireAccessConfig = async () => {
 
-  const { controllersAwaitingMigration, migrate } = await accessConfig();
+  const interpreter = await accessConfig();
+
+  // Retain the interpreter for the sidebar's device links, which name themselves through it from here on, whatever becomes of the rest of this envelope.
+  configInterpreter = interpreter;
+
+  const { controllersAwaitingMigration, migrate } = interpreter;
 
   // The library's session is the single conduit the framework's own writes use, so the patch merges onto a replica synced just now rather than onto a snapshot taken
   // before the page opened. The name seeds the primary platform entry, and it is read from the same constant the framework is configured with so the two cannot drift.

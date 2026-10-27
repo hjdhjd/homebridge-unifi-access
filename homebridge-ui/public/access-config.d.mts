@@ -2,8 +2,8 @@
  *
  * access-config.d.mts: Type declarations for the pure Access platform-configuration interpreters.
  */
-import type { CatalogIndex, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries,
-  formatValueList, scopeSafeId } from "homebridge-plugin-utils";
+import type { CatalogIndex, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName, enumerateConfiguredEntries,
+  enumerateScopeEntries, formatValueList, scopeSafeId } from "homebridge-plugin-utils";
 
 /**
  * One configured controller, as it actually arrives from the Homebridge UI. Every property is declared as an unknown-valued optional because that is the honest shape
@@ -102,6 +102,24 @@ export interface AccessConfigPatch {
 }
 
 /**
+ * One device row of the UI server's answer, as the page names it. Every other field a row carries is the controller's record or the page's own processing, which
+ * the namer reads nothing of.
+ */
+export interface AccessDeviceRow {
+
+  [key: string]: unknown;
+
+  /** The name the UI server composed for the device as HomeKit names its accessory with no custom name applied, absent on the controller's own row. */
+  homeKitName?: string;
+
+  /** The name the controller reports. */
+  name?: string;
+
+  /** The device's decorated serial, the scope the framework addresses the row's options at. */
+  serialNumber?: string;
+}
+
+/**
  * The interpreters that need the served catalog. Each is declared as a property carrying a function rather than as a method, which is what the module actually
  * builds - an object of arrow functions closed over the injected catalog - so a consumer is free to read one off the holder and call it on its own. The controller
  * save answers null rather than composing a patch when another configured controller already holds the address it writes.
@@ -109,6 +127,13 @@ export interface AccessConfigPatch {
 export interface AccessConfigInterpreter {
 
   controllersAwaitingMigration: (config?: AccessConfig) => AccessIdentity[];
+
+  /**
+   * The namer for one configuration's device rows, over one engine for the whole list. A row shows its name as HomeKit carries it: the custom name the user set where
+   * HomeKit can carry it, and the name the UI server composed otherwise, falling back to the name the row carries where it carries no composed one, by
+   * homebridge-plugin-utils' display-name rule.
+   */
+  deviceNamer: (config?: AccessConfig) => (row: AccessDeviceRow) => string;
   migrate: (config?: AccessConfig, macByAddress?: ReadonlyMap<string, string>) => AccessConfigPatch | null;
   withControllerRemoved: (config: AccessConfig | undefined, removal: { address: unknown; macs?: readonly string[] }) => AccessConfigPatch;
   withControllerSaved: (config: AccessConfig | undefined,
@@ -182,22 +207,25 @@ export declare const hasValidIdentity: (controller?: AccessIdentity) => boolean;
 
 /**
  * Build the interpreters that need the served catalog over an injected feature-option engine class, the catalog index, the framework's catalog builder, its entry
- * enumerators, its list formatter, its scope-identifier repair, and the configured controller list's reader and save composer.
+ * enumerators, its list formatter, its scope-identifier repair, homebridge-plugin-utils' display-name rule, and the configured controller list's reader and save
+ * composer.
  *
  * @param injected.FeatureOptions             - The feature-option engine class.
  * @param injected.buildCatalogIndex          - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
  * @param injected.catalog                    - The catalog index, which carries the served categories and options alongside its derived indices.
  * @param injected.controllers                - The configured controllers, one entry per listed address, as makeControllerList reads them.
  * @param injected.controllersWithSave        - The controllers array a save writes, or null for an address already listed, as makeControllerList composes it.
+ * @param injected.displayedName              - homebridge-plugin-utils' display-name rule, which answers the custom name where one resolves and the fallback
+ *                                              otherwise, as HomeKit carries it.
  * @param injected.enumerateConfiguredEntries - The framework's own enumerator over the configured entries addressing one option.
  * @param injected.enumerateScopeEntries      - The framework's own enumerator over the configured entries reading at one scope identifier.
  * @param injected.formatValueList            - The framework's composition of a list option's stored form from its selected members.
  * @param injected.scopeSafeId                - The framework's repair of an arbitrary string into a scope identifier.
  *
- * @returns The migration, the awaiting-migration predicate, the controller save, and the controller removal.
+ * @returns The migration, the awaiting-migration predicate, the controller save, the controller removal, and the device-row namer.
  */
 export declare const makeAccessConfig: (injected: { FeatureOptions: typeof FeatureOptions; buildCatalogIndex: typeof buildCatalogIndex; catalog: CatalogIndex;
-  controllers: AccessControllerList["controllers"]; controllersWithSave: AccessControllerList["controllersWithSave"];
+  controllers: AccessControllerList["controllers"]; controllersWithSave: AccessControllerList["controllersWithSave"]; displayedName: typeof displayedName;
   enumerateConfiguredEntries: typeof enumerateConfiguredEntries; enumerateScopeEntries: typeof enumerateScopeEntries;
   formatValueList: typeof formatValueList; scopeSafeId: typeof scopeSafeId }) => AccessConfigInterpreter;
 

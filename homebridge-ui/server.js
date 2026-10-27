@@ -10,8 +10,8 @@
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
 import { AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
-import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceSerial, doorGuardChoices, hubSensorChoices, logEventChoices, membershipRecords,
-  officialDeviceModel, serialForm } from "../dist/policy.js";
+import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceDisplayName, deviceSerial, doorGuardChoices, hubSensorChoices, logEventChoices,
+  membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
 import { featureOptionCategories, featureOptions } from "../dist/options.js";
 import { HomebridgePluginUiServer } from "@homebridge/plugin-ui-utils";
 import { officialUsers } from "./users-census.js";
@@ -22,16 +22,19 @@ import util from "node:util";
 // equality alone and claims no ordering.
 const generation = Date.now();
 
-// The first of the supplied values that carries anything, or the empty string when none of them does. The collation below reads a device's name through several
-// spellings, and not every surface answers all of them.
-const nonEmpty = (...args) => args.find(value => (value !== undefined) && (value !== null) && (value !== "")) ?? "";
+/* Name a decorated device row as HomeKit names its accessory with no custom name applied, in a field of its own beside the controller's name, through the plugin's
+ * own rule, read from the compiled module the runtime names accessories with. The row is the decorated one rather than the raw record, because a record the
+ * official API answers with carries a hardware type and no model, and the decoration is what gives it the model the rule falls back to. The page applies only the
+ * custom name being edited, which it reads from the configuration it already holds, so an edit shows before anything is saved.
+ */
+const withHomeKitName = (row) => ({ ...row, homeKitName: deviceDisplayName(row).name });
 
-// Sort by display name, falling back through the spellings a device may be named by. The emitted order IS the sidebar's order - the webUI framework never re-sorts a
-// list a plugin supplied - so the collation belongs here, once, and serves both of the surfaces a device can be listed from.
+// Sort by the name HomeKit carries. The emitted order IS the sidebar's order - the webUI framework never re-sorts a list a plugin supplied - so the collation
+// belongs here, once, and serves every surface a device can be listed from, each sorting its rows once they carry that name.
 const byName = (a, b) => {
 
-  const aCase = nonEmpty(a.alias, a.name, a.model, a.display_model).toLowerCase();
-  const bCase = nonEmpty(b.alias, b.name, b.model, b.display_model).toLowerCase();
+  const aCase = a.homeKitName.toLowerCase();
+  const bCase = b.homeKitName.toLowerCase();
 
   return (aCase > bCase) ? 1 : ((bCase > aCase) ? -1 : 0);
 };
@@ -42,7 +45,7 @@ const byName = (a, b) => {
  * page uses, so it is flattened here rather than upstream. The official record carries a hardware type and no display model at all, so the display model comes from
  * the plugin's own policy mapping - reached through the same dist import that carries the identity composition - and a type the mapping does not name answers itself.
  * The door guard picker's list, the access methods the reader supports, and the two hub pick lists are attached here too, from the users census and the record's own
- * hardware alone, because this surface names no door's guards.
+ * hardware alone, because this surface names no door's guards. Each row is named as HomeKit names it once decorated, and the list is sorted by that name.
  *
  * There is no address on this surface, so the rendered IP row is empty for these devices. That is the honest answer: the official API does not report one.
  */
@@ -57,7 +60,7 @@ const officialDevices = (grouped, users) => grouped.flat().filter(device => devi
   /* eslint-disable-next-line camelcase */
   const hardware = { capabilities: [...(device.capabilities ?? [])], display_model: officialDeviceModel(device.type) };
 
-  return {
+  return withHomeKitName({
 
     // The methods this reader supports, as the settings page offers them, from the one catalog the switches themselves read.
     accessMethods: accessMethodChoices(device),
@@ -78,7 +81,7 @@ const officialDevices = (grouped, users) => grouped.flat().filter(device => devi
     serialNumber: serialForm(device.id),
     /* eslint-disable-next-line camelcase */
     unique_id: device.id
-  };
+  });
 }).sort(byName);
 
 class PluginUiServer extends HomebridgePluginUiServer {
@@ -273,12 +276,12 @@ class PluginUiServer extends HomebridgePluginUiServer {
            * device identity, computed by the function the runtime keys every read on, so what the webUI writes an option entry against is what the plugin reads
            * it back by...the browser can reach neither statement to derive one for itself. Each record also carries the door guard picker's list, the access methods
            * the reader supports, and the two hub pick lists, joined here from the door the device serves, the users census, and the record's own hardware, because
-           * the browser can reach none of them.
+           * the browser can reach none of them. Each is named as HomeKit names it once decorated, and the list is sorted by that name.
            */
           const doors = client.state.snapshot().doors;
-          const devices = [...membershipRecords(client.state.snapshot())].sort(byName).map(device => ({ ...device,
+          const devices = [...membershipRecords(client.state.snapshot())].map(device => withHomeKitName({ ...device,
             accessMethods: accessMethodChoices(device), doorGuards: doorGuardChoices({ guardIds: doors.get(device.location_id)?.door_guard, users }),
-            hubSensors: hubSensorChoices(device), logEvents: logEventChoices(device), serialNumber: deviceSerial(device) }));
+            hubSensors: hubSensorChoices(device), logEvents: logEventChoices(device), serialNumber: deviceSerial(device) })).sort(byName);
 
           // The controller is element 0 - the controller-as-device entry the feature options webUI selects on initial load.
           return { devices: [ controllerRecord, ...devices ], kind: "connected", tokenRefused: (client.capabilities.mode === "dual") && !client.capabilities.official };

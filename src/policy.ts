@@ -383,8 +383,8 @@ export interface AccessDeviceDisplayName {
 
 /**
  * The name HomeKit carries for a device: the first of the custom name the user set, the alias, the record's name, the model, and the literal "Access Device"
- * that has anything left once HomeKit's naming rules are applied, as those rules leave it. This is the one statement of the rule, read by the mint and by every
- * configure pass and rename the device makes, so none of them can name a device differently.
+ * that has anything left once HomeKit's naming rules are applied, as those rules leave it. This is the one statement of the rule, read by the mint, by every
+ * configure pass and rename the device makes, and by the settings server, so none of them can name a device differently.
  *
  * HAP refuses to mint an accessory whose display name is empty, and a name that is empty, blank, or made only of characters HomeKit disallows sanitizes to
  * nothing, so each step falls through on an empty sanitized result rather than on an absent member alone. The custom name arrives resolved, already refused

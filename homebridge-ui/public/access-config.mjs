@@ -14,8 +14,8 @@
  * honors so that a configuration nobody has opened the webUI on keeps working. The migration reconciles the two, moving each property's value into the option that
  * supersedes it and rebuilding the item without it, and the same pass folds the retired 1.x per-member booleans into the lists that supersede them and carries the
  * entries keyed by a controller's address onto its MAC address. The module takes no imports at all - the engine class, the served catalog, homebridge-plugin-utils'
- * listed-address rule, and every framework helper the interpreters use are handed in - so the whole of it is exercisable under Node against the real engine, the
- * real catalog, and the real rule, with no network and no DOM.
+ * listed-address and display-name rules, and every framework helper the interpreters use are handed in - so the whole of it is exercisable under Node against the
+ * real engine, the real catalog, and the real rules, with no network and no DOM.
  */
 
 /* The keys a controllers[] item converges to: everything the plugin's own controller options type declares, less the properties that migrate into feature
@@ -59,6 +59,10 @@ const RETIRED_FAMILIES = [
     option: "Log.Events"
   }
 ];
+
+// The feature option a device's custom HomeKit name is stored under, at the device's own scope, which is the one scope the option declares and where the plugin
+// reads it.
+const DEVICE_NAME_OPTION = "Device.Name";
 
 // The plain string identity fields an editor writes onto a controller item. Each one deletes by omission when the user leaves it empty, which is what makes clearing
 // a field in the editor mean the same thing as never having filled it in. The tokens object and the TLS preference are written by arms of their own below, since
@@ -438,26 +442,30 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
   return { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity };
 };
 
-/* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, and the predicate
- * naming which controllers still have settings to migrate. Injecting the engine class, the catalog index, the catalog builder, the entry enumerators, the list
- * formatter, and the identifier repair is what keeps this module import-free and exercisable under Node against the real engine and the real catalog, rather than
- * against a stand-in that could drift from either. The configured controller list's reader and its save composer are handed in as makeControllerList built them,
- * so every interpreter here reads and writes the entry at each address the page shows and the plugin uses.
+/* Build the configuration interpreters that need the served catalog: the legacy-settings migration, the controller save, the controller removal, the predicate
+ * naming which controllers still have settings to migrate, and the device-row namer. Injecting the engine class, the catalog index, the catalog builder, the entry
+ * enumerators, the list formatter, the identifier repair, and homebridge-plugin-utils' display-name rule is what keeps this module import-free and exercisable under
+ * Node against the real engine, the real catalog, and the real rule, rather than against a stand-in that could drift from any of them. The configured controller
+ * list's reader and its save composer are handed in as makeControllerList built them, so every interpreter here reads and writes the entry at each address the page
+ * shows and the plugin uses.
  *
  * @param injected.FeatureOptions              - The feature-option engine class.
  * @param injected.buildCatalogIndex           - The framework's catalog builder, which the retired-family composition builds its legacy catalog with.
  * @param injected.catalog                     - The catalog index built from the served categories and options, which carries both alongside its derived indices.
  * @param injected.controllers                 - The configured controllers, one entry per listed address, as makeControllerList reads them.
  * @param injected.controllersWithSave         - The controllers array a save writes, or null for an address already listed, as makeControllerList composes it.
+ * @param injected.displayedName               - homebridge-plugin-utils' display-name rule, which answers the custom name where one resolves and the fallback
+ *                                               otherwise, as HomeKit carries it.
  * @param injected.enumerateConfiguredEntries  - The framework's own enumerator over the configured entries addressing one option.
  * @param injected.enumerateScopeEntries       - The framework's own enumerator over the configured entries reading at one scope identifier.
  * @param injected.formatValueList             - The framework's composition of a list option's stored form from its selected members.
  * @param injected.scopeSafeId                 - The framework's repair of an arbitrary string into a scope identifier.
  *
- * @returns The interpreters: the migration, the awaiting-migration predicate, the controller save, and the controller removal.
+ * @returns The interpreters: the migration, the awaiting-migration predicate, the controller save, the controller removal, and the device-row namer the sidebar
+ *          names its device links through.
  */
-export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, enumerateConfiguredEntries, enumerateScopeEntries,
-  formatValueList, scopeSafeId }) => {
+export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, displayedName, enumerateConfiguredEntries,
+  enumerateScopeEntries, formatValueList, scopeSafeId }) => {
 
   // A feature-option engine over the served catalog and the config's own entries. The array is handed in directly rather than copied: every engine transform this
   // module drives - the option set, the scope clear, the scope move - composes a fresh array and reassigns its own field, and where this module assigns the
@@ -708,6 +716,26 @@ export const makeAccessConfig = ({ FeatureOptions, buildCatalogIndex, catalog, c
         .filter((item) => item?.username?.length && item?.password?.length &&
           (properties.some((property) => item?.[property] !== undefined) || hasAddressEntry(item)))
         .map((item) => ({ address: item.address, password: item.password, tokens: item.tokens, username: item.username, verifyTls: item.verifyTls }));
+    },
+
+    /* Name the device rows of one configuration as HomeKit carries each device's name: the custom name the user set where HomeKit can carry it, and the name the UI
+     * server composed for the device otherwise, through homebridge-plugin-utils' display-name rule. One engine over the configuration names every row, so a page
+     * naming a whole list pays for one catalog index rather than one per row. The custom name is read at the row's serialNumber, the decorated serial the framework
+     * addresses the row by, which is the scope the plugin reads it at. A row carrying no composed name falls back to the name it carries.
+     *
+     * The rule is applied here rather than in the UI server's answer, so a custom name being edited shows on the page before anything is saved and without a round
+     * trip, and the answer itself carries the composed name alone, so a row the page keeps never carries a custom name it would go on showing once that custom
+     * name is cleared.
+     *
+     * @param config - The platform configuration entry, the edited one when the page names rows under an edit.
+     *
+     * @returns The namer: a device row in, the name the page shows for it out.
+     */
+    deviceNamer: (config) => {
+
+      const engine = engineFor(config);
+
+      return (row) => displayedName({ fallback: row?.homeKitName ?? row?.name ?? "", override: engine.value(DEVICE_NAME_OPTION, row?.serialNumber) });
     },
 
     /* Move the legacy per-controller configuration properties into their feature options, as a patch for the session to stage. This is transitional work with a

@@ -10,8 +10,12 @@
  * to one spelling of it. A raw entry is read only where its spelling or its order is itself the subject, or to prove an entry has left the array. The closing round
  * trip goes further and drives the plugin's actual MQTT resolution before and after the patch applies, which is what proves a migrated configuration runs on the
  * same effective values the legacy one did.
+ *
+ * The device-row namer is read the same way: each custom name is composed into the configuration through the engine's own setOption and read back through the
+ * namer at the row's serialNumber, the decorated serial the live page addresses a row by, over rows shaped as the UI server answers them, the name it composed
+ * beside the controller's own.
  */
-import { ALL_CHOICES, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries,
+import { ALL_CHOICES, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName, enumerateConfiguredEntries, enumerateScopeEntries,
   formatValueList, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "../homebridge-ui/public/access-config.mjs";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse,
@@ -27,6 +31,9 @@ import test from "node:test";
 const CONTROLLER_MAC = "AABBCCDDEEFF";
 const OTHER_MAC = "112233445566";
 const DEVICE_MAC = "0123456789AB";
+
+// A second device beside the first, which the namer's own-scope read is told apart by.
+const SIBLING_DEVICE_MAC = "0123456789AC";
 
 // The identity a configured controller converges to, and the address the configuration records - which is all a configuration has, since only a controller that
 // answers a probe can supply the MAC address its settings are keyed by.
@@ -71,9 +78,10 @@ const { controllerListedElsewhere, controllers, controllersWithSave, primaryCont
   makeControllerList({ addressListedElsewhere, addressListingForm });
 
 // The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index and the builder that makes one, the
-// controller list's reader and save composer above, the framework's own entry enumerators, its list formatter, and its scope-identifier repair.
-const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, enumerateConfiguredEntries, enumerateScopeEntries,
-  formatValueList, scopeSafeId });
+// controller list's reader and save composer above, homebridge-plugin-utils' display-name rule, the framework's own entry enumerators, its list formatter, and
+// its scope-identifier repair.
+const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, displayedName, enumerateConfiguredEntries,
+  enumerateScopeEntries, formatValueList, scopeSafeId });
 
 // The interpreters the suite reads off that holder, named here once so every arm below reads them as plain functions.
 const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
@@ -1296,4 +1304,59 @@ test("every migrated setting resolves to the same effective broker and topic the
   engine.setOption({ enabled: false, id: CONTROLLER_MAC, option: "Mqtt.Url" });
 
   assert.equal(resolve({ ...after, options: [...engine.configuredOptions] }), null, "a scoped disable on the migrated configuration leaves no broker at all");
+});
+
+/* A hub row as the live page holds it: the UI server's decorated record, carrying the name the server composed for the hub from its alias beside the alias and the
+ * name the controller reports, and the page's serialNumber, which is the hub's decorated serial. The controller's name differs from the composed one, so a row
+ * named from the wrong field reads differently.
+ */
+const hubRow = { alias: "Front Door", homeKitName: "Front Door", name: "Front|Gate", serialNumber: DEVICE_MAC };
+
+// The entry storing one custom name at a device's scope, composed through the engine's own setOption, so the namer reads back the grammar the page writes.
+function customName(value: string, id = DEVICE_MAC): string {
+
+  return composedEntry({ enabled: true, id, option: "Device.Name", value });
+}
+
+test("a device row shows the custom name HomeKit can carry, sanitized as HomeKit carries it", () => {
+
+  assert.equal(accessConfig.deviceNamer({ options: [customName("Porch")] })(hubRow), "Porch", "the custom name names the row");
+  assert.equal(accessConfig.deviceNamer({ options: [customName("Bedtime \u{1F319}")] })(hubRow), "Bedtime",
+    "a custom name HomeKit cleans is shown as HomeKit carries it");
+});
+
+test("a device row whose custom name HomeKit can carry nothing of, or that has none, shows the name the UI server composed, sanitized", () => {
+
+  for(const value of [ "\u{1F642}", "---" ]) {
+
+    assert.equal(accessConfig.deviceNamer({ options: [customName(value)] })(hubRow), "Front Door", "the custom name " + JSON.stringify(value) + " counts as none");
+  }
+
+  assert.equal(accessConfig.deviceNamer({ options: [] })(hubRow), "Front Door", "a row with no custom name shows the composed name");
+  assert.equal(accessConfig.deviceNamer({ options: [] })({ ...hubRow, homeKitName: "Front Door \u{1F319}" }), "Front Door", "the composed name is shown sanitized");
+});
+
+test("a device row carrying no composed name shows the name it carries", () => {
+
+  const { homeKitName: _homeKitName, ...uncomposed } = hubRow;
+
+  assert.equal(accessConfig.deviceNamer({ options: [] })(uncomposed), "Front Gate", "the controller's name for the device is the fallback, sanitized");
+  assert.equal(accessConfig.deviceNamer({ options: [customName("Porch")] })(uncomposed), "Porch", "and a custom name still names the row");
+});
+
+test("a controller row is unchanged", () => {
+
+  // The controller's own row carries no composed name, and a custom name set for one of its devices is read at that device's scope alone.
+  const controllerRow = { alias: "Access Console", name: "Access Console", serialNumber: CONTROLLER_MAC };
+
+  assert.equal(accessConfig.deviceNamer({ options: [customName("Porch")] })(controllerRow), "Access Console", "the controller row shows its own name");
+});
+
+test("a custom name is read back through the engine at the row's own serialNumber and nowhere else", () => {
+
+  // A custom name stored for another device names only that device, and one written globally names nothing, because the option declares device scope alone.
+  const namer = accessConfig.deviceNamer({ options: [ customName("Porch", SIBLING_DEVICE_MAC), "Enable.Device.Name=Everywhere" ] });
+
+  assert.equal(namer(hubRow), "Front Door", "neither entry names this row");
+  assert.equal(namer({ ...hubRow, serialNumber: SIBLING_DEVICE_MAC }), "Porch", "and the other device's row is named by its own entry");
 });
