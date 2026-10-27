@@ -6,7 +6,7 @@
  * without prose to describe it fails this suite rather than surfacing in the published reference as a raw wire key. The model vocabulary needs no such sweep
  * because it is a closed union the compiler already holds the map to.
  */
-import { ALL_CHOICES, buildCatalogIndex } from "homebridge-plugin-utils";
+import { ALL_CHOICES, FeatureOptions, buildCatalogIndex } from "homebridge-plugin-utils";
 import { accessMethodChoices, doorServiceChoices, hubSensorChoices, hubSensorModels, logEventChoices } from "./policy.ts";
 import { describeCategoryScope, describeOptionScope, featureOptionCategories, featureOptions } from "./options.ts";
 import { ACCESS_WEBHOOK_PORT } from "./settings.ts";
@@ -167,6 +167,30 @@ test("the door guard filter is a device-scoped picker over a page-registered sou
   // Offered as soon as the row renders, with nothing selected, which the filter reads as no filtering.
   assert.equal(guards.default, true);
   assert.equal(guards.defaultValue, "");
+});
+
+test("the custom device name is a device-scoped value option that names nothing until it is set", () => {
+
+  const name = entryFor("Device", "Name");
+
+  // A custom HomeKit name belongs to one device, so it declares device scope alone: the engine skips a configured entry at any level the option does not declare,
+  // which is what keeps a controller-wide or global value from naming every device the same.
+  assert.deepEqual(name.scopes, ["device"]);
+
+  // The option carries a value, which is what makes the engine read it as one, and the value pre-filled when a user turns it on is empty, which names nothing.
+  assert.equal(name.default, false, "no custom name applies until the user sets one");
+  assert.equal(name.defaultValue, "");
+  assert.equal(name.inputSize, 30);
+
+  // It sits beside the device's own enable entry, ahead of the synchronization it takes precedence over.
+  assert.deepEqual((featureOptions["Device"] ?? []).map(option => option.name).slice(0, 3), [ "", "Name", "SyncName" ]);
+
+  // The engine reads the value a device's own entry stores, interior spaces and all, and an entry written at the controller's scope names nothing.
+  const engine = new FeatureOptions(featureOptionCategories, featureOptions, [ "Enable.Device.Name.AABBCCDDEE01=Front Porch", "Enable.Device.Name.112233445566=Every" ]);
+
+  assert.equal(engine.value("Device.Name", "AABBCCDDEE01", "112233445566"), "Front Porch");
+  assert.equal(engine.value("Device.Name", "AABBCCDDEE02", "112233445566") ?? null, null,
+    "a sibling device under the same controller is named by nothing, the entry at the controller's own scope included");
 });
 
 test("the catalog builds: every picker declaration is one the engine honors", () => {

@@ -1,8 +1,8 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
  * testing.helpers.ts: The fixture builders more than one suite reads - the Homebridge runtime and the builder of every Homebridge API double, the accessories
- * built on that runtime and the readers of what HAP recorded on them, the topology documents, the configuration rows, the managed device records, and the
- * platform and controller doubles every suite stands its devices up over.
+ * built on that runtime and the readers of what HAP recorded on them, the line a name watch logs as it restores a name, the topology documents, the configuration
+ * rows, the managed device records, and the platform and controller doubles every suite stands its devices up over.
  *
  * Every accessory, service and characteristic a suite touches is the real thing. This file loads the Homebridge runtime once, through homebridge-plugin-utils'
  * Homebridge double, and makeTestApi builds every API double a suite uses over it, so an accessory is Homebridge's own PlatformAccessory over the hap-nodejs copy
@@ -166,6 +166,11 @@ export function writesOn(accessory: TestPlatformAccessory, service: Service): { 
 
   return accessory.changes.filter(matches).map((change) => ({ characteristic: change.characteristic.UUID, value: change.newValue }));
 }
+
+/**
+ * The line homebridge-plugin-utils logs at info each time a name watch puts the name the plugin owns back on a service after a rename in the Home app.
+ */
+export const RESTORED_LINE = "Restored the name the plugin owns for a service after the Home app renamed it.";
 
 /**
  * The building every topology document below roots at, and the location an Enterprise hub is recognized as building-hosted by.

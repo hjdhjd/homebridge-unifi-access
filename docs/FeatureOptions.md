@@ -65,7 +65,8 @@ Options whose key ends in `=<value>` take a value - replace `=<value>` with your
 | Option                                           | Description
 |--------------------------------------------------|-------------------------------------------------------------
 | <A NAME="Device"></A>`Device`                    | Make this device available in HomeKit. **(default: enabled)**.
-| <A NAME="Device.SyncName"></A>`Device.SyncName`  | Synchronize the UniFi Access name of this device with HomeKit. Synchronization is one-way only, syncing the device name from UniFi Access to HomeKit. **(default: disabled)**.
+| <A NAME="Device.Name"></A>`Device.Name=<value>`  | Custom HomeKit name for this device and its parts. It always applies, so a rename in the Home app yields to it wherever HomeKit allows. **(default: none)**.
+| <A NAME="Device.SyncName"></A>`Device.SyncName`  | Synchronize the UniFi Access name of this device and its parts with HomeKit. A rename in the Home app yields to it wherever HomeKit allows. A custom Name takes precedence. **(default: disabled)**.
 
 #### <A NAME="controller"></A>Controller feature options.
 

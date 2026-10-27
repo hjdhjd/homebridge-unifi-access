@@ -12,7 +12,7 @@ import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoi
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, membershipDelta,
-  mqttConnectionSettings, onAbort, prefixedLog, retry, superviseLoop } from "homebridge-plugin-utils";
+  mqttConnectionSettings, onAbort, prefixedLog, resolveNameOverride, retry, superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
   deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac,
   serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
@@ -1130,10 +1130,15 @@ export class AccessController {
       this.#removals.clear(accessory.UUID);
     }
 
-    // We've got a new device, let's add it to HomeKit. It is minted under the name rule its configure pass applies, which always answers a name HomeKit can carry.
+    /* We've got a new device, let's add it to HomeKit. It is minted under the name its configure pass applies, the custom name the user set where HomeKit can carry
+     * it among them, read at the scopes the device reads it at once constructed, so the accessory Homebridge registers and caches carries that name from the start.
+     * The rule always answers a name HomeKit can carry.
+     */
     if(!accessory) {
 
-      accessory = new this.platform.api.platformAccessory<AccessAccessoryContext>(deviceDisplayName(device).name, uuid);
+      const override = resolveNameOverride(this.platform.featureOptions.value("Device.Name", deviceSerial(device), this.id));
+
+      accessory = new this.platform.api.platformAccessory<AccessAccessoryContext>(deviceDisplayName(device, { override }).name, uuid);
 
       this.log.info("%s: Adding %s to HomeKit.", this.getDeviceName(device), this.resolveDeviceModel(device));
 

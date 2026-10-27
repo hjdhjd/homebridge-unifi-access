@@ -13,7 +13,7 @@ import type { CharacteristicValue, Service } from "homebridge";
 import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
   accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
-import { capabilityGate, findService, formatErrorMessage, getServiceName, guardedDispatch, presenceChanged, setServiceName, updateServices,
+import { capabilityGate, findService, formatErrorMessage, getServiceName, guardedDispatch, presenceChanged, updateServices,
   validCharacteristic } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessConsumedWebhookDelivery } from "./device.ts";
@@ -340,30 +340,6 @@ export class AccessHub extends AccessDevice {
     return resolveDoorService({ choice: this.getFeatureValue("Hub.Door.Service"), deviceType: this.uda.device_type });
   }
 
-  // The doorbell trigger switch's name, stated once for every lookup and dressing that names the switch.
-  get #doorbellTriggerName(): string {
-
-    return this.accessoryName + " Doorbell Trigger";
-  }
-
-  // The lock trigger switch's name, stated once for every lookup and dressing that names the switch.
-  get #lockTriggerName(): string {
-
-    return this.accessoryName + " Lock Trigger";
-  }
-
-  // The side door lock's name, stated once for every lookup and dressing that names the lock.
-  get #sideDoorLockName(): string {
-
-    return this.accessoryName + " Side Door";
-  }
-
-  // The side door lock trigger switch's name, taken from the lock it drives and stated once for every lookup and dressing that names the switch.
-  get #sideDoorLockTriggerName(): string {
-
-    return this.#sideDoorLockName + " Lock Trigger";
-  }
-
   // Convert lock string value to HomeKit LockCurrentState. The parameter is a plain string because the door state map's own vocabulary is deliberately open, and this
   // is already total over anything it can carry: a value we don't recognize falls through to secured, which is the safe reading of an unknown lock.
   private toLockState(lockValue: string): CharacteristicValue {
@@ -625,13 +601,16 @@ export class AccessHub extends AccessDevice {
      * back to in its place. The name weighed is the information service's as homebridge-plugin-utils reads it, the configured name where the service carries one
      * and its name otherwise, never adding a configured name the service lacks. That is what tells the fallback apart from a Home app rename written into the
      * configured name, which exists once a plugin rename has written one, while the name beside it stays on the fallback. An accessory carrying any other name is
-     * left unwarned, because the line would describe a name it does not carry, and the record loop never warns, so a rename later in the run does not repeat it.
+     * left unwarned, because the line would describe a name it does not carry, and the record loop never warns, so a rename later in the run does not repeat it. A
+     * custom name the user set names the device ahead of the controller's name, so the rule passes nothing over and the line, which points the user at that
+     * setting, never speaks while one is in force.
      */
     const { name, passedOver } = this.homeKitNaming;
 
     if((passedOver !== null) && (getServiceName(this.accessory.getService(this.hap.Service.AccessoryInformation)) === name)) {
 
-      this.log.warn("The name \"%s\" leaves nothing HomeKit can display, so this device is named %s.", passedOver, name);
+      this.log.warn("The name \"%s\" leaves nothing HomeKit can display, so this device is named %s until a Name set in the plugin's settings replaces it.",
+        passedOver, name);
     }
 
     // Configure access method switches, if we're a reader device.
@@ -695,8 +674,7 @@ export class AccessHub extends AccessDevice {
     for(const accessMethod of accessMethods) {
 
       // Validate whether we should have this service enabled.
-      const { service, transition } = this.validService({ name: this.accessoryName + " " + accessMethod.name,
-        serviceType: this.hap.Service.Switch, subtype: accessMethod.subtype,
+      const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: accessMethod.subtype, suffix: " " + accessMethod.name,
         validate: isReader(this.uda) && this.hasCapability(accessMethod.capability) && selected.includes(accessMethod.choice) });
 
       if(!service) {
@@ -1141,7 +1119,7 @@ export class AccessHub extends AccessDevice {
   private configureDoorbell({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.accessoryName, serviceType: this.hap.Service.Doorbell,
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.Doorbell,
       validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell") });
 
     if(!service) {
@@ -1200,8 +1178,8 @@ export class AccessHub extends AccessDevice {
       const gate = capabilityGate({ capability: facts.wired === true, toggle: selected.includes(member) });
 
       // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
-      const { service, transition } = this.validService({ name: this.accessoryName + " " + label, serviceType: this.hap.Service.ContactSensor,
-        subtype: reservedId, validate: (hasService: boolean) => {
+      const { service, transition } = this.validService({ serviceType: this.hap.Service.ContactSensor, subtype: reservedId, suffix: " " + label,
+        validate: (hasService: boolean) => {
 
           const isValid = gate(hasService);
 
@@ -1315,8 +1293,8 @@ export class AccessHub extends AccessDevice {
     const gate = capabilityGate({ capability: this.#positionReported, toggle: this.#selectedSensors().includes("DPS") });
 
     // Validate whether we should have this service enabled. A true verdict acquires the sensor, creating it where the accessory carries none.
-    const { service, transition } = this.validService({ name: this.accessoryName + " " + DPS_LABEL, serviceType: this.hap.Service.ContactSensor,
-      subtype: AccessReservedNames.CONTACT_DPS, validate: (hasService: boolean) => {
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS,
+      suffix: " " + DPS_LABEL, validate: (hasService: boolean) => {
 
         const isValid = gate(hasService);
 
@@ -1349,8 +1327,8 @@ export class AccessHub extends AccessDevice {
     // Validate whether we should have this service enabled. The selection is read here, on every configure pass, exactly as every other sensor's is, and a true
     // verdict acquires the sensor, creating it where the accessory carries none.
     const selected = this.#selectedSensors().includes("SideDoorDPS");
-    const { service, transition } = this.validService({ name: this.accessoryName + " " + SIDE_DOOR_DPS_LABEL,
-      serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE, validate: (hasService: boolean) => {
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE,
+      suffix: " " + SIDE_DOOR_DPS_LABEL, validate: (hasService: boolean) => {
 
         if(!selected && hasService) {
 
@@ -1382,12 +1360,12 @@ export class AccessHub extends AccessDevice {
 
       if(serviceType !== selectedService) {
 
-        this.validService({ name: this.accessoryName, serviceType, validate: false });
+        this.validService({ serviceType, validate: false });
       }
     }
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.accessoryName, serviceType: selectedService, validate: isHub(this.uda) });
+    const { service, transition } = this.validService({ serviceType: selectedService, validate: isHub(this.uda) });
 
     if(!service) {
 
@@ -1418,12 +1396,6 @@ export class AccessHub extends AccessDevice {
     const lockState = this._hkLockState;
 
     this._hkLockState = -1;
-
-    if(setServiceName(service, this.accessoryName)) {
-
-      this.platform.persistence.persist(this.accessory);
-    }
-
     this.hkLockState = lockState;
 
     service.setPrimaryService(true);
@@ -1563,8 +1535,8 @@ export class AccessHub extends AccessDevice {
   private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.#doorbellTriggerName, serviceType: this.hap.Service.Switch,
-      subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER, validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER,
+      suffix: " Doorbell Trigger", validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
 
     if(!service) {
 
@@ -1649,11 +1621,6 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    if(setServiceName(service, this.#doorbellTriggerName)) {
-
-      this.platform.persistence.persist(this.accessory);
-    }
-
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1663,8 +1630,8 @@ export class AccessHub extends AccessDevice {
   private configureLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.#lockTriggerName, serviceType: this.hap.Service.Switch,
-      subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER, validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER,
+      suffix: " Lock Trigger", validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
 
     if(!service) {
 
@@ -1696,11 +1663,6 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    if(setServiceName(service, this.#lockTriggerName)) {
-
-      this.platform.persistence.persist(this.accessory);
-    }
-
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 
@@ -1709,8 +1671,8 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.#sideDoorLockName, serviceType: this.hap.Service.LockMechanism,
-      subtype: AccessReservedNames.LOCK_DOOR_SIDE, validate: this.hints.hasSideDoor });
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.LockMechanism, subtype: AccessReservedNames.LOCK_DOOR_SIDE,
+      suffix: " Side Door", validate: this.hints.hasSideDoor });
 
     if(!service) {
 
@@ -1733,12 +1695,6 @@ export class AccessHub extends AccessDevice {
     // Initialize the lock from the relay reading. The backing value is first put where no reading can equal it, so the setter below writes the service even when the
     // state is the one we were already in.
     this._hkSideDoorLockState = -1;
-
-    if(setServiceName(service, this.#sideDoorLockName)) {
-
-      this.platform.persistence.persist(this.accessory);
-    }
-
     this.hkSideDoorLockState = this.hubSideDoorLockState;
   }
 
@@ -1748,8 +1704,8 @@ export class AccessHub extends AccessDevice {
   private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
     // Validate whether we should have this service enabled.
-    const { service, transition } = this.validService({ name: this.#sideDoorLockTriggerName, serviceType: this.hap.Service.Switch,
-      subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER, validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
+    const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER,
+      suffix: " Side Door Lock Trigger", validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
 
     if(!service) {
 
@@ -1781,11 +1737,6 @@ export class AccessHub extends AccessDevice {
     });
 
     // Initialize the switch.
-    if(setServiceName(service, this.#sideDoorLockTriggerName)) {
-
-      this.platform.persistence.persist(this.accessory);
-    }
-
     service.updateCharacteristic(this.hap.Characteristic.On, false);
   }
 

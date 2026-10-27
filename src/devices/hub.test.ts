@@ -10,15 +10,16 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
-import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, mqttGetTopic, mqttSetTopic, setAccessoryName } from "homebridge-plugin-utils";
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, ServiceEventTypes, mqttGetTopic, mqttSetTopic, setAccessoryName,
+  setServiceName } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import { AccessApiError, AccessCapabilityError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime,
-  savesOn, writesOn } from "../testing.helpers.ts";
-import { EventEmitter, on } from "node:events";
+import { Characteristic, RESTORED_LINE, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory,
+  makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
+import { EventEmitter, getEventListeners, on } from "node:events";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
@@ -5171,7 +5172,8 @@ test("a synchronized alias reaches the information service's names and the acces
 // The warning adoption gives a hub whose controller name HomeKit can display nothing of, as a user reads it.
 function fallbackWarning(passedOver: string, name: string): string {
 
-  return "The name \"" + passedOver + "\" leaves nothing HomeKit can display, so this device is named " + name + ".";
+  return "The name \"" + passedOver + "\" leaves nothing HomeKit can display, so this device is named " + name + " until a Name set in the plugin's settings " +
+    "replaces it.";
 }
 
 // How many lines the hub warned about a name falling back, whatever names the line carries, so an arm expecting none cannot miss one worded otherwise.
@@ -5227,6 +5229,17 @@ test("a hub whose configured name carries a Home app rename is not warned, thoug
   assert.equal(fallbackWarnings(harness), 0, "yet the configured name carries the user's rename, so the fallback goes unmentioned");
 });
 
+test("a hub named by a custom name is not warned about the alias it passed by", () => {
+
+  // The accessory carries the custom name, as the mint and every configure pass name it, and the controller's alias is one HomeKit can display nothing of.
+  const harness = makeHub({ accessory: makeTestAccessory("Porch", HUB_ID), keepAdoptionLines: true, options: ["Enable.Device.Name." + HUB_SERIAL + "=Porch"],
+    record: testHub({ alias: "\u{1F6AA}" }) });
+
+  assert.equal(harness.hub.accessoryName, "Porch", "the custom name names the device");
+  assert.equal(lineCount(harness, "Custom HomeKit name set to Porch."), 1);
+  assert.equal(fallbackWarnings(harness), 0, "so nothing fell back, and the line pointing the user at the setting they already used never speaks");
+});
+
 test("a rename the record loop applies never warns, whatever the name falls back to", async () => {
 
   const harness = makeHub({ accessory: makeTestAccessory("Front Door", HUB_ID), keepAdoptionLines: true, options: ["Enable.Device.SyncName"],
@@ -5237,6 +5250,289 @@ test("a rename the record loop applies never warns, whatever the name falls back
   assert.equal(harness.hub.accessoryName, "UA-HUB-5B9C", "the loop applied the name the rule fell back to");
   assert.equal(lineCount(harness, "Detected a name change on the controller; updating the HomeKit name to UA-HUB-5B9C."), 1, "and said so as a rename");
   assert.equal(fallbackWarnings(harness), 0, "but warned nothing, since the warning is adoption's alone");
+});
+
+// The custom name the naming arms below set at the hub's own scope, and the entry storing it in the grammar the settings page writes.
+const CUSTOM_NAME = "Porch";
+const CUSTOM_NAME_ENTRY = "Enable.Device.Name." + HUB_SERIAL + "=" + CUSTOM_NAME;
+
+// How many restores the hub logged, read by the sentence alone, since the context object beside it carries the names each restore wrote.
+function restoreCount(harness: HubHarness): number {
+
+  return harness.lines.filter(line => line.startsWith(LOG_PREFIX + RESTORED_LINE)).length;
+}
+
+// Rename a service the way the Home app does, through triggerSet, which hands HAP a connection as the write's originator, then let the restore a watch arranged
+// run, since a restore waits for the turn after HAP's write.
+async function renameInHomeApp(service: Service, name: string): Promise<void> {
+
+  await triggerSet(service.getCharacteristic(Characteristic.ConfiguredName), name);
+  await settle();
+}
+
+// The names HomeKit holds for one service, read together: its display name, its Name, and the configured name the Home app edits, read only where the service
+// carries one so the read never attaches it.
+function namesOf(service: Service): { configured: unknown; displayName: string; name: unknown } {
+
+  return { configured: service.testCharacteristic(Characteristic.ConfiguredName) ? service.getCharacteristic(Characteristic.ConfiguredName).value : undefined,
+    displayName: service.displayName, name: service.getCharacteristic(Characteristic.Name).value };
+}
+
+// The writes the hub made to one service's names, read apart from the state writes a dressing makes beside them.
+function nameWritesOn(harness: HubHarness, service: Service): { characteristic: string; value: unknown }[] {
+
+  return writesOn(harness.accessory, service).filter(write => [ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID ].includes(write.characteristic));
+}
+
+// The registrations the hub's signal holds for its abort, a name watch's among them, so an arm reads whether a watch was registered or released.
+function abortRegistrations(harness: HubHarness): number {
+
+  return getEventListeners(harness.hub.signal, "abort").length;
+}
+
+// The listeners a service carries for its characteristic changes, which is where a name watch listens.
+function changeListeners(service: Service): number {
+
+  return service.listenerCount(ServiceEventTypes.CHARACTERISTIC_CHANGE);
+}
+
+/* A part a previous run left on the accessory under a name of its own, written the way the plugin's own rename writes one, so the part carries a configured name
+ * where its kind supports one, and an arm reads what the hub does to a part it keeps rather than creates.
+ *
+ * @param serviceType - The HAP service class to carry.
+ * @param subtype     - The reserved subtype the hub will look it up under.
+ * @param name        - The name the previous run left it carrying.
+ *
+ * @returns The service.
+ */
+function restoredPart<T extends Service>(serviceType: new (displayName?: string, subtype?: string) => T, subtype: string, name: string): T {
+
+  const service = carried(serviceType, subtype);
+
+  setServiceName(service, name);
+
+  return service;
+}
+
+test("a custom name renames each part an accessory is restored with at adoption, to the custom name followed by the part's suffix", () => {
+
+  // The parts come back from the cache under the name an earlier run gave them, so each is kept rather than created, and only the rule can move it off that name.
+  const sensor = restoredPart(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE, "Old Gate Side Door Position Sensor");
+  const sideLock = restoredPart(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE, "Old Gate Side Door");
+  const trigger = restoredPart(Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER, "Old Gate Lock Trigger");
+  const gate = makeGate({ existing: [ sensor, sideLock, trigger ], options: [ CUSTOM_NAME_ENTRY, "Enable.Hub.Lock.Trigger" ] });
+
+  assert.ok([ sensor, sideLock, trigger ].every(part => gate.services.includes(part)), "the gate kept every part it was restored with");
+  assert.deepEqual(namesOf(sensor), { configured: "Porch Side Door Position Sensor", displayName: "Porch Side Door Position Sensor",
+    name: "Porch Side Door Position Sensor" }, "the side door position sensor took the custom name followed by its suffix");
+  assert.deepEqual(namesOf(trigger), { configured: "Porch Lock Trigger", displayName: "Porch Lock Trigger", name: "Porch Lock Trigger" }, "and so did the lock trigger");
+  assert.deepEqual(namesOf(sideLock), { configured: undefined, displayName: "Porch Side Door", name: "Porch Side Door" },
+    "and the side door lock, a kind HomeKit names with Name alone");
+  assert.equal(openerService(gate).getCharacteristic(Characteristic.Name).value, CUSTOM_NAME, "while the main door's opener, declaring no suffix, is the custom name");
+});
+
+test("under a custom name a rename in the Home app of the accessory's tile or of a part named from it is put back at once, each with one line at info", async () => {
+
+  const harness = makeHub({ options: [ CUSTOM_NAME_ENTRY, "Enable.Hub.Lock.Trigger" ] });
+  const information = harness.accessory.getService(Service.AccessoryInformation);
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  await renameInHomeApp(information, "Den");
+
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, CUSTOM_NAME, "the custom name is back on the tile");
+  assert.equal(restoreCount(harness), 1, "and the restore was logged once");
+
+  await renameInHomeApp(trigger, "Den Trigger");
+
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, CUSTOM_NAME + " Lock Trigger", "the owned name is back on the part");
+  assert.equal(restoreCount(harness), 2, "and that restore was logged once as well");
+});
+
+test("with neither a custom name nor SyncName a Home app rename stands on the tile and on a part, from an earlier run or this one, and nothing is written " +
+  "over it", async () => {
+
+  // The lock trigger carries the name the user gave it in the Home app during an earlier run, written where the Home app writes it.
+  const trigger = restoredPart(Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER, "Test Hub Lock Trigger");
+
+  trigger.updateCharacteristic(Characteristic.ConfiguredName, "My Trigger");
+
+  const accessory = makeAccessory([trigger]);
+  const information = accessory.getService(Service.AccessoryInformation);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  accessory.clearObservations();
+
+  const harness = makeHub({ accessory, options: ["Enable.Hub.Lock.Trigger"] });
+
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, "My Trigger", "adoption keeps the name the user gave the part");
+
+  await renameInHomeApp(information, "Den");
+  await renameInHomeApp(trigger, "Den Trigger");
+
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Den", "the tile's rename stands");
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, "Den Trigger", "and so does the part's");
+  assert.deepEqual([ ...nameWritesOn(harness, information), ...nameWritesOn(harness, trigger) ], [], "the hub wrote no name, at adoption or after the renames");
+  assert.equal(restoreCount(harness), 0, "and logged no restore");
+});
+
+test("with neither a custom name nor SyncName a part is created from the name the accessory carries, never from the controller's name for the hub", () => {
+
+  // The accessory keeps the name it carries while the controller's name for the hub reads otherwise, since nothing renames an accessory whose name the user owns.
+  const harness = makeHub({ options: ["Enable.Hub.Lock.Trigger"], record: testHub({ alias: "Front Door" }) });
+
+  assert.equal(harness.hub.accessoryName, "Test Hub", "precondition: the accessory keeps the name it carries");
+  assert.equal(switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER).getCharacteristic(Characteristic.Name).value, "Test Hub Lock Trigger",
+    "the lock trigger is created as that name followed by its suffix");
+});
+
+test("reconcile passes keep a held part's watch rather than attaching another, and one rename in the Home app after them draws one restore", async () => {
+
+  const harness = makeHub({ options: [ CUSTOM_NAME_ENTRY, "Enable.Hub.Lock.Trigger" ] });
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+  const listeners = trigger.listeners(ServiceEventTypes.CHARACTERISTIC_CHANGE);
+  const registrations = abortRegistrations(harness);
+
+  // Each restatement is a device update over an unchanged record, so every pass re-validates the trigger and hands back the service held.
+  for(const _pass of [ 1, 2, 3 ]) {
+
+    restateRecord(harness, {});
+  }
+
+  assert.deepEqual(trigger.listeners(ServiceEventTypes.CHARACTERISTIC_CHANGE), listeners, "the part carries the very listeners it carried before the passes");
+  assert.equal(abortRegistrations(harness), registrations, "and the device's signal holds no registration more");
+
+  await renameInHomeApp(trigger, "Den Trigger");
+
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, CUSTOM_NAME + " Lock Trigger", "the owned name is back on the part");
+  assert.equal(restoreCount(harness), 1, "and one restore was logged");
+});
+
+test("a watched part a device update adds is let go when a later update's verdict removes it, leaving the device's signal holding what it held before", () => {
+
+  const harness = makeHub({ options: [CUSTOM_NAME_ENTRY] });
+  const standing = abortRegistrations(harness);
+
+  harness.reconfigure([ CUSTOM_NAME_ENTRY, "Enable.Hub.Lock.Trigger" ]);
+  restateRecord(harness, {});
+
+  assert.ok(switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER).testCharacteristic(Characteristic.ConfiguredName),
+    "precondition: the update added the lock trigger, a kind the Home app renames");
+  assert.equal(abortRegistrations(harness), standing + 1, "and its watch registered once on the device's signal");
+
+  harness.reconfigure([CUSTOM_NAME_ENTRY]);
+  restateRecord(harness, {});
+
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER), "the later update's verdict removed the lock trigger");
+  assert.equal(abortRegistrations(harness), standing, "and its watch released its registration on the device's signal");
+});
+
+test("the lock an accessory is restored with is renamed under a custom name and carries no watch, a kind HomeKit names with Name alone", () => {
+
+  const plain = makeHub({ existing: [new Service.LockMechanism("Old Lock")] });
+  const owned = makeHub({ existing: [new Service.LockMechanism("Old Lock")], options: [CUSTOM_NAME_ENTRY] });
+  const plainLock = lockService(plain);
+  const ownedLock = lockService(owned);
+
+  assert.equal(plainLock.getCharacteristic(Characteristic.Name).value, "Old Lock", "with no custom name the lock keeps its name");
+  assert.equal(ownedLock.getCharacteristic(Characteristic.Name).value, CUSTOM_NAME, "with one it takes the custom name");
+  assert.equal(changeListeners(ownedLock), changeListeners(plainLock), "and it carries no change listener beyond the ones the unwatched lock carries");
+});
+
+test("a controller rename under SyncName renames every held part on the yield that renames the accessory, and a yield leaving the accessory's names as they " +
+  "stand writes no part", async () => {
+
+  const harness = makeHub({ accessory: makeTestAccessory("Front Door", HUB_ID), options: [ "Enable.Device.SyncName", "Enable.Hub.Lock.Trigger" ],
+    record: testHub({ alias: "Front Door" }), script: [ testHub({ alias: "Front Door" }), testHub({ alias: "Back Door" }) ] });
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, "Front Door Lock Trigger",
+    "precondition: the trigger starts under the controller's first name for the hub");
+
+  /* The trigger's configured name is moved off the owned name the way only the plugin writes, so no watch puts it back: a part whose name drifted while the
+   * accessory's did not. The first yield restates the name the accessory already carries, so its rename writes nothing and the part is left as it stands, and the
+   * second carries the controller's rename, which reaches the accessory and then every held part.
+   */
+  trigger.updateCharacteristic(Characteristic.ConfiguredName, "Drifted Trigger");
+  harness.accessory.clearObservations();
+
+  await harness.loop();
+
+  assert.deepEqual(nameWritesOn(harness, trigger), [ { characteristic: Characteristic.ConfiguredName.UUID, value: "Back Door Lock Trigger" },
+    { characteristic: Characteristic.Name.UUID, value: "Back Door Lock Trigger" } ], "the trigger is written once, on the yield that renamed the accessory");
+  assert.equal(lockService(harness).getCharacteristic(Characteristic.Name).value, "Back Door", "and the main door's lock, declaring no suffix, takes the new name");
+  assert.equal(lineCount(harness, "Detected a name change on the controller; updating the HomeKit name to Back Door."), 1, "and the rename is said once");
+});
+
+test("a yield under SyncName whose rename of the accessory writes without moving its display name renames every held part, and says no rename", async () => {
+
+  const harness = makeHub({ accessory: makeTestAccessory("Front Door", HUB_ID), options: [ "Enable.Device.SyncName", "Enable.Hub.Lock.Trigger" ],
+    record: testHub({ alias: "Front Door" }), script: [testHub({ alias: "Front Door" })] });
+  const information = harness.accessory.getService(Service.AccessoryInformation);
+  const trigger = switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  /* The tile's and the trigger's configured names are moved off the owned name the way only the plugin writes, so no watch puts them back. The yield restates
+   * the name the accessory already displays, so its rename writes the tile's configured name back and leaves the display name where it stands: the parts follow
+   * any write the rename makes, while the rename line waits for the display name to move.
+   */
+  information.updateCharacteristic(Characteristic.ConfiguredName, "Drifted Tile");
+  trigger.updateCharacteristic(Characteristic.ConfiguredName, "Drifted Trigger");
+
+  await harness.loop();
+
+  assert.equal(harness.accessory.displayName, "Front Door", "the display name did not move");
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Front Door", "the accessory's rename wrote the tile's name back");
+  assert.equal(trigger.getCharacteristic(Characteristic.ConfiguredName).value, "Front Door Lock Trigger", "and the trigger followed that write");
+  assert.equal(lineCount(harness, "Detected a name change on the controller; updating the HomeKit name to Front Door."), 0, "while no rename is said");
+});
+
+test("an access method switch a reader is restored with is held, renamed, and watched once the reader's access method model seeds, and not before", async () => {
+
+  const nfc = restoredPart(Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC, "Old Reader NFC");
+  const answer = Promise.withResolvers<unknown>();
+  const harness = makeReader({ existing: [nfc], official: true, options: [CUSTOM_NAME_ENTRY],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision" ], configs: undefined }),
+    settings: async (): Promise<unknown> => answer.promise });
+  const unwatched = changeListeners(nfc);
+
+  // The settings read is still out, so the model has not seeded and no pass has reconciled the switch.
+  assert.deepEqual(namesOf(nfc), { configured: "Old Reader NFC", displayName: "Old Reader NFC", name: "Old Reader NFC" }, "the switch keeps its name before the seed");
+
+  answer.resolve({ access_methods: { nfc: { enabled: "yes" } } });
+  await settle();
+
+  assert.deepEqual(namesOf(nfc), { configured: "Porch NFC", displayName: "Porch NFC", name: "Porch NFC" },
+    "the seed's pass holds the switch, renaming it to the custom name followed by its method");
+  assert.equal(changeListeners(nfc), unwatched + 1, "and watching it");
+
+  await renameInHomeApp(nfc, "Den NFC");
+
+  assert.equal(nfc.getCharacteristic(Characteristic.ConfiguredName).value, "Porch NFC", "so a rename in the Home app is put back at once");
+  assert.equal(restoreCount(harness), 1, "with one line at info");
+});
+
+test("a presentation change under SyncName lets go of the lock the door left, so a controller rename after it reaches the opener and never the " +
+  "detached lock", async () => {
+
+  const harness = makeHub({ accessory: makeTestAccessory("Front Door", HUB_ID), options: ["Enable.Device.SyncName"], record: testHub({ alias: "Front Door" }),
+    script: [testHub({ alias: "Back Door" })] });
+  const lock = lockService(harness);
+
+  harness.reconfigure([ "Enable.Device.SyncName", "Enable.Hub.Door.Service=GarageDoorOpener" ]);
+  restateRecord(harness, {});
+
+  const opener = openerService(harness);
+
+  assert.ok(!harness.services.includes(lock), "the update detached the lock the door is leaving");
+
+  await harness.loop();
+
+  assert.equal(opener.getCharacteristic(Characteristic.Name).value, "Back Door", "the controller's rename reaches the opener the door moved to");
+  assert.equal(lock.getCharacteristic(Characteristic.Name).value, "Front Door", "and never the lock the presentation change let go of");
 });
 
 /* The saves a bridged hub makes over the next save window: whatever the arm changed before asking is marked already, and the window that change opened closes

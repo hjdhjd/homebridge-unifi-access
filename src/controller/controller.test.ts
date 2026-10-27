@@ -625,6 +625,31 @@ test("a device whose alias carries a character HomeKit cannot display is named i
     "while the line naming the device carries the alias whole");
 });
 
+test("a device is minted under the custom name the user set where HomeKit can carry it, and under its own name where HomeKit can carry nothing of it", () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ hubRecord({ alias: "Front Door", mac: "aabbccddee04", unique_id: "front" }),
+    hubRecord({ alias: "Back Door", mac: "aabbccddee05", unique_id: "back" }) ]) });
+
+  /* Each custom name is stored at its device's own scope under the controller's identity, the scopes a constructed device reads the option at, so the mint reads
+   * the name its configure pass goes on to apply. The configure pass renames in the same adoption, which is why the name is read here, at the registration,
+   * where only the mint has spoken.
+   */
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } },
+    options: [ "Enable.Device.Name.AABBCCDDEE04=Porch \u{1F319}", "Enable.Device.Name.AABBCCDDEE05=\u{1F6AA}" ], store });
+  const front = store.snapshot().devices.get("front");
+  const back = store.snapshot().devices.get("back");
+
+  assert.ok(front && back, "the store should hold each hub");
+
+  harness.controller.addHomeKitDevice(front);
+  harness.controller.addHomeKitDevice(back);
+
+  assert.equal(registeredName(harness, "AABBCCDDEE04"), "Porch", "the custom name names the accessory from its mint, as HomeKit carries it");
+  assert.equal(registeredName(harness, "AABBCCDDEE05"), "Back Door", "and a custom name HomeKit can carry nothing of counts as none, leaving the alias");
+});
+
 test("the connection observer's lifetime is the controller's own terminal signal", async () => {
 
   const monitor = connectionDouble();

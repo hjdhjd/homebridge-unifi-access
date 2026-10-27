@@ -6,9 +6,9 @@
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, MqttOfflineError, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
-import { Characteristic, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn,
+import { Characteristic, RESTORED_LINE, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn,
   writesOn } from "../testing.helpers.ts";
-import { TestClock, TestMqttClient, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, settle, triggerSet } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
@@ -200,7 +200,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     clock,
     featureOptions: engine,
     log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
-      warn: (message: string): void => { warnings.push(message); } }
+      warn: (message: string, ...parameters: unknown[]): void => { warnings.push(format(message, ...parameters)); } }
   });
 
   // The persistence saves only an accessory the bridge holds, so an arm about what reaches Homebridge's accessory cache registers the accessory first, as adoption does.
@@ -918,6 +918,139 @@ test("a record whose alias empties out under HomeKit's naming rules synchronizes
     { characteristic: Characteristic.Name.UUID, value: "Back Door" } ], "and reaches the information service's names");
   assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")),
     ["Test Hub [UA Hub]: Detected a name change on the controller; updating the HomeKit name to Back Door."], "and the change is reported once");
+});
+
+// The entry storing a custom name at the harness device's own scope, in the grammar the settings page writes.
+function customName(value: string): string {
+
+  return "Enable.Device.Name.AABBCCDDEE01=" + value;
+}
+
+test("a custom name replaces the name the accessory carries at every configure pass with synchronization off, and is announced as HomeKit carries it", () => {
+
+  const harness = makeHarness([], { construction: record({ alias: "Front Door" }), options: [customName("Porch \u{1F319}")] });
+  const information = harness.accessory.getService(Service.AccessoryInformation);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  /* The accessory carries a rename made in the Home app during an earlier run, which the Home app writes into the information service's configured name, and the
+   * custom name always applies, so it replaces that rename when the device is configured.
+   */
+  information.updateCharacteristic(Characteristic.ConfiguredName, "Home App Name");
+
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+  device.configureInfo();
+
+  assert.equal(device.hints.nameOverride, "Porch \u{1F319}", "the hint holds the custom name as homebridge-plugin-utils resolves it, trimmed rather than cleaned");
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Porch", "the custom name replaces the rename where the Home app wrote it");
+  assert.equal(device.accessoryName, "Porch", "the custom name names the accessory as HomeKit carries it");
+  assert.equal(harness.accessory.displayName, "Porch");
+  assert.deepEqual(harness.infoLines, ["Test Hub [UA Hub]: Custom HomeKit name set to Porch."], "and the line names the name HomeKit carries");
+  assert.deepEqual(harness.warnings, []);
+});
+
+test("a custom name holds through a rename on the controller with synchronization on", async (t) => {
+
+  const harness = makeHarness([record({ alias: "Back Door" })], { accessoryName: "Porch", construction: record({ alias: "Front Door" }),
+    options: [ customName("Porch"), "Enable.Device.SyncName" ] });
+  const renames = t.mock.method(harness.accessory, "updateDisplayName");
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+  device.configureInfo();
+
+  await harness.loop();
+
+  assert.equal(device.uda.alias, "Back Door", "the loop must have written the record the yield carried");
+  assert.equal(device.accessoryName, "Porch", "the custom name comes first, so the controller's rename does not reach HomeKit");
+  assert.deepEqual(renames.mock.calls.map((call) => call.arguments[0]), [], "and Homebridge's own setter is never handed another name");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [], "nor is a change reported");
+});
+
+test("a custom name with synchronization off puts a Home app rename made after the configure pass back at once, and the record loop writes nothing " +
+  "after it", async () => {
+
+  const harness = makeHarness([record({ alias: "Back Door" })], { bridged: true, construction: record({ alias: "Front Door" }), options: [customName("Porch")] });
+  const information = harness.accessory.getService(Service.AccessoryInformation);
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  assert.ok(information, "HAP gives every accessory an information service at construction");
+
+  device.configure();
+  device.configureInfo();
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Porch", "the configure pass applied the custom name");
+
+  /* The user renames the device in the Home app once adoption has applied the custom name. The write carries the connection it arrived on, as the Home app's
+   * does, and the restore the information service's watch arranges runs on the turn after it.
+   */
+  await triggerSet(information.getCharacteristic(Characteristic.ConfiguredName), "Home App Name");
+  await settle();
+
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Porch", "the custom name is put back at once");
+  assert.equal(harness.infoLines.filter(line => line.includes(RESTORED_LINE)).length, 1, "and the restore is logged once");
+
+  const saves = harness.saves.length;
+
+  await harness.loop();
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  assert.equal(device.uda.alias, "Back Door", "the loop must have written the record the yield carried");
+  assert.equal(information.getCharacteristic(Characteristic.ConfiguredName).value, "Porch", "the restored name stands through the loop");
+  assert.equal(harness.saves.length, saves, "which writes nothing and has nothing to save");
+  assert.deepEqual(harness.infoLines.filter(line => line.includes("Detected a name change")), [], "and no change is reported");
+});
+
+test("a cleared custom name keeps the name the accessory carries with synchronization off, and gives way to the controller's name with it on", () => {
+
+  // Each accessory carries the name an earlier custom name applied, and the settings hold no custom name.
+  const off = makeHarness([], { accessoryName: "Porch", construction: record({ alias: "Front Door" }) });
+  const on = makeHarness([], { accessoryName: "Porch", construction: record({ alias: "Front Door" }), options: ["Enable.Device.SyncName"] });
+  const kept = new TestDevice(off.controller, off.projection, off.accessory, off.construction);
+  const synced = new TestDevice(on.controller, on.projection, on.accessory, on.construction);
+
+  for(const device of [ kept, synced ]) {
+
+    device.configure();
+    device.configureInfo();
+  }
+
+  assert.equal(kept.accessoryName, "Porch", "with nothing in force the accessory keeps the name it carries");
+  assert.equal(synced.accessoryName, "Front Door", "and with synchronization on the controller's name applies once the custom name is gone");
+});
+
+test("a custom name HomeKit can display nothing of is refused with a warning, and the device is named as if none were set", () => {
+
+  const harness = makeHarness([], { accessoryName: "Front Door", construction: record({ alias: "Front Door" }), options: [customName("\u{1F6AA}")] });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+  device.configureInfo();
+
+  assert.equal(device.hints.nameOverride, null, "homebridge-plugin-utils' rule refuses a custom name HomeKit can carry nothing of");
+  assert.deepEqual(harness.warnings, ["Test Hub [UA Hub]: The custom name \"\u{1F6AA}\" leaves nothing HomeKit can display, so it is not applied."],
+    "the refusal is said once, naming the value as stored");
+  assert.deepEqual(harness.infoLines, [], "and no custom name is announced");
+  assert.equal(device.homeKit(), "Front Door", "the device's own name is the name that applies");
+  assert.deepEqual(nameWrites(harness), [], "and with synchronization off nothing is written");
+});
+
+test("a custom name enabled with no value set is no custom name, and warns nothing", () => {
+
+  // The entry enables the option at the device's own scope and carries no value, so there is no stored name for the refusal to speak about.
+  const harness = makeHarness([], { construction: record({ alias: "Front Door" }), options: ["Enable.Device.Name.AABBCCDDEE01"] });
+  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
+
+  device.configure();
+  device.configureInfo();
+
+  assert.equal(device.hints.nameOverride, null, "an entry with no value resolves to no custom name");
+  assert.deepEqual(harness.warnings, [], "and it is no refusal, so nothing is warned");
+  assert.deepEqual(harness.infoLines, [], "nor is a custom name announced");
+  assert.deepEqual(nameWrites(harness), [], "and with synchronization off nothing is written");
 });
 
 test("a name past HomeKit's length limit renames the accessory once, however many records repeat it", async (t) => {
