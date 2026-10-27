@@ -18,6 +18,7 @@ import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, A
   AccessStateDevice } from "unifi-access";
 import { Characteristic, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime,
   savesOn, writesOn } from "../testing.helpers.ts";
+import { EventEmitter, on } from "node:events";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
@@ -854,6 +855,54 @@ test("construction records the accessory's context: the controller key, the devi
   // carrying a stale key past construction. The identity recorded is the device's own, read off the hub rather than restated.
   assert.deepEqual(harness.hub.accessory.context, { controller: "1.2.3.4", id: HUB_SERIAL, mac: HUB_MAC });
   assert.equal(harness.hub.accessory.context.id, harness.hub.id);
+});
+
+test("a hub whose construction throws ends the lifetime it had started, and the failure leaves the constructor as it arrived", async () => {
+
+  const lifetimes: AbortSignal[] = [];
+  const loops: Promise<void>[] = [];
+  const record = testHub();
+
+  // The record loop the construction starts parks until the lifetime it was handed ends, as the library's own observation does, so the loop ends only with it.
+  const projection = {
+
+    config: record,
+    observe: async function *(opts: { signal: AbortSignal }): AsyncGenerator {
+
+      lifetimes.push(opts.signal);
+
+      try {
+
+        // A record stream nothing moves, so the loop takes no record from it and waits on it until the lifetime ends.
+        yield* on(new EventEmitter(), "record", { signal: opts.signal });
+      } catch {
+
+        // The lifetime's own abort is what ends this iteration, exactly as it ends the library's, so it is the expected exit rather than news.
+      }
+    },
+    peek: (): undefined => undefined
+  };
+
+  // A door handle whose read fails, which a hub driving one door reaches at adoption, once its record loop is already running.
+  const hubProjection = {
+
+    get doorId(): string {
+
+      throw new Error("The door could not be read");
+    }
+  };
+
+  // The loop runs as the controller runs it, started at once and left to end on its own, so the arm holds what each one returns.
+  const controller = makeControllerDouble({ spawnLoop: (_title: string, loop: () => Promise<void>): void => void loops.push(loop()) });
+
+  assert.throws(() => new AccessHub(controller, projection as unknown as AccessDeviceProjection, makeAccessory([]), record,
+    hubProjection as unknown as AccessHubProjection), { message: "The door could not be read" });
+
+  assert.equal(lifetimes.length, 1, "the record loop had started before the failure");
+  assert.equal(lifetimes[0]?.aborted, true, "and the lifetime it was handed has ended, since nothing holds the instance to end it later");
+
+  // The loop resolves only once its observation has ended, so this await is the assertion that nothing of the failed hub is still running.
+  await Promise.all(loops);
 });
 
 test("the hub registers for exactly the deliveries the registration asks a controller for", () => {

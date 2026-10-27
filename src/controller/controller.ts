@@ -933,6 +933,10 @@ export class AccessController {
    *
    * The delta is taken against each configured device's own record identity, never against the map's keys - the map is keyed by accessory UUID, and diffing UUIDs
    * against record identities would classify every configured device as simultaneously added and removed on every pass.
+   *
+   * The per-device isolation is what keeps one device's fault from costing its siblings their place in HomeKit: without it, a single synchronous throw would unwind
+   * the whole loop through superviseLoop's terminal catch and end additions and removals for every device on this controller. A device whose change failed is still
+   * on the wrong side of the delta, so the next membership change retries it.
    */
   #reconcileMembership(state: AccessState, ids = this.#membershipSelector(state)): void {
 
@@ -944,7 +948,13 @@ export class AccessController {
 
       if(device) {
 
-        this.addHomeKitDevice(device);
+        try {
+
+          this.addHomeKitDevice(device);
+        } catch(error) {
+
+          this.log.error("Unable to add %s to HomeKit: %s.", this.getDeviceName(device), formatErrorMessage(error));
+        }
       }
     }
 
@@ -954,7 +964,13 @@ export class AccessController {
 
       if(accessDevice) {
 
-        this.removeHomeKitDevice(accessDevice.accessory);
+        try {
+
+          this.removeHomeKitDevice(accessDevice.accessory);
+        } catch(error) {
+
+          accessDevice.log.error("Unable to remove this device from HomeKit: %s.", formatErrorMessage(error));
+        }
       }
     }
   }
@@ -966,6 +982,10 @@ export class AccessController {
    * nothing will ever mint an accessory that records no identity again, so it can never be adopted whether or not its device is present, and it goes at once
    * rather than through a delay that exists for a device that might come back. One that records the identity it was created under is a departure - its device may
    * return and be adopted under that same identity - and takes the same removal delay a membership departure honors.
+   *
+   * The per-accessory isolation is what keeps one accessory's fault from costing the rest their reclaim and the device list its subscription: the sweep runs inside
+   * the device list's seed pass, so without it a single synchronous throw would unwind that pass through superviseLoop's terminal catch before the observe loop
+   * behind it ever subscribed.
    */
   #sweepOrphans(state: AccessState): void {
 
@@ -978,14 +998,20 @@ export class AccessController {
         continue;
       }
 
-      if(accessory.context.id === undefined) {
+      try {
 
-        this.#retire(accessory, "It carries no record of the device identity this version keys accessories by.");
+        if(accessory.context.id === undefined) {
 
-        continue;
+          this.#retire(accessory, "It carries no record of the device identity this version keys accessories by.");
+
+          continue;
+        }
+
+        this.removeHomeKitDevice(accessory);
+      } catch(error) {
+
+        this.log.error("Unable to remove %s from HomeKit: %s.", accessory.displayName, formatErrorMessage(error));
       }
-
-      this.removeHomeKitDevice(accessory);
     }
   }
 
@@ -1166,12 +1192,22 @@ export class AccessController {
 
       /* The registry removes the entry before running the callback, so the membership re-check below is the whole of what decides: a device that came back during
        * the delay keeps its accessory, its entry is already gone, and nothing arms in its place.
+       *
+       * The removal itself runs here, a whole delay after the pass that armed it, from a timer the registry fires with no catch around it. The callback carries the
+       * sweep's catch for that reason: without it, a fault on the way out of HomeKit would escape the timer as an uncaught exception rather than costing this one
+       * accessory its removal and saying so.
        */
       this.#removals.setTimeout(accessory.UUID, () => {
 
-        if(!this.#membershipClaims(this.client.state.snapshot()).uuids.has(accessory.UUID)) {
+        try {
 
-          this.removeHomeKitDevice(accessory, true);
+          if(!this.#membershipClaims(this.client.state.snapshot()).uuids.has(accessory.UUID)) {
+
+            this.removeHomeKitDevice(accessory, true);
+          }
+        } catch(error) {
+
+          this.log.error("Unable to remove %s from HomeKit: %s.", accessory.displayName, formatErrorMessage(error));
         }
       }, delayInterval * 1000);
 

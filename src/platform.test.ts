@@ -472,6 +472,40 @@ test("a stranded accessory is reclaimed once every configured controller has rep
     "and no controller reports its device."), "the reason must be said in the removal's own sentence");
 });
 
+test("an undelayed stranded removal whose unregister throws costs the stranded accessory behind it nothing, and is said once through the platform's log", async (t) => {
+
+  // The removal delay is off, so the walk removes each stranded accessory itself rather than arming a timer for it.
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }],
+    options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" } });
+  // Accessories nothing answers for, walked in the order Homebridge restored them, the first of them refusing to leave.
+  const stuck = cachedAccessory("stuck", "Stuck", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" });
+  const stranded = cachedAccessory("stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:43" });
+  const unregister = platform.unregisterAccessory.bind(platform);
+
+  harness.restore(platform, stuck, stranded);
+
+  t.mock.method(platform, "unregisterAccessory", (target: AccessAccessory): void => {
+
+    if(target === stuck) {
+
+      throw new Error("Homebridge refused the removal");
+    }
+
+    unregister(target);
+  });
+
+  const inner = platformInternals(platform);
+
+  inner.controllers.splice(0, inner.controllers.length, reporting);
+  await assert.doesNotReject(inner.reclaimStranded([Promise.resolve({ controller: reporting, outcome: "reporting" })]), "the fault must not end the walk");
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("stranded")], "the stranded accessory behind the fault is still removed");
+  assert.deepEqual(harness.lines.filter((line) => line.startsWith("error: ")), ["error: Unable to remove Stuck from HomeKit: Homebridge refused the removal."],
+    "and the fault is said once, through the platform's log, naming the accessory");
+});
+
 test("a stranded reclaim honors the global removal delay and re-checks before firing", async () => {
 
   mock.timers.enable({ apis: ["setTimeout"] });
@@ -521,6 +555,33 @@ test("a stranded reclaim honors the global removal delay and re-checks before fi
   assert.deepEqual(harness.unregistered, [accessoryUuid("gone")], "a queue cleared at shutdown fires nothing after it");
 
   mock.timers.reset();
+});
+
+test("a delayed stranded removal whose unregister throws is said once through the platform's log rather than escaping its timer", async (t) => {
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  // The removal delay is on, as it is by default, so the removal runs only when its timer fires, outside the dispatch the pass itself runs under.
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const reporting = makeControllerDouble({ config: { address: "1.2.3.4" } });
+
+  harness.restore(platform, cachedAccessory("stuck", "Stuck", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
+
+  t.mock.method(platform, "unregisterAccessory", (): void => {
+
+    throw new Error("Homebridge refused the removal");
+  });
+
+  const inner = platformInternals(platform);
+
+  inner.controllers.splice(0, inner.controllers.length, reporting);
+  await inner.reclaimStranded([Promise.resolve({ controller: reporting, outcome: "reporting" })]);
+
+  assert.ok(harness.lines.includes("info: Stuck: Delaying device removal for at least 60 seconds."), "the removal must genuinely be armed");
+  assert.doesNotThrow(() => t.mock.timers.tick(60000), "the fault must not escape the timer");
+  assert.deepEqual(harness.lines.filter((line) => line.startsWith("error: ")), ["error: Unable to remove Stuck from HomeKit: Homebridge refused the removal."],
+    "and it is said once, through the platform's log, naming the accessory");
 });
 
 test("a shutdown that lands before the fence closes removes nothing", async () => {

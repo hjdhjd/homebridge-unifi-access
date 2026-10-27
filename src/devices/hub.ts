@@ -262,8 +262,20 @@ export class AccessHub extends AccessDevice {
       this.lockDelayInterval = undefined;
     }
 
-    this.configureHints();
-    this.configureDevice();
+    /* A construction that fails part way has already started this device's record loop and registered its final word, each bound to a lifetime only cleanup()
+     * ends, and nothing holds the instance to call it. Ending that lifetime before the failure leaves here is what keeps the adoption the next membership change
+     * retries from standing a second live instance beside this one on the same accessory.
+     */
+    try {
+
+      this.configureHints();
+      this.configureDevice();
+    } catch(error) {
+
+      this.cleanup();
+
+      throw error;
+    }
   }
 
   /* Configure device-specific settings for this device.

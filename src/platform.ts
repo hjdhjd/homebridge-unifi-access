@@ -349,10 +349,19 @@ export class AccessPlatform implements DynamicPlatformPlugin {
         continue;
       }
 
-      // With no delay configured there is nothing to wait for.
+      /* With no delay configured there is nothing to wait for, so the removal runs in the walk itself, each accessory under its own catch, as the controller's orphan
+       * sweep retires each of its own. The walk runs under the guarded dispatch, which reports a fault once and leaves the walk ended where it was thrown...without the
+       * catch, one accessory that cannot leave HomeKit would keep every stranded accessory behind it in place until the next start.
+       */
       if(!delayInterval) {
 
-        this.#retireStranded(accessory);
+        try {
+
+          this.#retireStranded(accessory);
+        } catch(error) {
+
+          this.log.error("Unable to remove %s from HomeKit: %s.", accessory.displayName, formatErrorMessage(error));
+        }
 
         continue;
       }
@@ -368,12 +377,22 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
       /* The registry removes the entry before running the callback, so the re-check below is the whole of what decides: an accessory whose device turned up during
        * the delay is left alone, its entry is already gone, and nothing arms in its place.
+       *
+       * The removal itself runs here, a whole delay after the pass that armed it and outside the guarded dispatch that pass runs under, from a timer the registry
+       * fires with no catch around it. The callback carries the catch the controller's own delayed removal carries for that reason: without it, a fault on the way
+       * out of HomeKit would escape the timer as an uncaught exception rather than costing this one accessory its removal and saying so.
        */
       this.#strandedRemovals.setTimeout(accessory.UUID, () => {
 
-        if(this.#stillStranded({ settled, uuid: accessory.UUID })) {
+        try {
 
-          this.#retireStranded(accessory);
+          if(this.#stillStranded({ settled, uuid: accessory.UUID })) {
+
+            this.#retireStranded(accessory);
+          }
+        } catch(error) {
+
+          this.log.error("Unable to remove %s from HomeKit: %s.", accessory.displayName, formatErrorMessage(error));
         }
       }, delayInterval * 1000);
     }

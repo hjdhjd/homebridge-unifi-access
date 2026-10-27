@@ -113,6 +113,53 @@ function deviceHandle(record: Record<string, unknown>): unknown {
   };
 }
 
+// What a faulting handle shares with the arm driving it: whether its door read fails, and the lifetime each record loop built over it was handed and whether it ended.
+interface HandleFault {
+
+  active: boolean;
+  lifetimes: { ended: boolean; signal: AbortSignal }[];
+}
+
+/* A handle whose door read fails while its fault is active, standing in for a device whose construction throws part way. A hub reads its door at adoption, after its
+ * record loop has started over this same handle, so the loop is already running when the throw arrives. The loop parks until the lifetime it was handed ends, as
+ * the library's own observation does, and records that it ended, which is what tells a failed construction that ended its lifetime from one that leaked it.
+ */
+function faultingHandle(record: Record<string, unknown>, fault: HandleFault): unknown {
+
+  return {
+
+    config: record,
+    get doorId(): string {
+
+      if(fault.active) {
+
+        throw new Error("The door could not be read");
+      }
+
+      return "";
+    },
+    doorState: undefined,
+    observe: async function *(opts: { signal: AbortSignal }): AsyncGenerator {
+
+      const lifetime = { ended: false, signal: opts.signal };
+
+      fault.lifetimes.push(lifetime);
+
+      try {
+
+        // A record stream nothing moves, so the loop takes no record from it and waits on it until the lifetime ends.
+        yield* on(new EventEmitter(), "record", { signal: opts.signal });
+      } catch {
+
+        // The lifetime's own abort is what ends this iteration, exactly as it ends the library's, so it is the expected exit rather than news.
+      }
+
+      lifetime.ended = true;
+    },
+    peek: (): undefined => undefined
+  };
+}
+
 /* The client double a controller is stood up over: the members the controller reads on a connected client, and the ones its login path touches - the event
  * bridge's subscription, the controller's name, the published API where an arm supplies one, and the disposal a disabled controller performs. What varies
  * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the orphan sweep
@@ -151,6 +198,8 @@ interface ControllerHarness {
   // The time source this controller's removals and its connect backoff are armed on, so an arm advances time here rather than waiting any of it out.
   clock: TestClock;
   controller: AccessController;
+  // Every line said at error level, the controller's own and its devices' alike, rendered as the user reads it.
+  errors: string[];
   logged: string[];
   // The UUIDs each registration Homebridge accepted named, in the order it accepted them.
   readonly registered: string[];
@@ -176,6 +225,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
   // The Homebridge API double the platform hands the controller: the accessory class an adoption builds from, and the calls Homebridge accepted, read below.
   const api = makeTestApi();
   const clock = new TestClock();
+  const errors: string[] = [];
   // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
   const logged: string[] = [];
   // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from.
@@ -189,8 +239,9 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
    * this arm's own API double and this arm's own list, which is what lets an adoption and a retirement be read here.
    */
   const platform = makePlatformDouble({ accessories, api, clock, entries: options.options ?? [],
-    log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
-      warn: (): void => undefined }, signal: shutdown.signal });
+    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+      info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)), warn: (): void => undefined },
+    signal: shutdown.signal });
 
   // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
   const client = clientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
@@ -209,6 +260,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     accessories,
     clock,
     controller,
+    errors,
     logged,
     get registered(): string[] {
 
@@ -357,6 +409,174 @@ test("one device's fault on either of the observer's walks costs its siblings no
   assert.deepEqual(faulting.calls, [ "refresh", "restore" ], "the faulting device is asked on both walks");
   assert.deepEqual(sibling.calls, [ "refresh", "restore" ], "and the device behind it receives both, so each walk's isolation holds on its own");
   assert.equal(faulting.errors.length, 2, "each fault is reported through the device's own log rather than unwinding the loop");
+});
+
+// A managed hub of its own, beside the fixtures above, for the arms that need more devices than they carry.
+function namedHubRecord(name: string, id: string, mac: string): Record<string, unknown> {
+
+  return hubRecord({ alias: "", mac, name, unique_id: id });
+}
+
+test("a device whose adoption throws costs its siblings nothing: the next device is added, the pass's removal runs, and the device list keeps observing",
+  async (t) => {
+
+    const store = createStateStore({});
+    const plain = plainHubRecord();
+    const departing = returnedHubRecord();
+    const faulty = namedHubRecord("Faulty Hub", "faulty", "aabbccddee04");
+    const newcomer = namedHubRecord("Newcomer Hub", "newcomer", "aabbccddee05");
+    const late = namedHubRecord("Late Hub", "late", "aabbccddee06");
+    const fault: HandleFault = { active: true, lifetimes: [] };
+
+    store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, departing ]) });
+
+    // The removal delay is off, so the departure in the failing pass is decided in that pass rather than armed for later, and the accessory list reads its verdict.
+    const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([ [ "faulty", faultingHandle(faulty, fault) ],
+      [ "late", deviceHandle(late) ], [ "newcomer", deviceHandle(newcomer) ], [ "plain", deviceHandle(plain) ], [ "returned", deviceHandle(departing) ] ]),
+    options: ["Disable.Controller.DelayDeviceRemoval"], store });
+
+    t.after(() => harness.shutdown.abort());
+
+    await harness.controller.login();
+
+    // One membership change that adds the faulting hub ahead of a healthy one and takes a configured hub away.
+    store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, faulty, newcomer ]) });
+
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    assert.deepEqual(harness.registered, [ "AABBCCDDEE01", "AABBCCDDEE99", "AABBCCDDEE04", "AABBCCDDEE05" ].map(seed => accessoryUuid(seed)),
+      "the faulting hub is minted ahead of the healthy one, so its throw comes first in the pass");
+    assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE05")), "the hub behind the fault is added");
+    assert.ok(!harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE04")), "and the hub whose construction threw is not");
+    assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE99")], "the departure in the same pass is removed");
+    assert.deepEqual(harness.errors, ["Test Controller: Unable to add Faulty Hub [UA Hub] to HomeKit: The door could not be read."],
+      "and the fault is said once, through the controller's log, naming the device");
+    assert.deepEqual(fault.lifetimes.map(lifetime => [ lifetime.signal.aborted, lifetime.ended ]), [[ true, true ]],
+      "the failed hub's record loop ended with the lifetime its construction started");
+
+    // The next membership change retries the failed adoption on the accessory it already registered, and the device list is still observing to see that change.
+    fault.active = false;
+    store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, faulty, newcomer, late ]) });
+
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE06")), "the device list is still observing");
+    assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE04")), "and the failed adoption is retried");
+    assert.equal(harness.registered.filter(uuid => uuid === accessoryUuid("AABBCCDDEE04")).length, 1, "on the accessory it registered the first time");
+    assert.deepEqual(fault.lifetimes.map(lifetime => lifetime.ended), [ true, false ], "so one live instance stands on that accessory rather than two");
+    assert.equal(harness.errors.length, 1, "and the retry that succeeded says nothing more");
+  });
+
+test("a device whose removal throws costs the departure behind it nothing, and says so through its own log", async (t) => {
+
+  const store = createStateStore({});
+  const plain = plainHubRecord();
+  const departing = returnedHubRecord();
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, departing ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } },
+    handles: new Map([ [ "plain", deviceHandle(plain) ], [ "returned", deviceHandle(departing) ] ]), options: ["Disable.Controller.DelayDeviceRemoval"], store });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const failing = harness.controller.configuredDevices.get(accessoryUuid("AABBCCDDEE01"));
+
+  assert.ok(failing, "each hub is configured before it leaves");
+
+  // The first departure's teardown throws, standing in for any fault on the way out of HomeKit, and the second departure in the same pass follows it.
+  t.mock.method(failing, "cleanup", (): void => {
+
+    throw new Error("The device could not be torn down");
+  });
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE99")], "the departure behind the fault is removed");
+  assert.deepEqual(harness.errors, ["Plain Hub [UA Hub]: Unable to remove this device from HomeKit: The device could not be torn down."],
+    "and the fault is said once, through the failing device's own log");
+});
+
+test("an orphan whose removal throws costs the orphans behind it nothing, and the device list still subscribes", async (t) => {
+
+  const store = createStateStore({});
+  const plain = plainHubRecord();
+
+  // No device stands behind the seed pass, so the sweep has the cache to itself and a later membership change is what proves the subscription.
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([[ "plain", deviceHandle(plain) ]]), store });
+
+  t.after(() => harness.shutdown.abort());
+
+  // Accessories recording no identity, which the sweep retires at once, the first of them refusing to leave.
+  const stuck = accessory("aa:bb:cc:dd:ee:97", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:97" }, "Stuck Hub");
+  const orphan = accessory("aa:bb:cc:dd:ee:98", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:98" }, "Orphan Hub");
+  const platform = harness.controller.platform;
+  const unregister = platform.unregisterAccessory.bind(platform);
+
+  harness.restore(stuck, orphan);
+
+  t.mock.method(platform, "unregisterAccessory", (target: AccessAccessory): void => {
+
+    if(target === stuck) {
+
+      throw new Error("Homebridge refused the removal");
+    }
+
+    unregister(target);
+  });
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:98")], "the orphan behind the fault is retired");
+  assert.deepEqual(harness.errors, ["Test Controller: Unable to remove Stuck Hub from HomeKit: Homebridge refused the removal."],
+    "and the fault is said once, through the controller's log, naming the accessory");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([plain]) });
+
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE01")), "the device list subscribed behind the sweep and adds what arrives");
+});
+
+test("a delayed removal whose retirement throws costs the removal due beside it nothing, and says so through the controller's log", (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+
+  // The removal delay is on, as it is by default, so each departure arms a timer and is removed only when it fires, outside the pass that raised it.
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  // Departures naming hardware the topology does not carry, armed together so they come due on one advance, the first of them refusing to leave.
+  const stuck = accessory("AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" }, "Stuck Hub");
+  const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
+  const platform = harness.controller.platform;
+  const unregister = platform.unregisterAccessory.bind(platform);
+
+  harness.restore(stuck, departed);
+
+  t.mock.method(platform, "unregisterAccessory", (target: AccessAccessory): void => {
+
+    if(target === stuck) {
+
+      throw new Error("Homebridge refused the removal");
+    }
+
+    unregister(target);
+  });
+
+  harness.controller.removeHomeKitDevice(stuck);
+  harness.controller.removeHomeKitDevice(departed);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE99")], "the removal due beside the fault is still made");
+  assert.deepEqual(harness.errors, ["1.2.3.4: Unable to remove Stuck Hub from HomeKit: Homebridge refused the removal."],
+    "and the fault is said once, through the controller's log, naming the accessory");
 });
 
 test("the connection observer's lifetime is the controller's own terminal signal", async () => {
