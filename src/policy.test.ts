@@ -8,7 +8,7 @@
 /* eslint-disable camelcase */
 import { ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, AccessApiError,
   AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessConfigurationError, AccessNetworkError,
-  createStateStore, selectDoorStates } from "unifi-access";
+  AccessRequestError, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
@@ -20,6 +20,7 @@ import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValu
   isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
   reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
+import type { ConnectFailure } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -342,10 +343,23 @@ function retryWaits(failures: readonly unknown[]): number[] {
   return waits;
 }
 
+// A controller limiting requests, in the status error the transport classifies a 429 as, worded as unifi-access words it.
+const RATE_LIMIT = new AccessRequestError("The UniFi Access controller answered the request with HTTP status 429.", { statusCode: 429 });
+
+// A controller not ready yet to serve a request, in the same status error a rate limit arrives in, which refuses nothing.
+const NOT_READY = new AccessRequestError("The UniFi Access controller answered the request with HTTP status 503.", { statusCode: 503 });
+
+// The fetch-stage bootstrap error the credential path's configuration read carries a failure in as its cause, worded as unifi-access words it.
+function fetchFailure(cause: Error): AccessBootstrapError {
+
+  return new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause, stage: "fetch" });
+}
+
 // One spelling of each kind of refusal: an identity and a privilege refusal, each as the transport's classification of a refused status and as the controller's
-// own result code answered inside a successful response.
-const REFUSAL_SPELLINGS = [ new AccessAuthError("Bad credentials."),
-  new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" }), new AccessAuthorizationError("Not an administrator."),
+// own result code answered inside a successful response, and a rate limit, which a policy reading only a refused sign-in would misread as an ordinary fault. One
+// of each kind comes first, so a walk through the list moves between every kind before it reaches the result-code spellings.
+const REFUSAL_SPELLINGS = [ new AccessAuthError("Bad credentials."), new AccessAuthorizationError("Not an administrator."), RATE_LIMIT,
+  new AccessApiError("The controller rejected the API token.", { code: "CODE_ACCESS_TOKEN_INVALID" }),
   new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) ];
 
 test("the connect retry policy waits out an ordinary fault on the library's recovery schedule, then holds at its steady floor", () => {
@@ -356,7 +370,8 @@ test("the connect retry policy waits out an ordinary fault on the library's reco
   assert.deepEqual(retryWaits(failures), [ ...ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS ]);
 });
 
-test("the connect retry policy waits out a refused identity or privilege, in every spelling, on the library's refusal schedule, then holds at its floor", () => {
+test("the connect retry policy waits out a refused identity, privilege or request rate, in every spelling, on the library's refusal schedule, then holds at " +
+  "its floor", () => {
 
   const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
   const expected = [ ...backoff, steady, steady ];
@@ -367,7 +382,7 @@ test("the connect retry policy waits out a refused identity or privilege, in eve
     assert.deepEqual(retryWaits(Array.from({ length: expected.length }, () => refusal)), expected, refusal.message);
   }
 
-  // A refused identity and a refused privilege are one class, so a run that moves between them in either spelling walks one schedule rather than restarting it.
+  // A refused identity, a refused privilege and a refused request rate are one class, so a run that moves among them walks one schedule rather than restarting it.
   const interleaved = Array.from({ length: expected.length }, (_, index) => REFUSAL_SPELLINGS[index % REFUSAL_SPELLINGS.length]);
 
   assert.deepEqual(retryWaits(interleaved), expected);
@@ -378,14 +393,15 @@ test("the connect retry policy reads a refusal a bootstrap error carries as its 
   const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
   const refusalWaits = [ ...backoff, steady, steady ];
   const refusals = [ new AccessAuthorizationError("Not an administrator."),
-    new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }) ];
+    new AccessApiError("The controller refused the request.", { code: "CODE_OPERATION_FORBIDDEN" }), RATE_LIMIT ];
 
-  /* The credential path's bootstrap wraps a refused document read, whether the controller refused it by status or by result code, as the cause of a fetch-stage
-   * bootstrap error. That is a controller that accepted the account and refused it a privilege, so the wrapper waits exactly as the bare refusal does.
+  /* The credential path's bootstrap wraps a refused document read, whether the controller refused a privilege by status or by result code or refused the
+   * request rate, as the cause of a fetch-stage bootstrap error. That is a controller that accepted the account and then refused, so the wrapper waits exactly
+   * as the bare refusal does.
    */
   for(const refusal of refusals) {
 
-    const wrapped = new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause: refusal, stage: "fetch" });
+    const wrapped = fetchFailure(refusal);
 
     assert.deepEqual(retryWaits(Array.from({ length: refusalWaits.length }, () => wrapped)), refusalWaits, refusal.message);
   }
@@ -412,6 +428,31 @@ test("the connect retry policy starts the new class's schedule at its first rung
     [ firstRecovery, secondRecovery, thirdRecovery, firstRefusal, secondRefusal, firstRecovery, secondRecovery ]);
 });
 
+test("the connect retry policy waits out a status that refuses nothing on the library's recovery schedule, bare or wrapped", () => {
+
+  /* The negative control: a 503 is a controller not ready yet, in the same status error a rate limit arrives in, and it refuses nothing, so it walks the recovery
+   * schedule bare and as the cause of a fetch-stage bootstrap error alike...a policy that read every status error as a refusal, or every one a bootstrap error
+   * carries, would open it on the refusal schedule's first rung.
+   */
+  for(const notReady of [ NOT_READY, fetchFailure(NOT_READY) ]) {
+
+    assert.deepEqual(retryWaits(Array.from({ length: ACCESS_RECOVERY_BACKOFF_MS.length + 2 }, () => notReady)),
+      [ ...ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS ], notReady.message);
+  }
+});
+
+test("the connect retry policy restarts on the refusal schedule's first rung when a rate limit follows a stretch of unreachability", () => {
+
+  const unreachable = new Error("Network unreachable.");
+  const [ firstRecovery, secondRecovery ] = ACCESS_RECOVERY_BACKOFF_MS;
+  const [ firstRefusal, secondRefusal ] = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS.backoff;
+
+  /* The walk hands each wait the retry helper's own attempt number, which counts the whole run, so a wait that read it would land the rate limit partway down the
+   * refusal schedule rather than on its first rung, and a policy that read a rate limit as an ordinary fault would carry on down the recovery schedule instead.
+   */
+  assert.deepEqual(retryWaits([ unreachable, unreachable, RATE_LIMIT, RATE_LIMIT ]), [ firstRecovery, secondRecovery, firstRefusal, secondRefusal ]);
+});
+
 test("the connect retry policy retries every class of fault but a refused address at every rung of its schedule, its steady floor included", () => {
 
   const failures = [ new Error("Network unreachable."), new TypeError("Cannot read properties of undefined (reading 'doors')"), ...REFUSAL_SPELLINGS ];
@@ -433,7 +474,7 @@ test("the connect retry policy stops at an address no URL can carry without repo
   "refused sign-in", () => {
 
   const reports: string[] = [];
-  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: ({ reason }: ConnectFailure): void => void reports.push(reason) });
 
   // The library's own refusal of an address carrying more than a host and a port, worded as unifi-access words it.
   assert.equal(shouldRetry(new AccessConfigurationError("The controller address \"access.local/path\" carries more than a host and a port.")), false,
@@ -458,7 +499,7 @@ test("the connect retry policy stops at an address no URL can carry without repo
 test("the connect retry policy reports a run's first failure, and a repeat of the same reason stays silent", () => {
 
   const reports: string[] = [];
-  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: ({ reason }: ConnectFailure): void => void reports.push(reason) });
 
   /* Three distinct error instances that read identically, which is the shape a reducer fault takes when it throws afresh on every attempt. A comparison by
    * identity would report each of them, and one that remembered nothing would too.
@@ -479,7 +520,7 @@ test("the connect retry policy reports a run's first failure, and a repeat of th
 test("the connect retry policy reports again whenever the reason changes, including a return to an earlier one", () => {
 
   const reports: string[] = [];
-  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: ({ reason }: ConnectFailure): void => void reports.push(reason) });
 
   /* A timeout giving way to a reducer fault, then the timeout coming back. The return is what tells a comparison against the last reason apart from one against
    * every reason ever seen...the latter would stay silent when the timeout returns and hide from the user that the fault moved again.
@@ -497,7 +538,7 @@ test("the connect retry policy reports again whenever the reason changes, includ
 test("the connect retry policy reports refusals on the same terms as any other fault", () => {
 
   const reports: string[] = [];
-  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (reason: string): void => void reports.push(reason) });
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: ({ reason }: ConnectFailure): void => void reports.push(reason) });
 
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(shouldRetry(new AccessAuthError("Bad credentials.")), true);
@@ -508,12 +549,83 @@ test("the connect retry policy reports refusals on the same terms as any other f
    * identity giving way to a refused privilege stays on the one refusal schedule and still reads to a user as a different reason.
    */
   const changes: string[] = [];
-  const policy = createConnectRetryPolicy({ onFailure: (reason: string): void => void changes.push(reason) });
+  const policy = createConnectRetryPolicy({ onFailure: ({ reason }: ConnectFailure): void => void changes.push(reason) });
 
   assert.equal(policy.shouldRetry(new Error("Network unreachable.")), true);
   assert.equal(policy.shouldRetry(new AccessAuthError("Bad credentials.")), true);
   assert.equal(policy.shouldRetry(new AccessAuthorizationError("Not an administrator.")), true);
   assert.deepEqual(changes, [ "Network unreachable", "Bad credentials", "Not an administrator" ]);
+});
+
+test("the connect retry policy's report says a rate limit is one, bare or wrapped, and says a refused sign-in, an unreachable controller or a status that " +
+  "refuses nothing, bare or wrapped, is not", () => {
+
+  /* A rate limit is the one refusal that is no refused sign-in, and a fetch-stage bootstrap error carries it as its cause, as the library's reading sees through.
+   * A 503 arrives in the same status error and the same wrapper and refuses nothing, so neither spelling of it is a rate limit.
+   */
+  const cases = [ [ RATE_LIMIT, true ], [ fetchFailure(RATE_LIMIT), true ], [ new AccessAuthError("Bad credentials."), false ],
+    [ new AccessAuthorizationError("Not an administrator."), false ], [ new Error("Network unreachable."), false ], [ NOT_READY, false ],
+    [ fetchFailure(NOT_READY), false ] ] as const;
+
+  for(const [ failure, rateLimited ] of cases) {
+
+    const reports: ConnectFailure[] = [];
+
+    createConnectRetryPolicy({ onFailure: (report: ConnectFailure): void => void reports.push(report) }).shouldRetry(failure);
+
+    assert.deepEqual(reports.map((report) => report.rateLimited), [rateLimited], failure.message);
+  }
+});
+
+// The report a bare rate limit earns, its reason spelled out as the text a user reads rather than derived from the error it formats.
+const RATE_LIMIT_REPORT: ConnectFailure = { rateLimited: true, reason: "The UniFi Access controller answered the request with HTTP status 429" };
+
+test("the connect retry policy reports a run of rate limits once, whichever spelling each attempt's 429 arrives in", () => {
+
+  const reports: ConnectFailure[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (report: ConnectFailure): void => void reports.push(report) });
+
+  /* The credential path meets a rate limit bare at its sign-in and as the cause of a fetch-stage bootstrap error at its configuration read, so a run whose sign-in
+   * passes on some attempts alternates the two. They read as different text and are one rate limit, which a caller says by its class alone...a comparison on the
+   * text would report every attempt.
+   */
+  for(const failure of [ RATE_LIMIT, fetchFailure(RATE_LIMIT), RATE_LIMIT, fetchFailure(RATE_LIMIT) ]) {
+
+    assert.equal(shouldRetry(failure), true);
+  }
+
+  assert.deepEqual(reports, [RATE_LIMIT_REPORT], "the run reports its rate limit once, as its first attempt read it");
+});
+
+test("the connect retry policy reports each turn between a rate limit and any other fault, a return to the rate limit included", () => {
+
+  const reports: ConnectFailure[] = [];
+  const { shouldRetry } = createConnectRetryPolicy({ onFailure: (report: ConnectFailure): void => void reports.push(report) });
+
+  /* A rate limit giving way to an unreachable controller, then the rate limit coming back. The return is what tells a comparison against the last report apart
+   * from one that keeps a rate limit silent once it has been said...the latter would hide from the user that the controller is limiting requests again.
+   */
+  for(const failure of [ RATE_LIMIT, new Error("Network unreachable."), RATE_LIMIT ]) {
+
+    assert.equal(shouldRetry(failure), true);
+  }
+
+  assert.deepEqual(reports, [ RATE_LIMIT_REPORT, { rateLimited: false, reason: "Network unreachable" }, RATE_LIMIT_REPORT ]);
+
+  /* A rate limit giving way to a refused sign-in, then the rate limit coming back as the cause a fetch-stage bootstrap error carries. Both are refusals, so a rule
+   * comparing the refusal class in place of the rate-limit reading would report the sign-in by its reason and then keep the return silent...the user would go on
+   * reading refused credentials while the controller is limiting requests again.
+   */
+  const refusalReports: ConnectFailure[] = [];
+  const refusalPolicy = createConnectRetryPolicy({ onFailure: (report: ConnectFailure): void => void refusalReports.push(report) });
+
+  for(const failure of [ RATE_LIMIT, new AccessAuthError("Bad credentials."), fetchFailure(RATE_LIMIT) ]) {
+
+    assert.equal(refusalPolicy.shouldRetry(failure), true);
+  }
+
+  assert.deepEqual(refusalReports, [ RATE_LIMIT_REPORT, { rateLimited: false, reason: "Bad credentials" }, { rateLimited: true,
+    reason: "Unable to fetch the UniFi Access controller configuration: The UniFi Access controller answered the request with HTTP status 429" } ]);
 });
 
 test("canTransition refuses same-phase and terminal moves while permitting every legitimate one", () => {

@@ -4,7 +4,7 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
+import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ConnectFailure, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
   MembershipClaims } from "../policy.ts";
 import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, maskAddressCredentials, selectDoorStates,
   verifyWebhookSignature } from "unifi-access";
@@ -321,9 +321,9 @@ export class AccessController {
 
   /* Establish a connection to the Access controller. AccessClient.connect() is atomic - it authenticates, fetches what the identity can reach, seeds the state
    * model, and brings the realtime channel up as one ready-or-throws operation, owning recovery and the periodic refresh failsafe internally. We wrap it in a
-   * startup-resilient retry that waits by the library's own recovery schedules: its slower refusal schedule while the controller refuses the identity or its
-   * privilege, and its recovery schedule for every other fault. The retry runs until the controller accepts us or we shut down, so a password or role corrected on
-   * the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
+   * startup-resilient retry that waits by the library's own recovery schedules: its slower refusal schedule while the controller refuses the identity, its
+   * privilege or the rate of our requests, and its recovery schedule for every other fault. The retry runs until the controller accepts us or we shut down, so a
+   * password or role corrected on the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
    *
    * The one exception is an address no URL can carry. The library refuses it before anything is sent, and refuses it the same way on every attempt, so the policy
    * vetoes it, the retry ends on the first attempt, and we say once that the address needs correcting. Nothing on the controller can change that answer.
@@ -331,17 +331,27 @@ export class AccessController {
    * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
    * serving it out in real seconds.
    *
-   * The policy tells us why a retried attempt failed when a run of failures begins and whenever its reason changes, and we say so at error level: an unbounded retry
-   * that reports nothing leaves a user with no way to tell a controller that is slow to appear from one that fails the same way on every attempt. A connect that
-   * succeeds ends the run and announces itself below, and an attempt torn down by our own shutdown is an orderly teardown rather than a reason to report.
+   * The policy tells us why a retried attempt failed when a run of failures begins and whenever what failed changes, and we say so: an unbounded retry that reports
+   * nothing leaves a user with no way to tell a controller that is slow to appear from one that fails the same way on every attempt. A rate limit is said at warn
+   * level, once per run of rate limits whichever spelling its 429 arrives in, because it is the controller asking to be asked less often and the retry already waits
+   * it out on the slower refusal schedule, so no person needs to act; every other failure is said at error level with its reason, again whenever that reason
+   * changes. A connect that succeeds ends the run and announces itself below, and an attempt torn down by our own shutdown is an orderly teardown rather than a
+   * reason to report.
    */
   async #connect(): Promise<boolean> {
 
     const { backoff, shouldRetry } = createConnectRetryPolicy({
 
-      onFailure: (reason: string): void => {
+      onFailure: ({ rateLimited, reason }: ConnectFailure): void => {
 
         if(this.#isShuttingDown()) {
+
+          return;
+        }
+
+        if(rateLimited) {
+
+          this.log.warn("Unable to connect to the UniFi Access controller because it is rate limiting requests, and will keep trying on the slower refusal schedule.");
 
           return;
         }

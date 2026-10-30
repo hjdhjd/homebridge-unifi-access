@@ -4,8 +4,8 @@
  */
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
-import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessClient, AccessConfigurationError, createStateStore,
-  selectAccessPoints } from "unifi-access";
+import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
+  AccessRequestError, createStateStore, selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
@@ -1665,6 +1665,110 @@ test("a connect that keeps failing says why once per reason, and a shutdown land
     "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors').",
     "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Request timed out."
   ], "each run of one reason is reported once, a changed reason again, and neither the interrupted attempt nor the ended retry adds a line");
+});
+
+// The line a connect the controller rate limits is said with, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
+const RATE_LIMITED_LINE = "1.2.3.4: Unable to connect to the UniFi Access controller because it is rate limiting requests, and will keep trying on the slower " +
+  "refusal schedule.";
+
+// A controller limiting requests, bare as a sign-in meets it and as the cause of the fetch-stage bootstrap error a configuration read carries it in, each worded
+// as unifi-access words it.
+const RATE_LIMIT = new AccessRequestError("The UniFi Access controller answered the request with HTTP status 429.", { statusCode: 429 });
+const WRAPPED_RATE_LIMIT = new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause: RATE_LIMIT, stage: "fetch" });
+
+/* Log a controller in against a connect port that answers its attempts with the failures given, in turn and from the first again once they run out, the third
+ * attempt shutting the plugin down as it fails, and answer the lines the run said at error and at warn level, rendered as the user reads them. The waits between
+ * attempts are armed on the platform's clock, so the drain walks whichever schedule the policy chose on virtual time, and a line said once across the run is said
+ * once across repeated attempts.
+ *
+ * @param failures - The failures the attempts answer with, attempt n answering the one at position (n - 1) modulo their number.
+ *
+ * @returns The lines said at error level and the lines said at warn level, each in the order they were said.
+ */
+async function loginFailing(failures: readonly Error[]): Promise<{ errors: string[]; warnings: string[] }> {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+  const warnings: string[] = [];
+
+  let attempts = 0;
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
+  signal: shutdown.signal });
+
+  // The token in the identity is what registers this controller's teardown against the plugin's lifetime, so the scripted abort reaches it.
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    if(attempts === 3) {
+
+      shutdown.abort();
+    }
+
+    const failure = failures[(attempts - 1) % failures.length];
+
+    assert.ok(failure, "every attempt answers with one of the failures handed in");
+
+    throw failure;
+  });
+
+  try {
+
+    // The login is started rather than awaited, because the waits between attempts are only registered once it is running and nothing else would step them.
+    const login = controller.login();
+
+    await drainClock(clock);
+
+    assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
+    assert.equal(attempts, 3, "every attempt the fixture scripts is made, so a line said once was said across repeated attempts");
+
+    return { errors, warnings };
+  } finally {
+
+    shutdown.abort();
+  }
+}
+
+test("a connect the controller rate limits, bare or wrapped, is said once at warn across repeated attempts, and nothing is said at error", async () => {
+
+  for(const failure of [ RATE_LIMIT, WRAPPED_RATE_LIMIT ]) {
+
+    // Each spelling logs a controller in of its own, one at a time, so a failure names the spelling rather than a position in a list.
+    // eslint-disable-next-line no-await-in-loop
+    const { errors, warnings } = await loginFailing([failure]);
+
+    assert.deepEqual(warnings, [RATE_LIMITED_LINE], failure.message + ": the rate limit is said once at warn");
+    assert.deepEqual(errors, [], failure.message + ": and nothing is said at error");
+  }
+});
+
+test("a connect whose rate limit alternates between its bare and wrapped spellings is said once at warn, and nothing is said at error", async () => {
+
+  /* A sign-in the controller sometimes lets through meets the rate limit bare on one attempt and at the configuration read on the next. The warn line carries no
+   * reason, so every spelling reads to a user as one rate limit...a report that followed the text would repeat the same line on every attempt.
+   */
+  const { errors, warnings } = await loginFailing([ RATE_LIMIT, WRAPPED_RATE_LIMIT ]);
+
+  assert.deepEqual(warnings, [RATE_LIMITED_LINE], "the alternating rate limit is said once at warn");
+  assert.deepEqual(errors, [], "and nothing is said at error");
+});
+
+test("a connect refused its sign-in or unable to reach the controller is said once at error with its reason, and never as a rate limit", async () => {
+
+  for(const { failure, reason } of [ { failure: new AccessAuthError("Bad credentials."), reason: "Bad credentials" },
+    { failure: new Error("Network unreachable."), reason: "Network unreachable" } ]) {
+
+    // Each failure logs a controller in of its own, one at a time, so a failure names the fault rather than a position in a list.
+    // eslint-disable-next-line no-await-in-loop
+    const { errors, warnings } = await loginFailing([failure]);
+
+    assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: " + reason + "."],
+      failure.message + ": the failure is said once at error with its reason");
+    assert.deepEqual(warnings, [], failure.message + ": and nothing is said at warn");
+  }
 });
 
 test("an accessory under the device identity that records none is adopted rather than retired, because membership is read before the record", async (t) => {
