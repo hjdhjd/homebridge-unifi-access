@@ -8,7 +8,7 @@ import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } fr
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
-import { TestMqttClient, freePort, settle, settleUntil } from "homebridge-plugin-utils/testing";
+import { TestMqttClient, settle, settleUntil, stopListening } from "homebridge-plugin-utils/testing";
 import { accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, savesOn } from "./testing.helpers.ts";
 import { mock, test } from "node:test";
 import type { AccessClient } from "unifi-access";
@@ -16,7 +16,9 @@ import { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import type { MqttClient } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { format } from "node:util";
+import { once } from "node:events";
 import { serialForm } from "./policy.ts";
 
 interface Harness {
@@ -825,10 +827,37 @@ test("a webhook port setting that is not a port is said once and the default is 
   assert.deepEqual(plain.lines.filter(line => line.startsWith("warn: The webhook port setting")), [], "and says nothing about a setting nobody wrote");
 });
 
+/* Answer a TCP port the kernel chose for a bind on every address, released again before it is answered. The webhook listener binds every address, so the port its
+ * setting names has to be free on every address: homebridge-plugin-utils' freePort asks on loopback alone, and Linux refuses a bind on every address while another
+ * socket holds the port on any one of them, where macOS lets the two stand side by side. The bind here names no host, which is how Node binds every address and how
+ * the listener's own bind reads, so the reservation and the bind cover the same addresses on every platform. The close is awaited before the port is answered, so
+ * the listener never binds against the throwaway socket still holding it.
+ *
+ * @returns A port free on every address when it is answered.
+ */
+async function freePortOnEveryAddress(): Promise<number> {
+
+  const server = createServer();
+  const listening = once(server, "listening");
+
+  server.listen(0);
+
+  await listening;
+
+  // The address is read before the close, which empties it, and the close runs before the narrowing below, so a socket that answered no port is still released.
+  const address = server.address();
+
+  await stopListening(server);
+
+  assert.ok((address !== null) && (typeof address === "object"), "the throwaway socket reports the port the kernel chose");
+
+  return address.port;
+}
+
 test("the platform builds one real listener, on its own clock and lifetime, and the shutdown ends it", async (t) => {
 
   const harness = makeHarness();
-  const port = await freePort();
+  const port = await freePortOnEveryAddress();
   /* The property this arm is here for: the listener binds the port the setting named, which is the port the registration names, so the two can never disagree.
    * Everything else about the listener - the clock its bind retry waits on, the label its own lines carry, the signal that ends it - is what the platform composes,
    * and this is the only arm that runs that composition rather than substituting for it.
