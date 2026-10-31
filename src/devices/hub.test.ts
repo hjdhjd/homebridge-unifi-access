@@ -2144,6 +2144,18 @@ test("a UA Gate whose side door position sensor is turned off publishes, restate
   await assert.rejects(gate.mqttGet("sidedoor/dps"), /no get registration's topic ends with/, "and nothing answers its get");
 });
 
+test("a UA Gate whose side door is turned off removes at adoption the side door position sensor its accessory was restored with, and nothing answers that " +
+  "topic", async () => {
+
+  const gate = makeGate({ existing: [carried(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE)], keepAdoptionLines: true,
+    options: ["Disable.Hub.SideDoor"] });
+
+  assert.ok(!hasContactSensor(gate, AccessReservedNames.CONTACT_DPS_SIDE), "adoption removes the sensor a run with the side door on left on the accessory");
+  assert.equal(lineCount(gate, "Disabling the side door position sensor."), 1, "and says so once");
+  assert.ok(!restatedIn(restoreSession(gate.mqtt)).map(([tail]) => tail).includes("sidedoor/dps"), "so no session restates its topic");
+  await assert.rejects(gate.mqttGet("sidedoor/dps"), /no get registration's topic ends with/, "and nothing answers its get");
+});
+
 test("a terminal input whose sensor is turned off publishes and restates nothing, whatever its wiring reports", () => {
 
   const harness = makeHub({ options: [listLess("Hub.Sensors", hubSensorChoices(), "REL")],

@@ -1318,24 +1318,21 @@ export class AccessHub extends AccessDevice {
   // Configure contact sensors for the side door terminal inputs on UA Gate hubs. The side door has its own dedicated DPS input separate from the main gate's DPS.
   private configureSideDoorTerminalInputs({ initialized }: ConfigurePass): void {
 
-    // We only configure side door terminal inputs for UA Gate hubs that have the side door enabled.
-    if(!this.hints.hasSideDoor) {
-
-      return;
-    }
-
-    // Validate whether we should have this service enabled. The selection is read here, on every configure pass, exactly as every other sensor's is, and a true
-    // verdict acquires the sensor, creating it where the accessory carries none.
-    const selected = this.#selectedSensors().includes("SideDoorDPS");
+    /* Validate whether we should have this service enabled. The sensor exists on a UA Gate whose side door is enabled, read from the same hint the side door's lock
+     * is gated on, and whose sensor selection includes it, so a sensor the accessory carries from a run with the side door on is removed once the side door is off.
+     * The selection is read on every configure pass where the side door is enabled, exactly as every other sensor's is, and a true verdict acquires the sensor,
+     * creating it where the accessory carries none.
+     */
+    const enabled = this.hints.hasSideDoor && this.#selectedSensors().includes("SideDoorDPS");
     const { service, transition } = this.validService({ serviceType: this.hap.Service.ContactSensor, subtype: AccessReservedNames.CONTACT_DPS_SIDE,
       suffix: " " + SIDE_DOOR_DPS_LABEL, validate: (hasService: boolean) => {
 
-        if(!selected && hasService) {
+        if(!enabled && hasService) {
 
           this.log.info("Disabling the " + SIDE_DOOR_DPS_LABEL.toLowerCase() + ".");
         }
 
-        return selected;
+        return enabled;
       } });
 
     if(!service) {
