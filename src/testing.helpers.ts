@@ -25,13 +25,13 @@
  */
 /* eslint-disable camelcase */
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
-import type { API, ChangeReason, CharacteristicValue, Logging } from "homebridge";
+import type { API, CharacteristicValue, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "./types.ts";
 import type { AccessBootstrapConfig, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
-import { AccessoryPersistence, FeatureOptions } from "homebridge-plugin-utils";
+import { AccessoryPersistence, ChangeReason, FeatureOptions } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable } from "homebridge-plugin-utils";
 import { TestClock, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
@@ -123,17 +123,11 @@ export function makeTestAccessory(displayName = "Test Accessory", seed = nextSee
   return new constructionApi.platformAccessory<AccessAccessoryContext>(displayName, accessoryUuid(seed));
 }
 
-// The reasons HAP stamps on the changes its event notifications and its update path raise, each checked against the member of HAP's own const enum that names it,
-// the form homebridge-plugin-utils' Homebridge double checks HAP's event names by, so a value that drifts from upstream fails the typecheck here. The enum itself is
-// out of reach at runtime under this project's module syntax.
-const EVENT_REASON = "event" satisfies `${ChangeReason.EVENT}`;
-const UPDATE_REASON = "update" satisfies `${ChangeReason.UPDATE}`;
-
 /**
  * The event notifications one characteristic sent HomeKit through HAP's `sendEventNotification`, in the order it sent them. HAP stores each notified value as the
  * characteristic's value and raises a change for it, so a row reads what HomeKit was told from this rather than from the final value, and a notification on another
- * instance of the same kind elsewhere on the accessory stays out. HAP's reason enum is a string enum, so each change's reason widens to the string it carries for
- * the comparison.
+ * instance of the same kind elsewhere on the accessory stays out. The reason it selects by is homebridge-plugin-utils' runtime mirror of HAP's own enum, the value
+ * HAP stamps on each change an event notification raises.
  *
  * @param accessory      - The accessory whose recorded changes to read.
  * @param characteristic - The characteristic instance whose notifications to select.
@@ -142,9 +136,8 @@ const UPDATE_REASON = "update" satisfies `${ChangeReason.UPDATE}`;
  */
 export function eventsFrom(accessory: TestPlatformAccessory, characteristic: Characteristic): Nullable<CharacteristicValue>[] {
 
-  const matches = (change: { characteristic: Characteristic; reason: string }): boolean => (change.characteristic === characteristic) && (change.reason === EVENT_REASON);
-
-  return accessory.changes.filter(matches).map((change) => change.newValue);
+  return accessory.changes.filter((change) => (change.characteristic === characteristic) && (change.reason === ChangeReason.EVENT))
+    .map((change) => change.newValue);
 }
 
 /**
@@ -162,9 +155,8 @@ export function eventsFrom(accessory: TestPlatformAccessory, characteristic: Cha
  */
 export function writesOn(accessory: TestPlatformAccessory, service: Service): { characteristic: string; value: Nullable<CharacteristicValue> }[] {
 
-  const matches = (change: { reason: string; service: Service }): boolean => (change.service === service) && (change.reason === UPDATE_REASON);
-
-  return accessory.changes.filter(matches).map((change) => ({ characteristic: change.characteristic.UUID, value: change.newValue }));
+  return accessory.changes.filter((change) => (change.service === service) && (change.reason === ChangeReason.UPDATE))
+    .map((change) => ({ characteristic: change.characteristic.UUID, value: change.newValue }));
 }
 
 /**
