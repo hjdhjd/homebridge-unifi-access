@@ -1184,8 +1184,9 @@ test("the accessory seed reads the spelling the library stores, and an update in
   assert.equal(harness.controller.addHomeKitDevice(record), true);
   assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE04")], "so a new accessory is minted from the stored spelling rather than from the wire's");
 
-  /* The older notification dialect reaches the merge untranslated, which is where a re-spelling would otherwise land on the stored record. A same-identity update
-   * in another spelling leaves the record's own reference in place, and that is what keeps the seed stable for the life of the process.
+  /* A notification of either dialect writes only the members unifi-access declares for a device record, and a MAC address is not one of them, so an older-dialect
+   * update restating it in another spelling never reaches the stored record. The record keeps its own reference, and that is what keeps the seed stable for the
+   * life of the process.
    */
   const before = store.snapshot().devices.get("probe");
   const packet = { data: { mac: "AA:BB:CC:DD:EE:04", name: "Probe" }, event: "access.data.device.update", event_object_id: "probe", receiver_id: "",
@@ -2666,7 +2667,7 @@ test("the publish chokepoint forwards the caller's own per-publish options to th
 /* The library's connection-lost sentence, split at the period a composed reason attaches in place of. Both halves are spelled out rather than derived from one
  * another, so an arm reads the text the user would rather than recomputing the composition it is checking.
  */
-const LOST_OPENING = "The UniFi Access controller appears to be unreachable; the connection is lost and recovery is polling for its return";
+const LOST_OPENING = "The UniFi Access controller appears unreachable; the connection is lost and recovery is polling";
 const LOST_SENTENCE = LOST_OPENING + ".";
 
 // A controller taken far enough to have handed the library its logger, which is the object these arms write through.
@@ -2726,7 +2727,7 @@ test("a library line with nothing a user could read arrives as its sentence alon
    */
   const alone = "warn: " + harness.controller.name + ": " + LOST_SENTENCE;
 
-  assert.deepEqual(harness.lines.slice(before).filter(line => line.includes("polling for its return")), [ alone, alone, alone, alone ],
+  assert.deepEqual(harness.lines.slice(before).filter(line => line.includes("recovery is polling")), [ alone, alone, alone, alone ],
     "a line with no readable reason must arrive exactly as the library wrote it");
 });
 
@@ -2765,7 +2766,7 @@ test("the debug echo carries the library's own sentence and its whole context, a
   loud.clientLog.warn(LOST_SENTENCE, context);
   quiet.clientLog.warn(LOST_SENTENCE, context);
 
-  const written = loud.lines.slice(loudBefore).filter(line => line.includes("polling for its return"));
+  const written = loud.lines.slice(loudBefore).filter(line => line.includes("recovery is polling"));
   const [ userLine, echo ] = written;
 
   /* The echo is the forensic record, so it carries the sentence as the library sent it with the context the user's line left out. It lands on the warn channel
@@ -2776,6 +2777,6 @@ test("the debug echo carries the library's own sentence and its whole context, a
   assert.ok(echo?.startsWith("warn: " + loud.controller.name + ": " + LOST_SENTENCE), "the echo must open with the sentence the library wrote");
   assert.ok(echo?.includes("reason"), "and must carry the context the composed line left out");
 
-  assert.deepEqual(quiet.lines.slice(quietBefore).filter(line => line.includes("polling for its return")),
+  assert.deepEqual(quiet.lines.slice(quietBefore).filter(line => line.includes("recovery is polling")),
     ["warn: " + quiet.controller.name + ": " + LOST_OPENING + ": the request timed out."], "with debug off the user's line is the whole of it");
 });

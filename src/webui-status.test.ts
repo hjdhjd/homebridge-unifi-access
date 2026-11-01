@@ -92,9 +92,9 @@ function doorEvent(doorId: string, state: Record<string, unknown>): NonNullable<
 }
 
 /* Classify one captured-shape device update carrying a fresh configuration row set, which is how a method being switched on or off at the controller reaches a
- * device record. The older dialect already speaks the bootstrap vocabulary, so the classifier passes this payload through untranslated and the reducer merges each
- * row onto the held row of the same key, its tag included - so an arm states every row with the tag the controller files it under, as the record's own rows are.
- * Its packet goes through unknown for the reason doorEvent's does.
+ * device record. A notification of either dialect writes only the members unifi-access declares for a device record, and the older dialect names each one as the
+ * topology does, so the classifier admits `configs` under its own name and the reducer merges each row onto the held row of the same key, its tag included - so an
+ * arm states every row with the tag the controller files it under, as the record's own rows are. Its packet goes through unknown for the reason doorEvent's does.
  */
 function deviceConfigsEvent(deviceId: string, configs: AccessDeviceEntryConfig[]): NonNullable<ReturnType<typeof AccessClient.classifyPacket>> {
 
