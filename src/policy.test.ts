@@ -12,8 +12,7 @@ import { ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVE
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
-import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
-  accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeAccessMethodUpdate, composeConnectIdentity, createConnectRetryPolicy,
+import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceDisplayName, deviceHasCapability, deviceModel, deviceName, deviceRecord, deviceSerial, discoverDoorLocations,
   doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, hubSensorChoices, hubSensorModels,
@@ -789,69 +788,13 @@ test("composeConnectIdentity accepts every whole identity and names every missin
   assert.deepEqual(composeConnectIdentity({ password: "p", tokens: {}, username: "u" }), { identity: { password: "p", username: "u" } });
 });
 
-test("the access method translations read each vocabulary through the catalog's own keys", () => {
+test("the access method catalog names each switch's method by the library's own name for it", () => {
 
-  // The catalog as both translations take it: the key each method is held under, and the official keys its own surface names it by, primary first.
-  const methods = [ { key: "pin_code", officialKeys: ["pin_code"] }, { key: "apple_pass", officialKeys: ["touch_pass"] },
-    { key: "nfc", officialKeys: ["nfc"] } ] as const;
-
-  /* The configuration rows state their own yes or no. A method the rows never mention contributes no entry at all rather than a false, because a census that did not
-   * list the method has said nothing about it, and a row naming something outside the catalog is not the catalog's business.
+  /* Typing the column against the library's vocabulary catches a name the library does not know, and only this pairing catches names swapped between rows, which
+   * compiles and sends every write for one switch to another method. The pairs are written out rather than derived, so the assertion states them.
    */
-  const rows = [ { key: "pin_code", value: "yes" }, { key: "apple_pass", value: "no" }, { key: "input_door_dps", value: "on" } ];
-
-  assert.deepEqual([...accessMethodValuesFromConfigRows({ methods, rows })], [ [ "pin_code", true ], [ "apple_pass", false ] ]);
-
-  /* The official settings are read through each method's primary official key and keyed back under the catalog's own: TouchPass answers as touch_pass and is held as
-   * apple_pass, which is the one method whose two surfaces disagree on its spelling. The map is sparse, so a method it omits contributes no entry, and the value
-   * comes off the per-method object rather than the member itself.
-   */
-  const settings = { pin_code: { enabled: "no", pin_code_shuffle: "no" }, touch_pass: { enabled: "yes" } } as const;
-
-  assert.deepEqual([...accessMethodValuesFromOfficialSettings({ methods, settings })], [ [ "pin_code", false ], [ "apple_pass", true ] ]);
-});
-
-test("composeAccessMethodUpdate carries the desired state onto every named key", () => {
-
-  // A single-key method composes exactly one member under access_methods, in the wire's own vocabulary.
-  assert.deepEqual(composeAccessMethodUpdate({ enabled: true, keys: ["touch_pass"] }), { access_methods: { touch_pass: { enabled: "yes" } } });
-
-  // A multi-key method carries the same value onto each of its keys, and the off direction spells "no" rather than dropping the member.
-  assert.deepEqual(composeAccessMethodUpdate({ enabled: false, keys: [ "bt_button", "bt_tap" ] }),
-    { access_methods: { bt_button: { enabled: "no" }, bt_tap: { enabled: "no" } } });
-});
-
-test("accessMethodWriteVerdict judges the primary key alone and reads absence as a verdict of its own", () => {
-
-  // The primary key agreeing confirms the write even when a secondary key the write also carried disagrees in the read-back...the secondaries are best-effort
-  // extras, and aggregating them would turn a hardware class that lacks one into a permanent decline.
-  assert.equal(accessMethodWriteVerdict({ enabled: "yes", primaryKey: "bt_button", readBack: { bt_button: { enabled: "yes" }, bt_tap: { enabled: "no" } } }),
-    "confirmed");
-
-  // A present primary key disagreeing with the written value means the controller answered success while refusing the change.
-  assert.equal(accessMethodWriteVerdict({ enabled: "yes", primaryKey: "face", readBack: { face: { enabled: "no" } } }), "declined");
-
-  // A sparse read-back carrying other methods but not the primary key means the official surface cannot see this method on this device...a verdict that has to
-  // come from the primary key's own absence rather than from the map being empty.
-  assert.equal(accessMethodWriteVerdict({ enabled: "yes", primaryKey: "bt_button", readBack: { nfc: { enabled: "yes" } } }), "absent");
-
-  // A hardware class offering no methods at all answers with an empty map, which reads absent too.
-  assert.equal(accessMethodWriteVerdict({ enabled: "no", primaryKey: "pin_code", readBack: {} }), "absent");
-});
-
-test("accessMethodWriteFollowup routes every verdict onto the action that serves it", () => {
-
-  assert.equal(accessMethodWriteFollowup({ transport: true, verdict: "confirmed" }), "complete");
-
-  // A decline is final in both transport directions: the controller answered and refused, so the raw endpoint must never be asked to second-guess it.
-  assert.equal(accessMethodWriteFollowup({ transport: true, verdict: "declined" }), "decline");
-  assert.equal(accessMethodWriteFollowup({ transport: false, verdict: "declined" }), "decline");
-
-  // Absence and a thrown failure both fall back where a transport can carry the raw write, and revert the switch where none can.
-  assert.equal(accessMethodWriteFollowup({ transport: true, verdict: "absent" }), "fallback");
-  assert.equal(accessMethodWriteFollowup({ transport: false, verdict: "absent" }), "revert");
-  assert.equal(accessMethodWriteFollowup({ transport: true, verdict: "failed" }), "fallback");
-  assert.equal(accessMethodWriteFollowup({ transport: false, verdict: "failed" }), "revert");
+  assert.deepEqual(accessMethods.map(method => [ method.choice, method.method ]), [ [ "Face", "face" ], [ "Hand", "wave" ], [ "Mobile", "mobile" ], [ "NFC", "nfc" ],
+    [ "PIN", "pin" ], [ "QR", "qr" ], [ "TouchPass", "touchPass" ] ]);
 });
 
 test("doorbellTriggerAction rings and cancels only through an official path and never repeats what is already true", () => {

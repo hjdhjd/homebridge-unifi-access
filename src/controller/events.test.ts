@@ -40,7 +40,7 @@ function makeController(options: { telemetry: boolean; tokenOnly?: boolean }): {
   };
 }
 
-// A wire frame carrying the metadata the newer device-update dialect addresses its device with.
+// A wire frame of the named event, addressed to one object and carrying the metadata the controller attaches to a change to a stored device.
 function packet(event: string): AccessEventPacket {
 
   return {
@@ -58,16 +58,21 @@ test("one packet reaches every addressing pattern a device subscribes on", () =>
 
   const { controller } = makeController({ telemetry: false });
   const events = new AccessEvents(controller);
+  const metaHeard: AccessEventPacket[] = [];
   const seen: string[] = [];
 
-  for(const name of [ "access.data.v2.device.update", "object1", "metaDevice1", "access.data.v2.device.update.object1" ]) {
+  for(const name of [ "access.data.v2.device.update", "object1", "access.data.v2.device.update.object1" ]) {
 
     events.on(name, () => seen.push(name));
   }
 
+  // The frame's metadata names a device of its own, and a listener on it hears nothing: a packet is addressed by its event and its object alone.
+  events.on("metaDevice1", (frame: AccessEventPacket) => metaHeard.push(frame));
+
   events.emitPacket(packet("access.data.v2.device.update"));
 
-  assert.deepEqual(seen.sort(), [ "access.data.v2.device.update", "access.data.v2.device.update.object1", "metaDevice1", "object1" ]);
+  assert.deepEqual(seen.sort(), [ "access.data.v2.device.update", "access.data.v2.device.update.object1", "object1" ]);
+  assert.deepEqual(metaHeard, [], "the device the frame's metadata names is not an addressing pattern");
 });
 
 test("the bridge forwards a newer-dialect device update and withholds the older one", () => {
@@ -78,7 +83,7 @@ test("the bridge forwards a newer-dialect device update and withholds the older 
 
   events.on("object1", (frame: AccessEventPacket) => delivered.push(frame));
 
-  // The newer dialect bridges from the raw rail, because its handler reads the frame's own payload rather than reading through to state.
+  // Every frame but the original dialect's device update bridges from the raw rail, the newer dialect's device update among them.
   events.handleRawPacket(packet("access.data.v2.device.update"));
 
   assert.equal(delivered.length, 1);

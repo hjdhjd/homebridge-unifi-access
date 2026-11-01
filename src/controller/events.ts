@@ -69,10 +69,9 @@ export class AccessEvents extends EventEmitter {
    * always been able to rely on. It deliberately does not live in the emission chokepoint below: that chokepoint serves the synthetic device updates as well, so a
    * mirror there would publish a single wire frame twice.
    *
-   * Device updates are then the one exclusion. The raw rail emits before the store folds the frame, so bridging a device update would race the read-through record
-   * the hub's handler reads, delivering it the state as it was rather than as the update left it; the per-device observe loops deliver those updates post-fold
-   * instead. The controller's newer device-update dialect still bridges here, because its handler reads the frame's own payload alongside topology facts that a
-   * device-update fold does not change, so the pre-fold hazard does not arise for it.
+   * The original dialect's device update is then the one exclusion. The raw rail emits before the store folds the frame, so bridging a device update would race the
+   * read-through record the hub's handler reads, delivering it the state as it was rather than as the update left it; the per-device observe loops deliver those
+   * updates post-fold instead. Every other frame bridges here as the controller sent it.
    *
    * @param packet - The raw frame as the controller sent it.
    */
@@ -94,7 +93,7 @@ export class AccessEvents extends EventEmitter {
 
   /**
    * Deliver one packet to the accessories listening for it. The single emission chokepoint, carrying every addressing pattern the device layer subscribes on: the
-   * event name, the object the event names, the device a newer-dialect update names in its metadata, and the event-and-object combination.
+   * event name, the object the event names, and the event-and-object combination.
    *
    * Both the wire bridge and the per-device loops' post-fold synthetic updates come through here, so what a listener receives has one shape regardless of which rail
    * produced it.
@@ -108,12 +107,6 @@ export class AccessEvents extends EventEmitter {
 
     // Emit messages based on the specific device.
     this.emit(packet.event_object_id, packet);
-
-    // For the newer device update dialect, we unpack the metadata to determine which device we're targeting.
-    if((packet.event === "access.data.v2.device.update") && (packet.meta?.object_type === "device")) {
-
-      this.emit(packet.meta.id, packet);
-    }
 
     // Finally, emit messages based on the specific event and device combination.
     this.emit(packet.event + "." + packet.event_object_id, packet);

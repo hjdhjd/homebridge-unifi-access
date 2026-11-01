@@ -11,7 +11,8 @@
 import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCapabilityError, AccessCertificateError, AccessClient,
   AccessNetworkError, AccessProtocolError, AccessRequestError, AccessStallError, AccessThrottledError, AccessTimeoutError, createStateStore, noopLog,
   selectAccessPoints, selectDoorStates } from "unifi-access";
-import type { AccessCapabilities, AccessControllerConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice, StateStore } from "unifi-access";
+import type { AccessCapabilities, AccessControllerConfig, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice,
+  StateStore } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
 import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
@@ -91,15 +92,15 @@ function doorEvent(doorId: string, state: Record<string, unknown>): NonNullable<
 }
 
 /* Classify one captured-shape device update carrying a fresh configuration row set, which is how a method being switched on or off at the controller reaches a
- * device record. The older dialect already speaks the bootstrap vocabulary, so the classifier passes this payload through untranslated and the reducer merges it
- * onto the held record, where an array member replaces wholesale - so the rows this states are the rows the record then carries. Its packet goes through unknown
- * for the reason doorEvent's does.
+ * device record. The older dialect already speaks the bootstrap vocabulary, so the classifier passes this payload through untranslated and the reducer merges each
+ * row onto the held row of the same key, its tag included - so an arm states every row with the tag the controller files it under, as the record's own rows are.
+ * Its packet goes through unknown for the reason doorEvent's does.
  */
-function deviceConfigsEvent(deviceId: string, entries: Record<string, string>): NonNullable<ReturnType<typeof AccessClient.classifyPacket>> {
+function deviceConfigsEvent(deviceId: string, configs: AccessDeviceEntryConfig[]): NonNullable<ReturnType<typeof AccessClient.classifyPacket>> {
 
   const packet = {
 
-    data: { configs: configRows({ deviceId: deviceId, entries: entries }), unique_id: deviceId },
+    data: { configs, unique_id: deviceId },
     event: "access.data.device.update",
     event_object_id: deviceId,
     receiver_id: "",
@@ -499,7 +500,7 @@ test("the access methods row states what the record's configuration rows say, in
    * catalog rather than from whatever order the record happened to list.
    */
   const record = reader("reader1", MAC_TWO, { capabilities: [ "qr_code", "is_reader", "pin_code", "nfc_card_easy_provision" ],
-    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "yes", "qr_code": "no" } }).reverse() });
+    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "yes", "qr_code": "no" }, tag: "open_door_mode" }).reverse() });
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
 
@@ -537,14 +538,14 @@ test("the access methods row lists only the methods the hardware's capabilities 
   // Every one of these rows says yes, so what the list leaves out is decided by the capabilities alone.
   const enabled = { "bt_button": "yes", "face": "yes", "nfc": "yes", "pin_code": "yes" };
 
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "pin_code" ], configs: configRows({ deviceId: "reader1", entries: enabled }) })),
-    [[ "methods", "[x] PIN" ]]);
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "pin_code" ],
+    configs: configRows({ deviceId: "reader1", entries: enabled, tag: "open_door_mode" }) })), [[ "methods", "[x] PIN" ]]);
 
   // The array-form capability names a family rather than a flag: any member of the family offers the one Mobile switch, so any member lists it.
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "mobile_unlock_ver2" ],
-    configs: configRows({ deviceId: "reader1", entries: enabled }) })), [[ "methods", "[x] Mobile" ]]);
+    configs: configRows({ deviceId: "reader1", entries: enabled, tag: "open_door_mode" }) })), [[ "methods", "[x] Mobile" ]]);
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "support_mobile_unlock" ],
-    configs: configRows({ deviceId: "reader1", entries: enabled }) })), [[ "methods", "[x] Mobile" ]]);
+    configs: configRows({ deviceId: "reader1", entries: enabled, tag: "open_door_mode" }) })), [[ "methods", "[x] Mobile" ]]);
 });
 
 test("the access methods row omits a method the record never mentioned, and no other hardware composes one", () => {
@@ -569,20 +570,42 @@ test("the access methods row omits a method the record never mentioned, and no o
   assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable }), "reader1"), [[ "methods", "" ]]);
 
   // One row resolving speaks for that method alone - the method the rows still do not mention stays absent rather than reading off.
-  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable, configs: configRows({ deviceId: "reader1", entries: { "nfc": "no" } }) }), "reader1"),
-    [[ "methods", "[ ] NFC" ]]);
+  assert.deepEqual(rowsFor(reader("reader1", MAC_TWO, { capabilities: capable,
+    configs: configRows({ deviceId: "reader1", entries: { "nfc": "no" }, tag: "open_door_mode" }) }), "reader1"), [[ "methods", "[ ] NFC" ]]);
 
   // Hardware that reads no credentials composes no methods row at all, whatever its configuration rows happen to carry.
   assert.deepEqual(rowsFor(bareHub("device1", MAC_ONE, { capabilities: [ "is_hub", "pin_code" ],
-    configs: configRows({ deviceId: "device1", entries: { "pin_code": "yes" } }) }), "device1"), [ [ "lock", "" ], [ "door", "" ] ]);
+    configs: configRows({ deviceId: "device1", entries: { "pin_code": "yes" }, tag: "open_door_mode" }) }), "device1"), [ [ "lock", "" ], [ "door", "" ] ]);
+});
+
+test("the access methods row leaves out a method whose row is filed under another tag or states something other than yes or no", () => {
+
+  const store = createStateStore({});
+
+  /* Neither row resolves a reading. The PIN row says yes, but under a tag the controller files no access method under, and the NFC row sits under the right tag
+   * stating a value outside the pair. An unchecked box for such a row would be a reading the controller never made, so each is left out, and the QR row beside them
+   * shows the row is composed all the same.
+   */
+  const record = reader("reader1", MAC_TWO, { capabilities: [ "is_reader", "nfc_card_easy_provision", "pin_code", "qr_code" ],
+    configs: [ ...configRows({ deviceId: "reader1", entries: { "pin_code": "yes" } }),
+      ...configRows({ deviceId: "reader1", entries: { "nfc": "maybe", "qr_code": "no" }, tag: "open_door_mode" }) ] });
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [record], id: "door1" }]) });
+
+  const state = store.snapshot();
+  const device = state.devices.get("reader1");
+
+  assert.ok(device);
+  assert.deepEqual(idValues(composeStatusRows({ device, entries: {}, kind: "device", state })), [[ "methods", "[ ] QR Code" ]]);
 });
 
 test("a hub that is also a reader carries its access methods beneath its door rows", () => {
 
   const store = createStateStore({});
+  // The door's input and wiring rows and the reader's access-method row, each under the tag the controller files it under.
   const hubReader = wiredHub("device1", MAC_ONE, { capabilities: [ "is_hub", "dps_alarm", "is_reader", "pin_code" ],
-    configs: configRows({ deviceId: "device1", entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "pin_code": "yes", "wiring_state_dps-neg": "on",
-      "wiring_state_dps-pos": "on" } }) });
+    configs: [ ...configRows({ deviceId: "device1", entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on",
+      "wiring_state_dps-pos": "on" } }), ...configRows({ deviceId: "device1", entries: { "pin_code": "yes" }, tag: "open_door_mode" }) ] });
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [hubReader], id: "door1" }]) });
 
@@ -754,7 +777,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [reader("reader1", MAC_ONE, {
 
     capabilities: [ "is_reader", "nfc_card_easy_provision", "pin_code" ],
-    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "no" } })
+    configs: configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "no" }, tag: "open_door_mode" })
   })], id: "door1" }]) });
 
   const { client } = makeClient(store);
@@ -773,7 +796,7 @@ test("a configuration row change on a reader's methods surfaces as the choices a
    * update carries the WHOLE replacement list rather than the one entry that moved, because addressing an entry inside the list is not something the wire offers.
    */
   frames.length = 0;
-  store.dispatch(deviceConfigsEvent("reader1", { "nfc": "yes", "pin_code": "yes" }));
+  store.dispatch(deviceConfigsEvent("reader1", configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "yes" }, tag: "open_door_mode" })));
   await settle(DISPATCH_SETTLE_TURNS);
 
   const moved = forSerial(frames, SERIAL_ONE);
@@ -785,7 +808,8 @@ test("a configuration row change on a reader's methods surfaces as the choices a
    * the panel is left alone rather than told to redraw a list it already holds.
    */
   frames.length = 0;
-  store.dispatch(deviceConfigsEvent("reader1", { "nfc": "yes", "pin_code": "yes", "tamper_event": "false" }));
+  store.dispatch(deviceConfigsEvent("reader1", [ ...configRows({ deviceId: "reader1", entries: { "nfc": "yes", "pin_code": "yes" }, tag: "open_door_mode" }),
+    ...configRows({ deviceId: "reader1", entries: { "tamper_event": "false" } }) ]));
   await settle(DISPATCH_SETTLE_TURNS);
 
   assert.deepEqual(forSerial(frames, SERIAL_ONE), []);

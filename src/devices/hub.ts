@@ -2,16 +2,16 @@
  *
  * hub.ts: Unified hub and reader device class for UniFi Access.
  */
-import { ACCESS_API_PATH_PREFIX, AccessCapabilityError, AccessClient, isHub, isReader, isTamperCapable, portBindings, tamperState, terminalInput } from "unifi-access";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT } from "../controller/events.ts";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
-import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice,
-  AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts, OfficialApi } from "unifi-access";
-import type { AccessMethodKey, DoorServiceType, HubSensorName, LogEventName } from "../policy.ts";
+import { AccessAbortedError, AccessCapabilityError, AccessClient, AccessDeclinedError, accessMethodStates, deviceAccessMethodStates, isHub, isReader,
+  isTamperCapable, portBindings, tamperState, terminalInput } from "unifi-access";
+import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessMethod, AccessStateDevice,
+  AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts } from "unifi-access";
 import type { AcquireServiceResult, Nullable } from "homebridge-plugin-utils";
 import type { CharacteristicValue, Service } from "homebridge";
-import { accessMethodChoices, accessMethodValuesFromConfigRows, accessMethodValuesFromOfficialSettings, accessMethodWriteFollowup, accessMethodWriteVerdict,
-  accessMethods, composeAccessMethodUpdate, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
+import type { DoorServiceType, HubSensorName, LogEventName } from "../policy.ts";
+import { accessMethodChoices, accessMethods, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
   doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
 import { capabilityGate, findService, formatErrorMessage, getServiceName, guardedDispatch, presenceChanged, updateServices,
   validCharacteristic } from "homebridge-plugin-utils";
@@ -22,31 +22,19 @@ import { AccessDevice } from "./device.ts";
 import { AccessReservedNames } from "../types.ts";
 import { mqttTopics } from "../mqtt.ts";
 
-// Device types that use the /configs API endpoint instead of /settings for access method changes. The UVC G6 Entry carries a camera under its firmware, so
-// the Access app's own surface for its access methods is the camera configuration endpoint (the is_camera flag the request below carries) rather than the
-// settings endpoint every non-camera reader or hub exposes. A future device sharing that camera-derived firmware belongs in this list for the same reason.
-const configsApiDeviceTypes = ["UVC G6 Entry"];
-
-/* The access method state a reader's switches read, one model per device serving both client identities. The values map is keyed by the catalog's configs
- * vocabulary and holds whether each method is enabled. Seeding is what gates switch existence: an unseeded device keeps whatever services it has and creates
- * none, because absence of knowledge is not knowledge of absence, while a seeded device creates and retires switches from what the model actually holds.
+/* The access method state a reader's switches read, one model per device serving both client identities. The values map is keyed by the library's name for each
+ * method and holds whether each method is enabled. Seeding is what gates switch existence: an unseeded device keeps whatever services it has and creates none,
+ * because absence of knowledge is not knowledge of absence, while a seeded device creates and retires switches from what the model actually holds.
+ *
+ * The unseeded and seeding phases carry whether the current streak of refused settings reads has been announced: the refusal that opens a streak warns, and every
+ * retry inside it inherits the mark and stays silent. A seeded model carries no such member, so reaching seeded ends the streak by construction.
  */
-type AccessMethodState = { readonly phase: "seeding" } | { readonly phase: "seeded"; readonly values: Map<AccessMethodKey, boolean> } |
-  { readonly phase: "unseeded" };
+type AccessMethodState = { readonly phase: "seeding"; readonly refused: boolean } | { readonly phase: "seeded"; readonly values: Map<AccessMethod, boolean> } |
+  { readonly phase: "unseeded"; readonly refused: boolean };
 
-// The one unseeded state every initialization and reset shares. A transition always replaces the whole field and no site mutates this object, so one instance
-// serves every device.
-const ACCESS_METHOD_UNSEEDED: AccessMethodState = { phase: "unseeded" };
-
-/* Access v2 event data so that we can detect access method changes. The library's dialect translation keeps access_method off the canonical record payload by
- * design - the field has no bootstrap counterpart to reconcile against - so the raw packet rail is the designed consumption path and this local type is the honest
- * read of it. The values are typed as plain strings because the wire carries more than the "yes"/"no" pair (key names echoed back as values, among others), and
- * the handler's own explicit value filter is what makes the loose cast safe.
- */
-interface AccessEventDeviceUpdateV2 {
-
-  access_method?: Partial<Record<AccessMethodKey, string>>;
-}
+// The unseeded state every device starts from, with nothing read and no refusal announced. A transition always replaces the whole field and no site mutates this
+// object, so one instance serves every device.
+const ACCESS_METHOD_UNSEEDED: AccessMethodState = { phase: "unseeded", refused: false };
 
 /* The dry contact inputs that share one shape: a wiring-evidence gate, a state reading, and an MQTT tail of their own. Each input's HomeKit-facing name and the
  * catalog key its MQTT topic is read by sit here together, so that configuration and live updates cannot drift on either. The key is named rather than the tail
@@ -188,7 +176,7 @@ export class AccessHub extends AccessDevice {
   private lockDelayInterval: number | undefined;
   // The tamper reading we last projected, or undefined until the record has told us anything. Holding it is what lets a genuine change be told from a first sighting.
   private tamperVerdict: boolean | undefined;
-  /* Whether an access method refresh is still out. It bounds the refresh to one in flight per device and is read nowhere else: the seed gets its launch-exactly-once
+  /* Whether an access method refresh is still out. It bounds the refresh to one in flight per device and is read nowhere else: the seed gets its one read at a time
    * from its own phase transition, and a refresh running over an already-seeded model has no such transition to lean on.
    */
   #accessMethodRefreshInFlight: boolean;
@@ -200,7 +188,7 @@ export class AccessHub extends AccessDevice {
   #doorTransition: DoorTransition;
   // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
   // rows we have already folded be told from one carrying news.
-  #foldedConfigValues: Map<AccessMethodKey, boolean> | undefined;
+  #foldedConfigValues: Map<AccessMethod, boolean> | undefined;
   /* The doors a UA Gate drives, as discovery last resolved them - the one value every reader of a gate's identities takes. Discovery alone writes it and every
    * reader reaches it through #drivenDoors, and it is held as the enumeration itself rather than as the two identities behind it so the door-state delivery every
    * hub on the controller receives reads it without building one.
@@ -688,82 +676,50 @@ export class AccessHub extends AccessDevice {
       if(!initialized || (transition === "attached")) {
 
         // Retrieve the state when requested, through the device's Not Responding rule like every reader.
-        service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.#accessMethodEnabled(accessMethod.key)));
+        service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.#accessMethodEnabled(accessMethod.method)));
 
-        // Set the state when requested. Writes route official-first with a read-back for certainty; reads answer from the access method state model, which the
-        // record's configuration rows, the official settings read, and the v2 access method events each feed.
+        /* Set the state when requested. The library routes the write - the official settings write and its read-back first, the Access application's own endpoints
+         * where the client holds credentials - and reads answer from the access method state model, which the record's configuration rows and the official
+         * settings read feed.
+         */
         service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
 
           const enabled = value === true;
-          const official = this.controller.client.official;
 
-          // This gate is what narrows the nullable reference for the parameter pass below...a narrowing cannot cross a method boundary, so the method takes it
-          // already narrowed.
-          if(official) {
+          try {
 
-            const verdict = await this.#writeAccessMethodOfficial(official, accessMethod, enabled);
+            await this.projection.setAccessMethod(accessMethod.method, enabled, { signal: this.signal });
+          } catch(error) {
 
-            switch(accessMethodWriteFollowup({ transport: this.controller.client.transport !== null, verdict })) {
-
-              case "complete":
-
-                /* The switch already carries the value HomeKit wrote, and the model takes it too: a confirmed write is the freshest thing anyone knows about the
-                 * method, so a read arriving before the controller's own echo answers what the controller confirmed rather than the rows it has yet to restate. The
-                 * v2 access method events and the record rail keep the model current from there.
-                 */
-                this.#foldMethodValue(accessMethod.key, enabled);
-
-                return;
-
-              case "decline":
-
-                // The controller answered success while leaving the setting unchanged, which only the read-back can reveal. It answered and refused, so the raw
-                // endpoint is not asked to second-guess it, and the switch reverts to the truth the read-back showed.
-                this.log.error("The controller declined the %s access method change.", accessMethod.name);
-                this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
-
-                return;
-
-              case "fallback":
-
-                // A thrown official error keeps controllers without the official settings surface working, and an absent verdict covers a method the official map
-                // cannot see on this device while the raw endpoint still can.
-                if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
-
-                  this.#foldMethodValue(accessMethod.key, enabled);
-
-                  return;
-                }
-
-                break;
-
-              case "revert":
-
-                // No path can carry the write, so the generic tail below surfaces the failure and puts the switch back.
-                break;
-            }
-          } else if(this.controller.client.transport) {
-
-            // Without an official path, the raw credential write carries the change on its own.
-            if(await this.#writeAccessMethodRaw(accessMethod, enabled)) {
-
-              this.#foldMethodValue(accessMethod.key, enabled);
+            /* A device on its way out has nothing to put back and no one to tell, so teardown passes in silence. The abort is tested ahead of every other arm,
+             * because a decline the controller answered after teardown began is still teardown's to swallow.
+             */
+            if(this.signal.aborted || (error instanceof AccessAbortedError)) {
 
               return;
             }
-          } else {
 
-            // This arm is type-totality rather than a served population: a connected client holds the official surface, a credential transport, or both. Both
-            // getters are nullable by type, and the flow must be total over them.
-            this.log.error("Changing an access method requires the official Access API or UniFi Access controller credentials.");
+            // The controller answered success while leaving the setting unchanged, which only the read-back can reveal, so the switch reverts to that truth. Any
+            // other failure means no path carried the write, and the cause is noted for whoever needs the detail.
+            if(error instanceof AccessDeclinedError) {
+
+              this.log.error("The controller declined the %s access method change.", accessMethod.name);
+            } else {
+
+              this.log.error("Unable to %s the %s access method.", enabled ? "activate" : "deactivate", accessMethod.name);
+              this.log.debug("The access method write was refused: %s.", formatErrorMessage(error));
+            }
+
             this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
 
             return;
           }
 
-          // Nothing carried the write, so we surface the failure and revert our switch state.
-          this.log.error("Unable to %s the %s access method.", enabled ? "activate" : "deactivate", accessMethod.name);
-          this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !enabled), CHARACTERISTIC_REVERT_DELAY_MS);
+          /* The switch already carries the value HomeKit wrote, and the model takes it too: a completed write is the freshest thing anyone knows about the method,
+           * so a read arriving before the controller's own echo answers what the write established rather than the rows the record has yet to restate. The
+           * record's rows keep the model current from there.
+           */
+          this.#foldMethodValue(accessMethod.method, enabled);
         });
       }
 
@@ -771,7 +727,7 @@ export class AccessHub extends AccessDevice {
        * push runs on every pass, dressed or not: it is the restatement a completed refresh and a device update deliver to HomeKit, which the read handler alone
        * cannot, because a client sees a pushed value and re-reads only when it asks for one.
        */
-      service.updateCharacteristic(this.hap.Characteristic.On, this.#accessMethodEnabled(accessMethod.key));
+      service.updateCharacteristic(this.hap.Characteristic.On, this.#accessMethodEnabled(accessMethod.method));
     }
 
     // Every switch this pass left standing is dressed, so the next pass is a repeat.
@@ -780,34 +736,35 @@ export class AccessHub extends AccessDevice {
 
   // Whether a method reads on. A model nothing has seeded answers off for every method, which is the same answer a seeded model gives for a method it holds no
   // entry for - a capability-gated method the device's own configuration never mentioned.
-  #accessMethodEnabled(key: AccessMethodKey): boolean {
+  #accessMethodEnabled(method: AccessMethod): boolean {
 
     const state = this.#accessMethodState;
 
-    return (state.phase === "seeded") && (state.values.get(key) === true);
+    return (state.phase === "seeded") && (state.values.get(method) === true);
   }
 
   /* Fold the record's own configuration rows into the model, replacing it wholesale rather than merging it: a row the record has dropped must leave no entry
    * standing, so the method it named reads off.
    *
-   * The memo is what makes the record's fold and the write/event fold safe together. A delivery whose rows translate to what the last applied fold already
-   * produced carries no access method news, so it changes nothing, and the fresher knowledge the packet and write folds have put in the model survives it. The
-   * comparison is by value rather than by array identity because the record's configs array offers no identity worth trusting: the periodic bootstrap refresh
-   * mints a fresh array on every tick an unrelated field moved, and a websocket delta replaces it atomically whenever a terminal input row changes, since the
-   * access method rows share the one flat array with them. What the memo holds is a copy rather than the model's own map, because the packet and write folds
-   * write into that map...a memo pointing at it would absorb their writes and then read the next stale restatement as news, reverting the very value the memo
-   * exists to protect.
+   * A record carrying no rows at all is left alone rather than read, because the library's reader answers it exactly as it answers an empty row set. Only the empty
+   * set is a census that listed the device's configuration and mentioned no method; a rowless record has said nothing, and reading it would seed an empty model
+   * that keeps the settings read which answers for the device from ever going out.
+   *
+   * The memo is what makes the record's fold and the write fold safe together. A delivery whose rows translate to what the last applied fold already produced
+   * carries no access method news, so it changes nothing, and the fresher knowledge a write has folded into the model survives it. The comparison is by value
+   * rather than by array identity because the record's configs array offers no identity worth trusting: the periodic bootstrap refresh mints a fresh array on
+   * every tick an unrelated field moved, and a websocket delta replaces it atomically whenever a terminal input row changes, since the access method rows share
+   * the one flat array with them. What the memo holds is a copy rather than the model's own map, because the write fold writes into that map...a memo pointing at
+   * it would absorb that write and then read the next stale restatement as news, reverting the very value the memo exists to protect.
    */
   #foldConfigRows(): void {
 
-    const rows = this.uda.configs;
-
-    if(rows === undefined) {
+    if(this.uda.configs === undefined) {
 
       return;
     }
 
-    const values = accessMethodValuesFromConfigRows({ methods: accessMethods, rows });
+    const values = this.#accessMethodValues(deviceAccessMethodStates(this.uda));
 
     if(this.#configRowsRestated(values)) {
 
@@ -820,7 +777,7 @@ export class AccessHub extends AccessDevice {
 
   // Whether a fresh translation of the configuration rows only restates what the last applied fold produced. Equal is the same size and every entry matching, and
   // it is the size half that makes a row the record has dropped read as news rather than as a restatement.
-  #configRowsRestated(values: ReadonlyMap<AccessMethodKey, boolean>): boolean {
+  #configRowsRestated(values: ReadonlyMap<AccessMethod, boolean>): boolean {
 
     const memo = this.#foldedConfigValues;
 
@@ -840,9 +797,9 @@ export class AccessHub extends AccessDevice {
     return true;
   }
 
-  // Fold one method's value into the model. A model nothing has seeded is left alone: one reading is not the whole truth, and the settings read its caller
-  // triggers instead answers with all of it.
-  #foldMethodValue(key: AccessMethodKey, enabled: boolean): void {
+  // Fold one method's value into the model. Only a seeded model holds values to fold into, which is what the phase check narrows to: one reading is not the whole
+  // truth, so a model nothing has seeded waits for a read that answers with all of it.
+  #foldMethodValue(method: AccessMethod, enabled: boolean): void {
 
     const state = this.#accessMethodState;
 
@@ -851,13 +808,15 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    state.values.set(key, enabled);
+    state.values.set(method, enabled);
   }
 
-  /* Launch the official settings read that seeds a device the record rail says nothing about, and launch it exactly once. Only an unseeded phase dispatches, and
-   * the transition into seeding happens here, synchronously, ahead of any async work - so a burst of access method packets arriving while the read is in flight
-   * finds a model that is already seeding and asks for nothing more. Only readers carry switches, so a plain hub never fetches settings it would project nowhere,
-   * nor warns about them. Every caller folds the record's rows first, so an unseeded phase at this refusal already means a record that carried none.
+  /* Launch the official settings read that seeds a device the record rail says nothing about, and launch it one read at a time. Only an unseeded phase dispatches,
+   * and the transition into seeding happens here, synchronously, ahead of any async work - so a run of device updates arriving while the read is in flight finds
+   * a model that is already seeding and asks for nothing more. Only readers carry switches, so a plain hub never fetches settings it would project nowhere, nor
+   * warns about them. Every caller folds the record's rows first, so an unseeded phase at this guard already means a record that carried none.
+   *
+   * The seeding phase carries the unseeded phase's announcement forward, which is what keeps a retry inside a streak the seed has already warned about silent.
    */
   #dispatchAccessMethodSeed(): void {
 
@@ -868,7 +827,7 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    this.#accessMethodState = { phase: "seeding" };
+    this.#accessMethodState = { phase: "seeding", refused: this.#accessMethodState.refused };
 
     guardedDispatch({ handler: async (): Promise<void> => this.#seedAccessMethodState(), label: "access method seeding", log: this.log });
   }
@@ -879,6 +838,10 @@ export class AccessHub extends AccessDevice {
    * Every write to the model is made only while the phase is still the seeding this dispatch started, because a faster path may have seeded it meanwhile - a record
    * that gained its rows mid-read is the device's own authority on them - so a slower answer never overwrites it and a failure never knocks it back to unseeded.
    * A failure creates nothing and retires nothing: we create on data and remove on data, and a controller that did not answer is neither.
+   *
+   * A refusal warns only where it opens a streak: this seed still owns its transition, and nothing earlier in the streak was announced. A refusal the rows overtook
+   * has no switches left to promise, and a retry inside an announced streak would only repeat what the user already read. The cause of every refusal outside
+   * teardown is noted at debug, announced or not, for whoever needs the detail.
    */
   async #seedAccessMethodState(): Promise<void> {
 
@@ -888,11 +851,11 @@ export class AccessHub extends AccessDevice {
 
       /* A client holding no official surface answers undefined here, and that is what keeps this method total on its own: a client that lost that surface between the
        * dispatch and this point simply has nothing to read, and the model goes back to unseeded for the next trigger to try again. It exits this way rather than
-       * through the catch below, which belongs to a read that was actually attempted and refused.
+       * through the catch below, which belongs to a read that was actually attempted and refused, so the streak's announcement goes back exactly as it was found.
        */
       if(!values) {
 
-        this.#unseedOwnedSeeding();
+        this.#unseedOwnedSeeding(false);
 
         return;
       }
@@ -903,15 +866,20 @@ export class AccessHub extends AccessDevice {
       }
     } catch(error) {
 
-      this.#unseedOwnedSeeding();
-
       // A device on its way out has nothing to say about settings it will never project, so teardown passes in silence.
       if(this.signal.aborted) {
 
         return;
       }
 
-      this.log.warn("Unable to read the access method settings from the controller. Access method switches will be configured once the controller answers.");
+      const seeding = this.#unseedOwnedSeeding(true);
+
+      // Only the refusal that opens a streak warns: the seeding phase this seed left is the one it still owned, and it carried no announcement yet.
+      if(seeding?.refused === false) {
+
+        this.log.warn("Unable to read the access method settings from the controller. Access method switches will be configured once the controller answers.");
+      }
+
       this.log.debug("The access method settings read was refused: %s.", formatErrorMessage(error));
     }
 
@@ -921,15 +889,15 @@ export class AccessHub extends AccessDevice {
     this.#materializeSeededSwitches();
   }
 
-  /* Read this device's access methods from the official settings surface and translate them into the vocabulary the model is keyed by. The one fetch-and-translate
-   * statement every seed and refresh runs through, so they can never drift on which surface they read or on how they read it.
+  /* Read this device's access methods from the official settings surface, through the library's reader of that surface. The one fetch-and-read statement every
+   * seed and refresh runs through, so they can never drift on which surface they read or on how they read it.
    *
    * The official surface is read afresh here rather than carried in by a caller, and an absent one answers undefined rather than throwing, because what that absence
    * means belongs to the caller: the seed hands the model back for a later trigger, where the refresh keeps the values it already holds.
    *
    * @returns The values the settings state, or `undefined` where the client holds no official surface to read them from.
    */
-  async #fetchAccessMethodValues(): Promise<Map<AccessMethodKey, boolean> | undefined> {
+  async #fetchAccessMethodValues(): Promise<Map<AccessMethod, boolean> | undefined> {
 
     /* A device torn down before this runs has nothing to read settings for, and asking the signal to throw is what puts that case and a read the teardown interrupts
      * on the same exit: both reach the caller as a throw, and what that means for the model is the caller's own to decide.
@@ -945,7 +913,31 @@ export class AccessHub extends AccessDevice {
 
     const settings = await official.devices.fetchSettings(this.uda.unique_id, { signal: this.signal });
 
-    return accessMethodValuesFromOfficialSettings({ methods: accessMethods, settings: settings.access_methods });
+    return this.#accessMethodValues(accessMethodStates(settings));
+  }
+
+  /* The model's map of one library reading, built by walking the catalog: each method the reading establishes, and no entry for one it leaves out. Every reading
+   * the model takes - the record's rows and the official settings alike - comes through here, so they can never differ on how a reading becomes model values.
+   *
+   * @param states - The library's reading, by method name.
+   *
+   * @returns A fresh map holding each method the reading establishes, in the catalog's order.
+   */
+  #accessMethodValues(states: Partial<Readonly<Record<AccessMethod, boolean>>>): Map<AccessMethod, boolean> {
+
+    const values = new Map<AccessMethod, boolean>();
+
+    for(const { method } of accessMethods) {
+
+      const value = states[method];
+
+      if(value !== undefined) {
+
+        values.set(method, value);
+      }
+    }
+
+    return values;
   }
 
   /* Materialize the switches a settled read has made knowable, and run the sweep beside them. The one statement of that pass, shared by the seed, the refresh, and
@@ -964,21 +956,33 @@ export class AccessHub extends AccessDevice {
     this.configureAccessMethodSwitches();
   }
 
-  // Put the model back to unseeded, but only where this seed still owns the transition it started. A faster path that seeded the model meanwhile holds the truth,
-  // and a read that failed or was torn down has nothing to say against it.
-  #unseedOwnedSeeding(): void {
+  /* Put the model back to unseeded, but only where this seed still owns the transition it started. A faster path that seeded the model meanwhile holds the truth,
+   * and a read that failed has nothing to say against it. The streak's announcement goes back with the model: a refusal marks it, and an exit that was no refusal
+   * keeps whatever the seeding phase carried, so a streak stays announced until a seeded model ends it.
+   *
+   * @param refused - Whether this seed ended on a refused read, which marks the streak announced for every retry behind it.
+   *
+   * @returns The seeding phase this seed left, or `undefined` where a faster path took the transition from this seed, which is what the caller's warning reads.
+   */
+  #unseedOwnedSeeding(refused: boolean): Extract<AccessMethodState, { phase: "seeding" }> | undefined {
 
-    if(this.#accessMethodState.phase === "seeding") {
+    const state = this.#accessMethodState;
 
-      this.#accessMethodState = ACCESS_METHOD_UNSEEDED;
+    if(state.phase !== "seeding") {
+
+      return undefined;
     }
+
+    this.#accessMethodState = { phase: "unseeded", refused: refused || state.refused };
+
+    return state;
   }
 
   /* Re-establish what a lost notification channel may have left stale on this device. A completed recovery relaunches that channel without replaying the packets the
-   * gap swallowed, and a rowless reader's access methods reach us on no other rail, so this is where that model is asked again.
+   * gap swallowed, and a reader whose rows no census restates has no other rail to catch up on, so this is where that model is asked again.
    *
    * The fold comes first because the dispatch below states that every caller folds the record's rows first: it takes whatever rows a late delivery carried, before the
-   * fetch question is even asked, and it is what makes an unseeded phase at the dispatch's own refusal mean a record that genuinely carried none. The dispatch's
+   * fetch question is even asked, and it is what makes an unseeded phase at the dispatch's own guard mean a record that genuinely carried none. The dispatch's
    * guards then make it a no-op for anything but an unseeded reader with an official surface, which is the startup seed getting another chance after a read that
    * failed.
    */
@@ -987,11 +991,11 @@ export class AccessHub extends AccessDevice {
     this.#foldConfigRows();
     this.#dispatchAccessMethodSeed();
 
-    /* Only a reader the record rail says nothing about has anything left to refresh, and only one refresh is ever out for a device. The latch is set here,
+    /* Only a reader whose rows no census restates has anything left to refresh, and only one refresh is ever out for a device. The latch is set here,
      * synchronously and ahead of any async work, so a second restore edge arriving while the read is in flight asks for nothing more...the staleness that edge
      * carried heals at the next recovery to complete.
      */
-    if(!this.#rowlessSeededReader || this.#accessMethodRefreshInFlight) {
+    if(!this.#unrestatedSeededReader || this.#accessMethodRefreshInFlight) {
 
       return;
     }
@@ -1001,32 +1005,40 @@ export class AccessHub extends AccessDevice {
     guardedDispatch({ handler: async (): Promise<void> => this.#refreshAccessMethodValues(), label: "access method refresh", log: this.log });
   }
 
-  /* Whether this device is a reader whose access methods only the official settings read can answer for: seeded, and carrying no configuration rows of its own. The
-   * one named statement of the refresh's subject, read at the dispatch gate above and re-read where the fetch lands.
+  /* Whether this device is a seeded reader whose configuration rows no census restates, which leaves the official settings read as the only thing that can catch its
+   * model up after a gap: a record carrying no rows of its own, or any reader on a client connected with an API token alone, whose census carries no rows and so
+   * never restates the ones a device update brought. The one named statement of the refresh's subject, read at the dispatch gate above and re-read where the
+   * fetch lands.
    *
    * The reader term mirrors the seed dispatch's own guard, which is what makes this predicate say exactly what its name says rather than leaning on an argument
    * about how the configuration-rows surface and the official-settings surface happen to line up.
    */
-  get #rowlessSeededReader(): boolean {
+  get #unrestatedSeededReader(): boolean {
 
-    return (this.#accessMethodState.phase === "seeded") && (this.uda.configs === undefined) && isReader(this.uda);
+    return (this.#accessMethodState.phase === "seeded") && ((this.uda.configs === undefined) || (this.controller.client.capabilities.mode === "token")) &&
+      isReader(this.uda);
   }
 
-  /* Re-read a rowless seeded reader's access methods and restate its switches from what comes back. A method the user changed while the notification channel was down
-   * reaches us on no rail at all otherwise, so this read is what closes that gap.
+  /* Re-read the access methods of a seeded reader whose rows no census restates, and restate its switches from what comes back. A method the user changed while the
+   * notification channel was down reaches us on no rail at all otherwise, so this read is what closes that gap.
    *
    * A failed refresh keeps the values the model already holds, retires nothing, and warns about nothing: the create-on-data and remove-on-data posture the seed
    * established, carried into a refresh, where the values in hand are a better answer than none. The next recovery to complete tries again.
    */
   async #refreshAccessMethodValues(): Promise<void> {
 
+    // The row fold this read goes out over. A fold that applies always holds a fresh memo and a restatement never does, so the landing below can tell rows that
+    // arrived while the read was in flight from rows it already knew.
+    const folded = this.#foldedConfigValues;
+
     try {
 
       const values = await this.#fetchAccessMethodValues();
 
-      // The subject is re-read here rather than assumed from dispatch time: rows that landed while the read was in flight are the device's own authority on its
-      // methods, so a read that went out for a rowless device and came back to a rowful one has been overtaken and applies nothing.
-      if(values && this.#rowlessSeededReader) {
+      /* The subject is re-read here rather than assumed from dispatch time, and the answer applies only where no row fold applied while the read was in flight:
+       * rows that landed meanwhile are the device's own authority on its methods, on every client, so a read they overtook applies nothing.
+       */
+      if(values && this.#unrestatedSeededReader && (this.#foldedConfigValues === folded)) {
 
         this.#accessMethodState = { phase: "seeded", values };
       }
@@ -1047,67 +1059,6 @@ export class AccessHub extends AccessDevice {
     // Restate the switches from whatever the model holds once the refresh has settled - this read's own answer, or fresher rows that landed while it was in flight.
     // It sits outside the landing guard above for exactly that reason.
     this.#materializeSeededSwitches();
-  }
-
-  /* Write an access method's state through the official Access API and read the settings back for certainty, because a method whose prerequisites the controller
-   * lacks answers success with the setting unchanged and only a read-back can tell. The narrowed official reference arrives as a parameter: the caller's null check
-   * cannot cross the method boundary, and a fresh getter read in here would be possibly null again. The fetched settings never leave this method...the verdict is
-   * their only consumer.
-   */
-  async #writeAccessMethodOfficial(official: OfficialApi, accessMethod: typeof accessMethods[number],
-    enabled: boolean): Promise<"absent" | "confirmed" | "declined" | "failed"> {
-
-    try {
-
-      await official.devices.updateSettings(this.uda.unique_id, composeAccessMethodUpdate({ enabled, keys: accessMethod.officialKeys }));
-
-      const settings = await official.devices.fetchSettings(this.uda.unique_id);
-
-      // The verdict is judged on the primary key, which is what the switch's own reads use.
-      return accessMethodWriteVerdict({ enabled: enabled ? "yes" : "no", primaryKey: accessMethod.officialKeys[0], readBack: settings.access_methods });
-    } catch(error) {
-
-      this.log.debug("The access method write was refused: %s.", formatErrorMessage(error));
-
-      return "failed";
-    }
-  }
-
-  /* Write an access method's state through the Access application's own endpoints, which are credential surface: a client holding only an API token cannot reach
-   * them at all. The G6 device class takes its writes on the configs endpoint under its own key set; every other class writes the settings endpoint under the
-   * record's own key.
-   */
-  async #writeAccessMethodRaw(accessMethod: typeof accessMethods[number], enabled: boolean): Promise<boolean> {
-
-    const entry = this.uda.configs?.find(entry => entry.key === accessMethod.key);
-    const isConfigsApi = configsApiDeviceTypes.includes(this.uda.device_type);
-    const transport = this.controller.client.transport;
-
-    if(!entry || !transport) {
-
-      return false;
-    }
-
-    const endpoint = isConfigsApi ? "/configs?is_camera=true" : "/settings";
-    const keys = (isConfigsApi && ("configsApiKeys" in accessMethod)) ? accessMethod.configsApiKeys : [entry.key];
-    // The tag and the value spellings mirror the record's own configuration rows for access methods.
-    const payload = keys.map(key => ({ key: key, tag: "open_door_mode", value: enabled ? "yes" : "no" }));
-
-    try {
-
-      await transport.request("https://" + this.controller.config.address + ACCESS_API_PATH_PREFIX + "/device/" + this.uda.unique_id + endpoint, {
-
-        body: JSON.stringify(payload),
-        method: "PUT"
-      });
-
-      return true;
-    } catch(error) {
-
-      this.log.debug("The access method write was refused: %s.", formatErrorMessage(error));
-
-      return false;
-    }
   }
 
   /* Configure the doorbell service for HomeKit. The door is the accessory's primary service and the doorbell never is: the lock configure path is the one place a
@@ -3166,9 +3117,15 @@ export class AccessHub extends AccessDevice {
    */
   private handleDeviceUpdate(): void {
 
-    // A refresh restates the configuration rows, and folding them here is what keeps the model current when a bootstrap refresh moved a method with no v2 access
-    // method event to announce it.
+    /* The record's rows are the one feed that follows the controller's access methods between settings reads, whichever dialect carried a change onto them, so
+     * folding them on every delivery is what keeps the model current.
+     *
+     * A model still unseeded after the fold belongs to a reader the rows have not answered for, and a delivery is the controller speaking for that device, which
+     * makes a settings read that failed worth another attempt. The dispatch's own guards decide whether one launches: only an unseeded reader with an official
+     * surface reads, and a read already in flight asks for nothing more.
+     */
     this.#foldConfigRows();
+    this.#dispatchAccessMethodSeed();
 
     /* Process any terminal input update events if our state has changed. Keying off whether the sensor exists means eligibility is never cached: an input with
      * no service contributes nothing, and one created mid-run is picked up on the very next update. A change always reaches the topic, which says what the
@@ -3302,45 +3259,6 @@ export class AccessHub extends AccessDevice {
     }
 
     return true;
-  }
-
-  // Handle device update v2 events.
-  private handleDeviceUpdateV2(packet: AccessEventPacket): void {
-
-    const data = packet.data as AccessEventDeviceUpdateV2;
-
-    // Process access method updates. We only process entries with explicit "yes" or "no" values, ignoring any malformed entries that contain other values (e.g., key
-    // names echoed back as values).
-    if(data.access_method) {
-
-      for(const [ key, value ] of Object.entries(data.access_method)) {
-
-        if((value !== "yes") && (value !== "no")) {
-
-          continue;
-        }
-
-        const accessMethod = accessMethods.find(entry => entry.key === key);
-
-        if(accessMethod) {
-
-          // The model takes the change before the switch is handed it, so what a switch reads and what it was pushed can never disagree. The catalog entry's own
-          // key is the model's vocabulary, where the loop's is whatever the wire spelled.
-          this.#foldMethodValue(accessMethod.key, value === "yes");
-          this.accessory.getServiceById(this.hap.Service.Switch, accessMethod.subtype)?.updateCharacteristic(this.hap.Characteristic.On, value === "yes");
-        }
-      }
-
-      /* An access method event on a device we know nothing about is the controller telling us it is answering, which makes a settings read worth another attempt.
-       * The record's rows are folded first, in case a refresh has since brought them, and the dispatch owns every other condition on the launch. This packet's own
-       * entries are deliberately not what seeds the model: the read answers for every method, where a packet speaks only for the ones that moved.
-       */
-      if(this.#accessMethodState.phase !== "seeded") {
-
-        this.#foldConfigRows();
-        this.#dispatchAccessMethodSeed();
-      }
-    }
   }
 
   // Handle doorbell ring events.
@@ -3482,12 +3400,6 @@ export class AccessHub extends AccessDevice {
       case ACCESS_DEVICE_UPDATE_EVENT:
 
         this.handleDeviceUpdate();
-
-        break;
-
-      case "access.data.v2.device.update":
-
-        this.handleDeviceUpdateV2(packet);
 
         break;
 

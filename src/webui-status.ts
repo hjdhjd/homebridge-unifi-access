@@ -18,10 +18,11 @@
 import type { AccessApiCode, AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions,
   ConnectionEvents, ConnectionState, StateStore } from "unifi-access";
 import { AccessApiError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessProtocolError, AccessRequestError, AccessStallError, AccessTimeoutError,
-  isHub, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates, tamperState } from "unifi-access";
+  deviceAccessMethodStates, isHub, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates,
+  tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
-import { accessMethodValuesFromConfigRows, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations,
-  dpsSensorEligible, membershipRecords, serialForm } from "./policy.ts";
+import { accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible, membershipRecords,
+  serialForm } from "./policy.ts";
 import { formatErrorMessage, formatSeconds, sameEntries } from "homebridge-plugin-utils";
 import type { DecoratedSerial } from "./policy.ts";
 
@@ -363,26 +364,26 @@ function uptimeRowValue(uptime: Nullable<number>): string {
 }
 
 /* Compose a reader's access methods row: every catalog method the hardware offers, in the catalog's own order, each stating whether the device's configuration
- * rows say it is enabled. The rows are read through the same shared translation the hub's own fold reads them through, in the same configs vocabulary, so the row
- * and the switches answer from one interpretation rather than two that can drift.
+ * rows say it is enabled. The rows are read through the library's own reader, the same one the hub's fold reads them through, so the row and the switches answer
+ * from one interpretation rather than two that can drift.
  *
  * A method can be absent from the list for more than one reason, and each is handled differently. A method whose capability the hardware does not carry is not listed
- * at all - the device does not offer it, so there is nothing to report. A method the hardware does carry whose configuration row does not resolve is omitted too,
- * under the degrade-by-absence rule: a census that listed the device's configuration and never mentioned the method has said nothing about it, and an unchecked box
- * would be a reading the controller never made. A reader whose rows resolve nothing therefore composes an empty list, which the panel renders as the placeholder
- * dash.
+ * at all - the device does not offer it, so there is nothing to report. A method the hardware does carry whose configuration row does not resolve - no row filed
+ * under the access-method tag, or one stating something other than yes or no - is omitted too, under the degrade-by-absence rule: the rows have said nothing
+ * about the method, and an unchecked box would be a reading the controller never made. A reader whose rows resolve nothing therefore composes an empty list,
+ * which the panel renders as the placeholder dash.
  *
  * The row states the DEVICE's truth like every other row here, so no feature option gates it: a user who turned a method's HomeKit switch off still sees what the
  * hardware itself reports.
  */
 function accessMethodsRow(device: AccessStateDevice): StatusChoicesRow {
 
-  const values = accessMethodValuesFromConfigRows({ methods: accessMethods, rows: device.configs ?? [] });
+  const states = deviceAccessMethodStates(device);
   const choices: StatusChoice[] = [];
 
   for(const method of accessMethods) {
 
-    const value = values.get(method.key);
+    const value = states[method.method];
 
     if((value === undefined) || !deviceHasCapability(device, method.capability)) {
 

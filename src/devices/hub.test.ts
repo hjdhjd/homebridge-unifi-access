@@ -14,7 +14,7 @@ import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, ServiceEventTypes,
   setServiceName } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
-import { AccessApiError, AccessCapabilityError } from "unifi-access";
+import { AccessAbortedError, AccessApiError, AccessCapabilityError, AccessDeclinedError } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
 import { Characteristic, RESTORED_LINE, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory,
@@ -133,9 +133,18 @@ interface RecordedCommand {
   verb: string;
 }
 
+// An access method switch write the hub handed the library, as the arm driving it sees it: the method by the library's name, the state asked for, and the signal.
+interface RecordedAccessMethodWrite {
+
+  enabled: boolean;
+  method: string;
+  signal: AbortSignal | undefined;
+}
+
 // What a stood-up hub looks like from a test's side: the hub itself, the deliveries and packets it can be handed, and what it commanded, published, and said.
 interface HubHarness {
 
+  accessMethodWrites: RecordedAccessMethodWrite[];
   // The accessory the hub is stood up on, which records every change HAP raises on its services, so an arm reads what the hub wrote and what HomeKit was sent.
   accessory: TestAccessAccessory;
   // The time source every timer this hub arms is registered on, so an arm advances the hub's own timeline rather than the process's global timers.
@@ -167,13 +176,16 @@ interface HubHarness {
   // The accessory's own service list, HAP's array, so a creation or a retirement the hub makes is read here as it happens.
   services: Service[];
   setDoorState: (entry: AccessDoorStateEntry) => void;
-  updates: unknown[];
 }
 
 // What an arm varies about the hub it stands up: which identities the client behind it holds, how its dispatched commands answer, what the library's door
 // resolution and door-state read answer, the topology doors a UA Gate discovers its own from, the user's settings, and the record the hub is adopted on.
 interface HubOptions {
 
+  /* What an access method switch write answers, called with the ordinal of the write once it is recorded, so an arm can hold one open, decline it, or fail it the
+   * way the library does. An arm naming none has every write complete.
+   */
+  accessMethodWrite?: (write: number) => Promise<void>;
   /* The accessory the hub is stood up on, for an arm that lays out the services a previous run left on it in an order HAP's own add would refuse. An arm naming
    * none gets a fresh one carrying its existing services.
    */
@@ -226,13 +238,13 @@ interface HubOptions {
  */
 function makeHub(options: HubOptions = {}): HubHarness {
 
+  const accessMethodWrites: RecordedAccessMethodWrite[] = [];
   const clock = new TestClock();
   const commands: RecordedCommand[] = [];
   const debugs: string[] = [];
   const errors: string[] = [];
   const fetches: string[] = [];
   const lines: string[] = [];
-  const updates: unknown[] = [];
   const publishes: { init: MqttPublishInit | undefined; payload: string; topic: string }[] = [];
   const releases: (() => void)[] = [];
   const requests: string[] = [];
@@ -299,11 +311,16 @@ function makeHub(options: HubOptions = {}): HubHarness {
     unlock: async (opts?: { actor?: { id: string; name: string }; doorId?: string }): Promise<void> => dispatch({ options: opts, verb: "unlock" })
   };
 
-  /* The Access application's own endpoint, which only a credentialed client reaches. The hub's raw access method write is the one path that composes a request
-   * through it, and a token-only client holds none.
+  /* The Access application's own endpoint, which only a credentialed client reaches and a token-only client holds none of. Every command a hub sends goes through
+   * the library's own rail, so a request composed here would be a hub reaching around it, and the arms that count the requests read them as none.
    */
   const transport = options.credentials ? { request: async (endpoint: string, init: { method: string }): Promise<void> => void requests.push(init.method + " " +
     endpoint) } : null;
+
+  /* What kind of client the hub is behind, as the client describes itself at connect: an API token beside credentials, an API token alone, or credentials alone. It
+   * follows the identities an arm gives the client, so an arm about a token-only client and one about a dual client differ in exactly the identities they name.
+   */
+  const mode = options.official ? (options.credentials ? "dual" : "token") : "credential";
 
   /* The broker the hub registers against: the shipped recording double, which keeps every registration with the signal it was registered under and releases
    * it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker. It reports into the harness's own sinks, so what the
@@ -318,19 +335,31 @@ function makeHub(options: HubOptions = {}): HubHarness {
   } });
 
   /* The hub's own observation yields once per scripted record and answers peek() with that record, so an arm naming no script observes nothing. The loop the
-   * construction hands the controller is held rather than run, so an arm drives it when it is ready to read what a record changed.
+   * construction hands the controller is held rather than run, so an arm drives it when it is ready to read what a record changed. A switch write the hub hands the
+   * library is recorded before it answers, so an arm reads what a switch sent whichever way the write then goes.
    */
   const script = options.script ?? [];
   let peekIndex = 0;
   let loop: () => Promise<void> = async (): Promise<void> => undefined;
 
-  const projection = { config: record, observe: async function *(): AsyncGenerator {
+  const projection = {
 
-    for(const _entry of script) {
+    config: record,
+    observe: async function *(): AsyncGenerator {
 
-      yield projection;
+      for(const _entry of script) {
+
+        yield projection;
+      }
+    },
+    peek: (): AccessStateDevice | undefined => script[peekIndex++],
+    setAccessMethod: async (method: string, enabled: boolean, opts: { signal?: AbortSignal } = {}): Promise<void> => {
+
+      accessMethodWrites.push({ enabled, method, signal: opts.signal });
+
+      await options.accessMethodWrite?.(accessMethodWrites.length);
     }
-  }, peek: (): AccessStateDevice | undefined => script[peekIndex++] };
+  };
 
   // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this hub's persistence made.
   const api = makeTestApi();
@@ -363,10 +392,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     platform.registerAccessory(accessory);
   }
 
-  /* The official device surface, held only by a client an arm gave one to. The settings read is what seeds a reader whose record carries no configuration rows, the
-   * settings write is what an access method switch dispatches, and the doorbell dispatch is what the trigger switch's manual direction sends, so each of them is
-   * recorded: an arm counts the reads to tell one seed from two, reads the writes to see what a switch actually sent, and reads the dispatches to see which reader
-   * was addressed and in which direction. An arm naming no answer of its own gets an empty settings map, which is what a hardware class offering no methods returns.
+  /* The official device surface, held only by a client an arm gave one to. The settings read is what seeds a reader whose record carries no configuration rows, and
+   * the doorbell dispatch is what the trigger switch's manual direction sends, so each of them is recorded: an arm counts the reads to tell one seed from two, and
+   * reads the dispatches to see which reader was addressed and in which direction. An arm naming no answer of its own gets an empty settings map, which is what a
+   * hardware class offering no methods returns. The surface carries no settings write, because a switch write is the library's to route.
    */
   const official = options.official ? {
 
@@ -386,8 +415,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
           throw options.ringRefusal;
         }
-      },
-      updateSettings: async (_deviceId: string, update: unknown): Promise<void> => void updates.push(update)
+      }
     }
   } : null;
 
@@ -405,7 +433,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   const controller = makeControllerDouble({
 
-    client: { connection, doorStates, official,
+    client: { capabilities: { mode }, connection, doorStates, official,
       state: { snapshot: (): unknown => ({ devices: new Map((options.devices ?? []).map(device => [ device.unique_id, device ])), doors }) }, transport },
     events: {
 
@@ -458,6 +486,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   return {
 
+    accessMethodWrites,
     accessory,
     clock,
     commands,
@@ -524,8 +553,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
       return savesOn(api);
     },
     services: accessory.services,
-    setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry),
-    updates
+    setDoorState: (entry: AccessDoorStateEntry): void => void doorStates.set(entry.location_id, entry)
   };
 }
 
@@ -664,7 +692,7 @@ function hasContactSensor(harness: HubHarness, subtype: string): boolean {
 /* What an access method switch answers when HomeKit asks it, read through the same get path HomeKit uses. The read proves the value HomeKit would see and never
  * that a handler is registered: HAP consults a handler only where one stands and answers from the characteristic's stored value otherwise, and the push path
  * writes that stored value on every pass, so an undressed switch answers exactly what a dressed one would. A registered handler is proven by a write through
- * triggerSet() asserted against the official update the harness records, which only a write registration can carry.
+ * triggerSet() asserted against the switch write the harness records, which only a write registration can carry.
  *
  * @param harness - The hub to read.
  * @param subtype - The access method switch to ask.
@@ -693,10 +721,22 @@ function refreshRecord(harness: HubHarness, configs: unknown[]): void {
   restateRecord(harness, { configs });
 }
 
-// A v2 device update carrying one access method's reported value, in the shape the wire sends it.
-function accessMethodPacket(value: string): unknown {
+// A reader's configuration rows carrying one PIN row in the record's own shape, under the tag the controller files every access-method row under.
+function pinRow(value: string): unknown[] {
 
-  return { data: { access_method: { pin_code: value } }, event: "access.data.v2.device.update" };
+  return [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value }];
+}
+
+/* The decline the library throws when the settings write answered success and the read-back shows PIN still in the other state.
+ *
+ * @param enabled - The state the write asked for.
+ *
+ * @returns The error.
+ */
+function pinDecline(enabled: boolean): AccessDeclinedError {
+
+  return new AccessDeclinedError("The UniFi Access controller declined to " + (enabled ? "enable" : "disable") + " the pin access method for device \"Test Hub\".",
+    { method: "pin", reported: !enabled });
 }
 
 /* Everything a hub published on one of its topics, in the order it published it. A projected reading is a sequence rather than a set - it opens, it ends, and an arm
@@ -1133,8 +1173,8 @@ test("a reader whose record carries no configuration rows takes its switches fro
 
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
-  /* TouchPass is the one method the settings answer and the model spell differently: the settings answer names it touch_pass while the model keys it apple_pass.
-   * A switch reading off here is what a translation reaching for the wrong vocabulary looks like, and it would leave the method permanently off on every
+  /* TouchPass is the one method the settings answer spells differently from its configuration row: the settings answer names it touch_pass where the row names it
+   * apple_pass. A switch reading off here is what a reading reaching for the wrong spelling looks like, and it would leave the method permanently off on every
    * token-only controller.
    */
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS), true, "TouchPass is read through its official spelling");
@@ -1200,7 +1240,8 @@ test("a switch is dressed the first time the hub holds it, a repeat pass registe
    */
   await triggerSet(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC).getCharacteristic(Characteristic.On), true);
 
-  assert.deepEqual(harness.updates, [{ access_methods: { nfc: { enabled: "yes" } } }], "and it carries a write from HomeKit, which only a registered handler can");
+  assert.deepEqual(harness.accessMethodWrites, [{ enabled: true, method: "nfc", signal: harness.hub.signal }],
+    "and it carries a write from HomeKit, which only a registered handler can");
   assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_QR), "and a capability the record has dropped retires its switch on the same delivery");
   assert.equal(pin.gets.mock.callCount(), 0, "while the switch that stood through both deliveries was registered on neither");
   assert.equal(pin.sets.mock.callCount(), 0);
@@ -1246,14 +1287,15 @@ test("a rowless record on a client with no official surface keeps what it has an
   assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and no switch is created for a method nothing has spoken about");
   assert.deepEqual(harness.fetches, [], "a client with no official surface never reaches for the settings read");
 
-  /* An access method event is what retries the seed on a client that has a surface to retry with, so driving one is what puts this refusal where an arm can read it.
-   * The harness clears whatever construction said, so the same refusal taken during construction alone would leave nothing behind to assert against.
+  /* A device update is what retries the seed on a client that has a surface to retry with, so delivering one that still brings no rows is what puts this refusal
+   * where an arm can read it. The harness clears whatever construction said, so the same refusal taken during construction alone would leave nothing behind to
+   * assert against.
    */
-  harness.emit(HUB_ID, accessMethodPacket("yes"));
+  restateRecord(harness, {});
   await settle();
 
-  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "the event leaves what the accessory keeps exactly as it was");
-  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and creates nothing on the strength of one method's report");
+  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), "the update leaves what the accessory keeps exactly as it was");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and creates nothing on the strength of a record that still says nothing");
   assert.deepEqual(harness.fetches, [], "and still reaches for no settings read");
 
   // The failure sentence belongs to a read that went out and was refused. Nothing was ever asked for here, so nothing is announced...which is what tells this arm
@@ -1292,47 +1334,53 @@ test("a seeded device retires the switch of a method that has left the reader, i
   assert.equal(await switchReads(token, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 });
 
-test("a v2 access method event moves the switch and the model behind it, in both client identities", async () => {
+test("rows a device update moves push the switch its new value on a credentialed client", async () => {
 
-  const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
+  const harness = makeReader({ record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: pinRow("yes") }) });
+  const service = switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
 
-  const credential = makeReader({ record: testHub({ ...reader, configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] }) });
-  const service = switchService(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
+  assert.equal(service.getCharacteristic(Characteristic.On).value, true, "the record's rows dressed the switch on");
 
-  // The wire echoes key names back as values, and the handler's own filter is what keeps one out of the model as surely as out of the switch.
-  credential.emit(HUB_ID, accessMethodPacket("pin_code"));
+  refreshRecord(harness, pinRow("no"));
 
-  assert.equal(await switchReads(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "a malformed value moves nothing");
+  /* The pushed value is read before the handler is asked anything, because a HAP read writes the value it answers back onto the characteristic - so asking first
+   * would leave this assertion passing on the strength of the read rather than on the push the delivery is here to make.
+   */
+  assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the delivery pushes the switch the value its rows moved to");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model it reads from moved with it");
+});
 
-  credential.emit(HUB_ID, accessMethodPacket("no"));
+test("rows a device update brings replace a model the settings read seeded on a token-only client, and push the switch what they say", async () => {
 
-  assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the event is pushed to the switch");
-  assert.equal(await switchReads(credential, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model it reads from moved with it");
-
-  const token = makeReader({ official: true, record: testHub({ ...reader, configs: undefined }),
+  const harness = makeReader({ official: true, record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
     settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
 
   await settle();
 
-  assert.equal(token.fetches.length, 1);
+  const service = switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
 
-  token.emit(HUB_ID, accessMethodPacket("no"));
+  assert.equal(harness.fetches.length, 1, "construction's seed is the one read");
+  assert.equal(service.getCharacteristic(Characteristic.On).value, true, "and it dressed the switch on");
 
-  assert.equal(await switchReads(token, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "the same rail moves a model the settings read seeded");
+  // The controller's own update for this device carries every row it holds, so the record gains its rows here, and they say PIN is off.
+  refreshRecord(harness, pinRow("no"));
+
+  assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the rows push the switch what they say, ahead of any read");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model behind the switch answers the same");
 
   await settle();
 
-  assert.equal(token.fetches.length, 1, "a device whose model is seeded never asks the controller again");
+  assert.equal(harness.fetches.length, 1, "a seeded model asks the controller for nothing more");
 });
 
-test("a v2 access method event retries a settings read that failed, and only while none is in flight", async () => {
+test("a device update retries a settings read that failed, and only while none is in flight", async () => {
 
   const harness = makeHub({
 
     official: true,
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
 
-    // The first read is refused; the retry stays in flight for the rest of the arm, which is what the event arriving behind it meets.
+    // The first read is refused; the retry stays in flight for the rest of the arm, which is what the update arriving behind it meets.
     settings: async (fetch: number): Promise<unknown> => {
 
       if(fetch === 1) {
@@ -1348,15 +1396,121 @@ test("a v2 access method event retries a settings read that failed, and only whi
 
   assert.equal(harness.fetches.length, 1, "the first read is the one configuring the device dispatched");
 
-  harness.emit(HUB_ID, accessMethodPacket("yes"));
+  // A device update that still brings no rows leaves the model unseeded, and the controller speaking for the device is what makes another read worth asking for.
+  restateRecord(harness, {});
   await settle();
 
-  assert.equal(harness.fetches.length, 2, "an access method event retries a seed that failed");
+  assert.equal(harness.fetches.length, 2, "a device update retries a seed that failed");
 
-  harness.emit(HUB_ID, accessMethodPacket("no"));
+  restateRecord(harness, {});
   await settle();
 
-  assert.equal(harness.fetches.length, 2, "and an event arriving while that read is in flight asks for nothing more");
+  assert.equal(harness.fetches.length, 2, "and an update arriving while that read is in flight asks for nothing more");
+});
+
+test("a settings read the controller keeps refusing warns once for the whole streak, and notes every refusal's cause at debug", async () => {
+
+  const warning = "Unable to read the access method settings from the controller. Access method switches will be configured once the controller answers.";
+  const cause = LOG_PREFIX + "The access method settings read was refused: the controller is not answering.";
+
+  const harness = makeReader({
+
+    official: true,
+    options: ["Enable.Log.Debug"],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+
+    // The controller refuses every read but the arm's last, which answers PIN on, so the streak ends on a read that seeds the model.
+    settings: async (fetch: number): Promise<unknown> => {
+
+      if(fetch < 4) {
+
+        throw new Error("the controller is not answering");
+      }
+
+      return { access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } };
+    }
+  });
+
+  await settle();
+
+  assert.equal(harness.fetches.length, 1, "construction's seed went out and was refused");
+  assert.equal(warnCount(harness, warning), 1, "the refusal that opens the streak warns");
+
+  // Each device update that still brings no rows retries the read, and each retry is refused inside the streak the first refusal already announced.
+  restateRecord(harness, {});
+  await settle();
+  restateRecord(harness, {});
+  await settle();
+
+  assert.equal(harness.fetches.length, 3, "every device update retried the read");
+  assert.equal(warnCount(harness, warning), 1, "and the retries inside the streak stay silent");
+  assert.equal(harness.debugs.filter(line => line === cause).length, 3, "while every refusal still notes its cause at debug");
+
+  // The next retry is answered, which ends the streak on a seeded model.
+  restateRecord(harness, {});
+  await settle();
+
+  assert.equal(harness.fetches.length, 4, "the next device update retried the read once more");
+  assert.equal(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).value, true,
+    "and its answer created the switch and pushed it on");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "from the model the answer seeded");
+  assert.equal(warnCount(harness, warning), 1, "and the streak ended without another warning");
+});
+
+test("a settings read refused after rows seeded the model mid-read warns nothing, and the model keeps what the rows said", async () => {
+
+  const answer = Promise.withResolvers<unknown>();
+  const harness = makeReader({ official: true, options: ["Enable.Log.Debug"],
+    record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }), settings: async (): Promise<unknown> => answer.promise });
+
+  await settle();
+
+  assert.equal(harness.fetches.length, 1, "construction's seed is out");
+
+  // The record gains its rows while that read is still in flight, so the switches stand before the controller has answered anything.
+  refreshRecord(harness, pinRow("yes"));
+
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "the rows seed the model and create the switch on the delivery");
+
+  /* The seed's read is refused after the rows have answered for the device. The warning promises switches that will be configured once the controller answers, and
+   * the rows have configured them already, so the refusal has nothing to announce beyond the cause it notes at debug.
+   */
+  answer.reject(new Error("the controller is not answering"));
+  await settle();
+
+  assert.equal(warnCount(harness, "Unable to read the access method settings from the controller. Access method switches will be configured once the controller " +
+    "answers."), 0, "a refusal the rows overtook warns nothing");
+  assert.equal(harness.debugs.filter(line => line === LOG_PREFIX + "The access method settings read was refused: the controller is not answering.").length, 1,
+    "and its cause is still noted at debug");
+  assert.equal(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).value, true,
+    "the refusal pushes nothing over the rows");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "and the model keeps what the rows said");
+  assert.equal(harness.fetches.length, 1, "with no read asked for behind it");
+});
+
+test("rows landing while the startup seed is out outrank the answer that seed comes back with", async () => {
+
+  const answer = Promise.withResolvers<unknown>();
+  const harness = makeReader({ official: true, record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: undefined }),
+    settings: async (): Promise<unknown> => answer.promise });
+
+  await settle();
+
+  assert.equal(harness.fetches.length, 1, "construction's seed is out");
+  assert.ok(!hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "and nothing is created while it is");
+
+  // The record gains its rows while that read is still in flight, and the rows are the device's own authority on its methods.
+  refreshRecord(harness, pinRow("yes"));
+
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "the rows seed the model and create the switch on the delivery");
+
+  answer.resolve({ access_methods: { pin_code: { enabled: "no", pin_code_shuffle: "no" } } });
+  await settle();
+
+  assert.equal(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).value, true,
+    "the seed's later answer pushes nothing over the rows");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "and the model still holds what the rows said");
+  assert.equal(harness.fetches.length, 1, "with no read asked for behind it");
 });
 
 test("a dressed sensor's availability read consults the live composition, answering under a healthy controller and refusing once the connection moves", async () => {
@@ -1632,13 +1786,14 @@ test("a restore arriving while a refresh is still out asks for nothing more", as
   assert.equal(harness.fetches.length, 2, "and a second restore while that read is out dispatches nothing");
 });
 
-test("a reader whose record carries configuration rows reads no settings on a completed recovery", async () => {
+test("a reader whose record carries configuration rows reads no settings on a completed recovery of a client holding credentials", async () => {
 
   /* The official surface is present deliberately. Without one the refresh would exit on its absence instead, and this arm would pass without ever putting the row
-   * predicate under test.
+   * predicate under test. The credentials beside it make this a client whose census restates the rows, which is what leaves them this reader's authority.
    */
   const harness = makeReader({
 
+    credentials: true,
     official: true,
     record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ],
       configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }] })
@@ -1653,6 +1808,27 @@ test("a reader whose record carries configuration rows reads no settings on a co
 
   assert.deepEqual(harness.fetches, [], "and a completed recovery leaves the record rail as this device's authority");
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
+});
+
+test("a completed recovery re-reads the settings of a reader on a token-only client even where its record carries rows", async () => {
+
+  /* A token-only client's census carries no configuration rows, so nothing restates the rows a device update brought this reader, and a method changed while the
+   * channel was down would stay stale behind them. The settings read is what catches the model up.
+   */
+  const harness = makeReader({ official: true, record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: pinRow("yes") }),
+    settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "no", pin_code_shuffle: "no" } } }) });
+
+  await settle();
+
+  assert.deepEqual(harness.fetches, [], "the record's own rows seeded the model, so nothing was read for it");
+
+  harness.hub.onConnectionRestored();
+  await settle();
+
+  assert.equal(harness.fetches.length, 1, "a completed recovery reads the settings all the same");
+  assert.equal(switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On).value, false,
+    "the switch restates what that read answered");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model behind it took the answer");
 });
 
 test("rows landing while a refresh is out outrank the answer that refresh comes back with", async () => {
@@ -1685,13 +1861,45 @@ test("rows landing while a refresh is out outrank the answer that refresh comes 
 
   assert.equal(harness.fetches.length, 2, "the refresh is out");
 
-  // The record gains its rows while that read is still in flight, which makes this device rowful and the answer already on its way stale.
+  // The record gains its rows while that read is still in flight, and rows that land mid-read outrank the answer already on its way.
   refreshRecord(harness, [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" }]);
 
   landing?.();
   await settle();
 
   assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "the rows the record brought are what the model holds");
+});
+
+test("rows a delivery restates while a refresh is out leave that refresh free to apply its answer", async () => {
+
+  const answer = Promise.withResolvers<unknown>();
+  const harness = makeReader({ official: true, record: testHub({ capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: pinRow("yes") }),
+    settings: async (): Promise<unknown> => answer.promise });
+
+  await settle();
+
+  const service = switchService(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN);
+
+  assert.equal(service.getCharacteristic(Characteristic.On).value, true, "the record's rows seeded the switch on");
+
+  harness.hub.onConnectionRestored();
+  await settle();
+
+  assert.equal(harness.fetches.length, 1, "the restore's refresh is out");
+
+  /* The record moves on an unrelated member while that read is out, carrying the rows it already held. On this token-mode client the library hands the held
+   * rows back by reference when a delivery restates them and yields a record only when it moves, so this is the one shape in which a delivery restating the rows
+   * reaches the hub: the same rows beside news of something else. Rows that restate the last fold carry no access method news, so the answer already on its way
+   * is still the freshest word.
+   */
+  restateRecord(harness, { name: "Front Door Reader" });
+
+  answer.resolve({ access_methods: { pin_code: { enabled: "no", pin_code_shuffle: "no" } } });
+  await settle();
+
+  assert.equal(service.getCharacteristic(Characteristic.On).value, false, "the refresh's answer reaches HomeKit over the restated rows");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "and the model took it");
+  assert.equal(harness.fetches.length, 1, "from the one read the restore asked for");
 });
 
 test("a refused refresh keeps the values already held, retires nothing, and never warns", async () => {
@@ -2273,22 +2481,21 @@ test("a completed recovery gives the startup seed of a reader nothing has answer
 
 test("a confirmed access method write answers from the model before the controller echoes it, and a declined one changes nothing", async () => {
 
-  // What the controller answers when the write is read back, which is the only thing that tells a change it applied from one it silently refused.
-  const readBack = (enabled: string): unknown => ({ access_methods: { pin_code: { enabled: enabled, pin_code_shuffle: "no" } } });
-  const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "no" }] };
+  const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ], configs: pinRow("no") };
 
-  const confirmed = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("yes") });
+  const confirmed = makeReader({ record: testHub(reader) });
 
   await triggerSet(switchService(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 
-  assert.deepEqual(confirmed.updates, [{ access_methods: { pin_code: { enabled: "yes" } } }], "the write carries the desired state in the official vocabulary");
+  assert.deepEqual(confirmed.accessMethodWrites, [{ enabled: true, method: "pin", signal: confirmed.hub.signal }],
+    "the write names the method by the library's name for it and carries the device's own lifetime");
 
   // The record still states the value the write replaced, and the model is what answers: a read landing in the gap between a confirmed write and the controller's
   // own echo says what the controller confirmed rather than what the rows have yet to restate.
   assert.equal(await switchReads(confirmed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true);
 
   // The negative control: the controller answered success while leaving the setting where it was. Nothing was confirmed, so nothing is folded.
-  const declined = makeReader({ official: true, record: testHub(reader), settings: async (): Promise<unknown> => readBack("no") });
+  const declined = makeReader({ accessMethodWrite: async (): Promise<void> => { throw pinDecline(true); }, record: testHub(reader) });
 
   await triggerSet(switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 
@@ -2296,12 +2503,98 @@ test("a confirmed access method write answers from the model before the controll
   assert.ok(declined.errors.some(line => line === LOG_PREFIX + "The controller declined the PIN access method change."), "and the decline is announced");
 });
 
+test("a declined access method write and a failed one each say so in their own line and put the switch back once HomeKit's write has settled", async () => {
+
+  const capabilities = [ "is_hub", "is_reader", "pin_code" ];
+
+  // The controller declines turning PIN on, so the line names the decline and the switch goes back off after the pause.
+  const declined = makeReader({ accessMethodWrite: async (): Promise<void> => { throw pinDecline(true); }, record: testHub({ capabilities, configs: pinRow("no") }) });
+  const declinedOn = switchService(declined, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On);
+
+  await triggerSet(declinedOn, true);
+
+  assert.deepEqual(declined.errors, [LOG_PREFIX + "The controller declined the PIN access method change."], "a decline is said in its own line, and only that");
+  assert.equal(declinedOn.value, true, "the switch holds HomeKit's write through the pause");
+
+  declined.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(declinedOn.value, false, "and goes back to where the controller left the method once it has passed");
+
+  // No path carries turning PIN off, so the line says the change could not be made, the cause goes to debug, and the switch goes back on.
+  const failed = makeReader({ accessMethodWrite: async (): Promise<void> => { throw new Error("the controller is not answering"); }, options: ["Enable.Log.Debug"],
+    record: testHub({ capabilities, configs: pinRow("yes") }) });
+  const failedOn = switchService(failed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On);
+
+  await triggerSet(failedOn, false);
+
+  assert.deepEqual(failed.errors, [LOG_PREFIX + "Unable to deactivate the PIN access method."], "a failure is said in its own line, in the direction asked for");
+  assert.equal(failed.debugs.filter(line => line === LOG_PREFIX + "The access method write was refused: the controller is not answering.").length, 1,
+    "and its cause is noted once, at debug");
+
+  failed.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(failedOn.value, true, "the switch goes back once the pause has passed");
+  assert.equal(await switchReads(failed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), true, "and the model behind it never moved");
+});
+
+test("a write the device's teardown or the library aborts passes in silence and puts nothing back", async () => {
+
+  const capabilities = [ "is_hub", "is_reader", "pin_code" ];
+
+  /* The write is held open while the device tears down, and the controller's decline arrives only after. The abort is weighed ahead of the decline, so a device on its
+   * way out says nothing about a change it will never show.
+   */
+  const write = Promise.withResolvers<undefined>();
+  const teardown = makeReader({ accessMethodWrite: async (): Promise<void> => write.promise, options: ["Enable.Log.Debug"],
+    record: testHub({ capabilities, configs: pinRow("no") }) });
+  const pending = triggerSet(switchService(teardown, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
+
+  await settle();
+
+  assert.equal(teardown.accessMethodWrites[0]?.signal, teardown.hub.signal, "the write carries the device's own lifetime");
+
+  teardown.hub.cleanup();
+
+  assert.equal(teardown.hub.signal.aborted, true, "so the device's teardown is what aborts it");
+
+  write.reject(pinDecline(true));
+  await pending;
+
+  assert.deepEqual(teardown.errors, [], "a decline landing after teardown began is not announced");
+  assert.equal(teardown.debugs.filter(line => line.startsWith(LOG_PREFIX + "The access method write was refused:")).length, 0, "nor noted at debug");
+
+  // An AccessAbortedError reads the same way, whatever raised it, and the switch keeps the value HomeKit wrote.
+  const aborted = makeReader({ accessMethodWrite: async (): Promise<void> => { throw new AccessAbortedError("The access method write was aborted."); },
+    options: ["Enable.Log.Debug"], record: testHub({ capabilities, configs: pinRow("no") }) });
+  const abortedOn = switchService(aborted, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On);
+
+  await triggerSet(abortedOn, true);
+  aborted.clock.advance(REVERT_DELAY_MS);
+
+  assert.deepEqual(aborted.errors, [], "an aborted write is not announced as a failure");
+  assert.equal(aborted.debugs.filter(line => line.startsWith(LOG_PREFIX + "The access method write was refused:")).length, 0, "nor noted at debug");
+  assert.equal(abortedOn.value, true, "and nothing is put back");
+});
+
+test("a row filed under another tag or stating something other than yes or no gives its method no reading, and its switch reads off", async () => {
+
+  /* The PIN row says yes, but under a tag the controller files no access method under, and the NFC row sits under the right tag stating a value outside the pair.
+   * Neither establishes a reading. Each switch exists on its capability all the same and reads off, which is what a method with no reading answers in HomeKit.
+   */
+  const harness = makeReader({ record: testHub({ capabilities: [ "is_hub", "is_reader", "nfc_card_easy_provision", "pin_code" ],
+    configs: [ { device_id: HUB_ID, key: "pin_code", tag: "input_state", value: "yes" }, { device_id: HUB_ID, key: "nfc", tag: "open_door_mode", value: "maybe" } ] }) });
+
+  assert.ok(hasSwitch(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), "the rows seeded the model, so the switches stand on their capabilities");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "a yes under another tag is no access method reading");
+  assert.equal(await switchReads(harness, AccessReservedNames.SWITCH_ACCESSMETHOD_NFC), false, "and a value outside the pair is none either");
+});
+
 test("a record refresh moves the model, and a refresh restating rows already folded moves nothing", async () => {
 
   const row = (value: string): unknown[] => [{ device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value }];
   const reader = { capabilities: [ "is_hub", "is_reader", "pin_code" ] };
 
-  // A refresh carrying genuine news moves what the switch answers, with no v2 event involved anywhere.
+  // A refresh carrying genuine news moves what the switch answers.
   const refreshed = makeReader({ record: testHub({ ...reader, configs: row("no") }) });
 
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false);
@@ -2316,8 +2609,7 @@ test("a record refresh moves the model, and a refresh restating rows already fol
   assert.equal(await switchReads(refreshed, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN), false, "a row the record dropped leaves nothing standing");
 
   // The recency guard: a confirmed write moves the model ahead of the rows, and the rows restating what they said before must not drag it back.
-  const written = makeReader({ official: true, record: testHub({ ...reader, configs: row("no") }),
-    settings: async (): Promise<unknown> => ({ access_methods: { pin_code: { enabled: "yes", pin_code_shuffle: "no" } } }) });
+  const written = makeReader({ record: testHub({ ...reader, configs: row("no") }) });
 
   await triggerSet(switchService(written, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN).getCharacteristic(Characteristic.On), true);
 

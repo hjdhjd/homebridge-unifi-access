@@ -27,7 +27,8 @@
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, CharacteristicValue, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "./types.ts";
-import type { AccessBootstrapConfig, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice } from "unifi-access";
+import type { AccessBootstrapConfig, AccessCapabilities, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket,
+  AccessStateDevice } from "unifi-access";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
@@ -392,10 +393,12 @@ type ControllerSurface = Pick<AccessController, "client" | "config" | "events" |
   "mqttPublish" | "name" | "ownershipKey" | "platform" | "reclaimClaims" | "reclaimKeys" | "resolveDeviceModel" | "signal" | "spawnLoop">;
 
 /* The client members the plugin reads, each optional because an arm supplies only the ones its path reaches: the official surface and the transport are whatever the
- * arm hands over, the connection and the state answer what a device composes its own availability and membership from, and the subscription is a disposable.
+ * arm hands over, the connection and the state answer what a device composes its own availability and membership from, the capabilities say which kind of client
+ * the arm stands up, and the subscription is a disposable.
  */
 export interface ControllerClientDouble {
 
+  capabilities?: Pick<AccessCapabilities, "mode">;
   connection?: { readonly isHealthy: boolean };
   doorStates?: ReadonlyMap<string, AccessDoorStateEntry>;
   official?: unknown;
@@ -457,7 +460,7 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
   const resolveDeviceModel = options.resolveDeviceModel ?? deviceModel;
   const surface: ControllerSurface = {
 
-    client: { connection: { isHealthy: true }, doorStates: new Map<string, AccessDoorStateEntry>(), official: null,
+    client: { capabilities: { mode: "credential" }, connection: { isHealthy: true }, doorStates: new Map<string, AccessDoorStateEntry>(), official: null,
       on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }),
       state: { snapshot: (): unknown => ({ devices: new Map(), doors: new Map() }) }, transport: null,
       ...options.client } as unknown as AccessClient,

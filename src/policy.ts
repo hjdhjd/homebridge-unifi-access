@@ -17,9 +17,9 @@ import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOV
   AccessConfigurationError, isControllerRefusal, isEnterpriseHubRecord, isHub, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings,
   selectAccessPoints, terminalInput } from "unifi-access";
 import { ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
-import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessOfficialAccessMethodValue, AccessOfficialAccessMethods,
-  AccessOfficialAccessMethodsUpdate, AccessOfficialDeviceSettingsUpdate, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite,
-  AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject, ConnectIdentity } from "unifi-access";
+import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessMethod, AccessOfficialUser, AccessOfficialWebhookEndpoint,
+  AccessOfficialWebhookEndpointWrite, AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject,
+  ConnectIdentity } from "unifi-access";
 import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
 import type { FeatureOptionChoice, Nullable, RetryBackoff } from "homebridge-plugin-utils";
 import { formatErrorMessage, sameEntries, sanitizeName, scopeSafeId } from "homebridge-plugin-utils";
@@ -1037,16 +1037,11 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
   return (deviceType === "UGT") ? "GarageDoorOpener" : "Lock";
 }
 
-/* Access methods available to us for readers. The `key` column is the configs vocabulary the access method state model is keyed by, and every switch read answers from
- * that model - the record's configuration rows, the official settings read, and the v2 access method events all feed it in this vocabulary. The `officialKeys` column is
- * the official update map's vocabulary, primary key first, and the switch writes go out under it. The `choice` column is the spelling a user's selection stores, and with
- * `name` it is what the settings page offers. Mobile's one switch spans the Bluetooth family, and writing a key a hardware class does not offer is a documented
- * no-effect, so naming the family carries that intent on every class; TouchPass is the one vocabulary rename between the configs and official vocabularies. Mobile
- * alone also carries a
- * `configsApiKeys` column, because the configs endpoint some hardware classes write access-method changes through takes the Bluetooth family as three keys - `bt`,
- * `bt_button`, and `bt_tap` - where the `key` column's `bt_button` alone serves every other write path; a device on that endpoint substitutes this column for
- * `key`, and only mobile has one to substitute. The `satisfies` clause compile-checks the column against the library's update map while `as const` keeps the
- * literal inference the key union below is derived from.
+/* Access methods available to us for readers. The `method` column is the library's own name for each method: the access method state model is keyed by it, the
+ * library's readers of the record's configuration rows and of the official settings answer in it, and a switch write names the method by it. Which keys a method
+ * spans on each surface, and which endpoint each write path takes, are the library's knowledge, so the catalog names the method and nothing more. The `choice`
+ * column is the spelling a user's selection stores, and with `name` it is what the settings page offers. The `satisfies` clause compile-checks the `method` column
+ * against the library's vocabulary while `as const` keeps the literal inference each column's readers rely on.
  *
  * The catalog lives in this leaf rather than beside the switches it drives because every consumer of the access method vocabulary reads this one catalog rather
  * than restating it: the hub's access method switches, and the webUI status feed's access methods row. The feed runs inside the Config UI X child process, where
@@ -1055,25 +1050,21 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
  */
 export const accessMethods = [
 
-  { capability: "identity_face_unlock", choice: "Face", key: "face", name: "Face Unlock", officialKeys: ["face"],
+  { capability: "identity_face_unlock", choice: "Face", method: "face", name: "Face Unlock",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_FACE },
-  { capability: "hand_wave", choice: "Hand", key: "wave", name: "Hand Wave", officialKeys: ["wave"],
+  { capability: "hand_wave", choice: "Hand", method: "wave", name: "Hand Wave",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_HAND },
-  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], choice: "Mobile", configsApiKeys: [ "bt", "bt_button", "bt_tap" ], key: "bt_button",
-    name: "Mobile", officialKeys: [ "bt_button", "bt_tap" ], subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
-  { capability: "nfc_card_easy_provision", choice: "NFC", key: "nfc", name: "NFC", officialKeys: ["nfc"],
+  { capability: [ "mobile_unlock_ver2", "support_mobile_unlock" ], choice: "Mobile", method: "mobile", name: "Mobile",
+    subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_MOBILE },
+  { capability: "nfc_card_easy_provision", choice: "NFC", method: "nfc", name: "NFC",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_NFC },
-  { capability: "pin_code", choice: "PIN", key: "pin_code", name: "PIN", officialKeys: ["pin_code"],
+  { capability: "pin_code", choice: "PIN", method: "pin", name: "PIN",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_PIN },
-  { capability: "qr_code", choice: "QR", key: "qr_code", name: "QR Code", officialKeys: ["qr_code"],
+  { capability: "qr_code", choice: "QR", method: "qr", name: "QR Code",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_QR },
-  { capability: "support_apple_pass", choice: "TouchPass", key: "apple_pass", name: "TouchPass", officialKeys: ["touch_pass"],
+  { capability: "support_apple_pass", choice: "TouchPass", method: "touchPass", name: "TouchPass",
     subtype: AccessReservedNames.SWITCH_ACCESSMETHOD_TOUCHPASS }
-] as const satisfies readonly { capability: string | readonly string[]; choice: string; configsApiKeys?: readonly string[]; key: string; name: string;
-  officialKeys: readonly (keyof AccessOfficialAccessMethodsUpdate)[]; subtype: string; }[];
-
-// Extract the key property values from the access methods array to create a union type of all possible keys for our supported access methods.
-export type AccessMethodKey = typeof accessMethods[number]["key"];
+] as const satisfies readonly { capability: string | readonly string[]; choice: string; method: AccessMethod; name: string; subtype: string }[];
 
 /**
  * Whether a device's capabilities carry a capability, stated in whichever form a catalog entry uses: a single flag, or a family where any member counts. The
@@ -1216,166 +1207,6 @@ export function logEventChoices(device?: ChoiceDevice): FeatureOptionChoice[] {
 export function hubSensorModels(): AccessModelKey[] {
 
   return [...new Set(hubSensors.flatMap(sensor => sensor.models))];
-}
-
-/**
- * Translate a device's configuration rows into the access-method values a caller keys its own state by, in the rows' own vocabulary.
- *
- * The rows are a flat list carrying every configurable property of the device, so the catalog decides what is read out of them rather than the record deciding what
- * the caller holds. A method with no row of its own contributes no entry at all: the census listed the device's configuration and did not mention the method, which
- * says nothing about whether it is on, and a caller that needs the two apart cannot get them from a bare `false`.
- *
- * The catalog's key type flows through to the returned map, so a caller holding a literal union of method keys gets its own union back rather than a widened string.
- *
- * @param options - The catalog of methods to read, and the device's configuration rows.
- *
- * @returns A map holding, for each catalog method the rows mention, whether that row states the method is enabled.
- */
-export function accessMethodValuesFromConfigRows<K extends string>(options: { methods: readonly { key: K }[];
-  rows: readonly { key: string; value: string }[]; }): Map<K, boolean> {
-
-  const { methods, rows } = options;
-  const values = new Map<K, boolean>();
-
-  for(const method of methods) {
-
-    const row = rows.find(entry => entry.key === method.key);
-
-    if(row === undefined) {
-
-      continue;
-    }
-
-    values.set(method.key, row.value === "yes");
-  }
-
-  return values;
-}
-
-// The official keys one access method answers under, primary first. Typing them as a non-empty tuple is what makes "primary" a guarantee the type carries rather
-// than a convention every reader has to keep, so the first key can be read without a presence check.
-type AccessMethodOfficialKeys = readonly [keyof AccessOfficialAccessMethods, ...(keyof AccessOfficialAccessMethods)[]];
-
-/**
- * Translate a device's official access-method settings into the access-method values a caller keys its own state by, crossing from the official vocabulary into the
- * catalog's own.
- *
- * Each method is read through its primary official key alone - the key its writes are judged on - so the two directions agree on which spelling speaks for a method
- * whose two surfaces name it differently. The settings map is sparse: an absent key means the hardware class does not offer the method rather than that the method
- * is off, so it contributes no entry, exactly as a missing configuration row does above.
- *
- * @param options - The catalog of methods to read, each with its official keys, and the device's official access-method settings.
- *
- * @returns A map holding, for each catalog method the settings offer, whether the settings state the method is enabled.
- */
-export function accessMethodValuesFromOfficialSettings<K extends string>(options: { methods: readonly { key: K; officialKeys: AccessMethodOfficialKeys }[];
-  settings: AccessOfficialAccessMethods; }): Map<K, boolean> {
-
-  const { methods, settings } = options;
-  const values = new Map<K, boolean>();
-
-  for(const method of methods) {
-
-    const reading = settings[method.officialKeys[0]]?.enabled;
-
-    if(reading === undefined) {
-
-      continue;
-    }
-
-    values.set(method.key, reading === "yes");
-  }
-
-  return values;
-}
-
-/**
- * Compose the official-API settings update an access-method write should carry, mapping every named key onto the wire's own "yes"/"no" vocabulary.
- *
- * Every member the update map admits accepts an `enabled` value, so one uniform literal serves the whole key set. The tuning members some methods also carry are
- * deliberately left untouched...a switch speaks to whether a method is on, never to how it is tuned.
- *
- * @param options - The desired state and the update-map keys the write should carry it to.
- *
- * @returns The settings update to send.
- */
-export function composeAccessMethodUpdate(options: { enabled: boolean; keys: readonly (keyof AccessOfficialAccessMethodsUpdate)[] }): AccessOfficialDeviceSettingsUpdate {
-
-  const { enabled, keys } = options;
-
-  const update: AccessOfficialAccessMethodsUpdate = {};
-
-  for(const key of keys) {
-
-    update[key] = { enabled: enabled ? "yes" : "no" };
-  }
-
-  // eslint-disable-next-line camelcase
-  return { access_methods: update };
-}
-
-/**
- * The verdict on an official access-method write, judged from the settings read back after it: whether the controller applied the change, silently declined it, or
- * cannot see the method on this device at all.
- *
- * The verdict is judged on the primary key alone - the key the switch's own reads use - because any secondary keys a multi-key method also writes are best-effort
- * extras the write also carries, whose absence or disagreement says nothing about the switch. The read-back map is sparse: an absent key means the official
- * surface does not offer that method on this hardware, not that the method is off, so absence is a verdict of its own and the caller decides which path serves
- * next. A present key disagreeing with the written value means the controller answered success while leaving the setting as it was...the one outcome only a
- * read-back can reveal.
- *
- * @param options - The written value, the primary key to judge on, and the read-back access-method map.
- *
- * @returns `"confirmed"` when the read-back agrees, `"declined"` when it disagrees, and `"absent"` when the method is missing from the map.
- */
-export function accessMethodWriteVerdict(options: { enabled: AccessOfficialAccessMethodValue; primaryKey: keyof AccessOfficialAccessMethods;
-  readBack: AccessOfficialAccessMethods; }): "absent" | "confirmed" | "declined" {
-
-  const { enabled, primaryKey, readBack } = options;
-
-  // Every read-side member declares `enabled` required, so a present key always carries a comparable value and one optional-chained read answers both questions.
-  const reading = readBack[primaryKey]?.enabled;
-
-  if(reading === undefined) {
-
-    return "absent";
-  }
-
-  return (reading === enabled) ? "confirmed" : "declined";
-}
-
-/**
- * What should follow an official access-method write, given its verdict and whether a credential transport exists to carry the raw fallback.
- *
- * A confirmed write is complete. A decline is final regardless of transport: the controller answered and refused, and repeating the ask on the raw endpoint would
- * second-guess an answer it already gave. An absent method and a thrown failure both fall back to the raw write when a transport can carry one - the raw endpoint
- * can reach methods the official map cannot see, and a thrown official error must not strand a controller the credential path still serves - and revert the switch
- * when none can.
- *
- * @param options - Whether a credential transport exists, and the write's verdict.
- *
- * @returns The action the caller should take.
- */
-export function accessMethodWriteFollowup(options: { transport: boolean; verdict: "absent" | "confirmed" | "declined" | "failed" }):
-  "complete" | "decline" | "fallback" | "revert" {
-
-  const { transport, verdict } = options;
-
-  switch(verdict) {
-
-    case "confirmed":
-
-      return "complete";
-
-    case "declined":
-
-      return "decline";
-
-    case "absent":
-    case "failed":
-
-      return transport ? "fallback" : "revert";
-  }
 }
 
 /**
