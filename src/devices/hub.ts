@@ -361,9 +361,10 @@ export class AccessHub extends AccessDevice {
    * of ours belongs to the door it was opened for, and one left standing would relock whichever door now holds the role, or services standing at their last
    * reading. The registry's clear does nothing to an unarmed key, so the construction pass retires nothing.
    *
-   * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction is silent: its previous enumeration is the empty seed,
-   * so every door it resolves counts as moved, and an adoption is not a transition anyone observed. A pass that moved a role, adoption included, also says at debug
-   * level what the bindings were and what they resolved to, so a field report carries its own evidence.
+   * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction announces no door: its previous enumeration is the empty
+   * seed, so every door it resolves counts as moved, and an adoption is not a transition anyone observed. A pass that moved a role, adoption included, also says
+   * what the bindings were and what they resolved to, so a field report carries its own evidence. Roles the bindings named are said at debug level. Roles that
+   * were guessed are said as a warning, because a guessed door can be the wrong one and only the user can tell.
    *
    * @param options - The pass this discovery is running as.
    *
@@ -436,17 +437,40 @@ export class AccessHub extends AccessDevice {
       }
     }
 
-    /* The bindings are read here rather than handed back by the policy, which answers with the door identities alone, and only on a pass that moved a role. Each
-     * binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or port said as such.
+    /* The bindings are read here rather than handed back by the policy, which answers with the door identities and what decided them, and only on a pass that
+     * moved a role. Each binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or port said as such, and each
+     * line below carries that one rendering.
      */
     if(changed) {
 
       const bindings = portBindings(this.uda).map(binding => (binding.name ?? "unnamed") + " on " + (binding.port ?? "an unnamed port") + " bound to " + binding.doorId);
-      const mainDoor = next.find(door => !door.isSideDoor)?.locationId ?? "none";
-      const sideDoor = next.find(door => door.isSideDoor)?.locationId ?? "none";
+      const renderedBindings = bindings.length ? bindings.join(", ") : "none";
+      const mainDoor = next.find(door => !door.isSideDoor)?.locationId;
+      const sideDoor = next.find(door => door.isSideDoor)?.locationId;
 
-      this.log.debug("Gate doors resolved from the port bindings (%s) to main door %s and side door %s.", bindings.length ? bindings.join(", ") : "none",
-        mainDoor, sideDoor);
+      if(discovered.basis === "guess") {
+
+        // The warning names every door by its topology name and identity, so a user can check each one against the controller, and by its identity alone where
+        // the topology has not learned it.
+        const describeDoor = (locationId?: string): string => {
+
+          if(!locationId) {
+
+            return "no door";
+          }
+
+          const name = doors.find(door => door.unique_id === locationId)?.name;
+
+          return name ? (name + " (" + locationId + ")") : locationId;
+        };
+
+        this.log.warn("Unable to tell this gate's doors apart from its port bindings, so its main door was matched to %s and its side door to %s. If both are " +
+          "right, there is nothing to do. The port bindings are %s, the device's door is %s, and its location is %s.", describeDoor(mainDoor), describeDoor(sideDoor),
+        renderedBindings, describeDoor(this.uda.door?.unique_id), describeDoor(this.uda.location_id));
+      } else {
+
+        this.log.debug("Gate doors resolved from the port bindings (%s) to main door %s and side door %s.", renderedBindings, mainDoor ?? "none", sideDoor ?? "none");
+      }
     }
 
     return moved;

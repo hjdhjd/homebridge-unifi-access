@@ -3231,8 +3231,20 @@ test("a gate whose record binds two of the controller's doors takes its roles fr
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and its own side door the side role");
 });
 
-/* The sentence a gate writes at debug level for one resolution of its doors, as the debug sink carries it: the bindings it resolved from and the door each role
- * landed on. The bindings the harness builds carry a name and no port, so each one's port reads as unnamed.
+/* A gate's port bindings as each of its resolution sentences renders them. The bindings the harness builds carry a name and no port, so each one's port reads
+ * as unnamed.
+ *
+ * @param bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ *
+ * @returns The rendered bindings, or none.
+ */
+function renderedBindings(bindings: [ string, string ][]): string {
+
+  return bindings.length ? bindings.map(([ name, doorId ]) => name + " on an unnamed port bound to " + doorId).join(", ") : "none";
+}
+
+/* The sentence a gate writes at debug level for one resolution of its doors that its bindings named, as the debug sink carries it: the bindings it resolved from
+ * and the door each role landed on.
  *
  * @param bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
  * @param mainDoor - The door the main role landed on, or none.
@@ -3242,10 +3254,37 @@ test("a gate whose record binds two of the controller's doors takes its roles fr
  */
 function resolution(bindings: [ string, string ][], mainDoor: string, sideDoor: string): string {
 
-  const rendered = bindings.map(([ name, doorId ]) => name + " on an unnamed port bound to " + doorId);
+  return LOG_PREFIX + "Gate doors resolved from the port bindings (" + renderedBindings(bindings) + ") to main door " + mainDoor + " and side door " + sideDoor + ".";
+}
 
-  return LOG_PREFIX + "Gate doors resolved from the port bindings (" + (bindings.length ? rendered.join(", ") : "none") + ") to main door " + mainDoor +
-    " and side door " + sideDoor + ".";
+/* The warning a gate writes for one resolution of its doors that guessed a role, as a user reads it: the door each role landed on and the record inputs behind
+ * them. Each door is spelled as the gate renders it, by its topology name with its identity beside it, by its identity alone, or as no door.
+ *
+ * @param options          - The resolution to render.
+ * @param options.bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ * @param options.device   - The record's embedded door, as rendered.
+ * @param options.location - The record's location, as rendered.
+ * @param options.main     - The door the main role landed on, as rendered.
+ * @param options.side     - The door the side role landed on, as rendered.
+ *
+ * @returns The sentence, without the logger's own prefix.
+ */
+function guessWarning(options: { bindings: [ string, string ][]; device: string; location: string; main: string; side: string }): string {
+
+  return "Unable to tell this gate's doors apart from its port bindings, so its main door was matched to " + options.main + " and its side door to " +
+    options.side + ". If both are right, there is nothing to do. The port bindings are " + renderedBindings(options.bindings) + ", the device's door is " +
+    options.device + ", and its location is " + options.location + ".";
+}
+
+/* Every guess a gate has warned, oldest first, which is how a pass that warned one is told from a pass that warned none whatever the guess named.
+ *
+ * @param harness - The gate to read.
+ *
+ * @returns The guess warnings in the debug sink.
+ */
+function guessLines(harness: HubHarness): string[] {
+
+  return harness.debugs.filter(line => line.startsWith(LOG_PREFIX + "Unable to tell this gate's doors apart"));
 }
 
 /* Every resolution a gate has written at debug level, oldest first, which is how a pass that said one is told from a pass that said none.
@@ -3259,53 +3298,93 @@ function resolutionLines(harness: HubHarness): string[] {
   return harness.debugs.filter(line => line.startsWith(LOG_PREFIX + "Gate doors resolved"));
 }
 
-test("a gate says at debug level what its bindings resolved to on every pass that moved a role, adoption included, and nothing on a pass that moved none", () => {
+test("a gate whose roles were guessed warns once, whatever the log level, naming each door chosen and the record inputs behind it", () => {
+
+  const gate = makeGate({ keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"] });
+  const adoption = guessWarning({ bindings: [], device: "no door", location: "Main Gate (" + MAIN_DOOR + ")", main: "Main Gate (" + MAIN_DOOR + ")",
+    side: "Pedestrian Gate (" + SIDE_DOOR + ")" });
+
+  // The record binds nothing, so adoption takes the main door from the location and the side door from its name, and the user is told without debug logging.
+  assert.equal(warnCount(gate, adoption), 1, "adoption warns the guess once");
+
+  restateRecord(gate, {});
+
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "a pass that moved no role warns nothing");
+
+  // The side door's port and the one binding beside it name both roles, so the rebind moves them without a guess.
+  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper2", NEW_SIDE) ] });
+
+  assert.equal(lineCount(gate, "The gate's main door is now " + NEW_MAIN + "."), 1, "the rebind moves the main role");
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and warns nothing");
+
+  /* The bindings go while the record's embedded door names the main door the topology has not learned, so the main role stays and the side role falls to the
+   * side door's name. A pass that moved only the side role still guessed, and the door the topology lacks is named by its identity alone.
+   */
+  restateRecord(gate, { door: { unique_id: NEW_MAIN }, extensions: [] });
+
+  assert.equal(warnCount(gate, guessWarning({ bindings: [], device: NEW_MAIN, location: "Main Gate (" + MAIN_DOOR + ")", main: NEW_MAIN,
+    side: "Pedestrian Gate (" + SIDE_DOOR + ")" })), 1, "the guess names each door as the topology knows it");
+});
+
+test("a gate says what its bindings resolved to on every pass that moved a role, adoption included, as a warning when it guessed a role and at debug level " +
+  "otherwise, and nothing on a pass that moved none", () => {
 
   const gate = makeGate({ keepAdoptionLines: true, options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
-  const adoption = resolution([], MAIN_DOOR, SIDE_DOOR);
+  const adoption = guessWarning({ bindings: [], device: "no door", location: "Main Gate (" + MAIN_DOOR + ")", main: "Main Gate (" + MAIN_DOOR + ")",
+    side: "Pedestrian Gate (" + SIDE_DOOR + ")" });
 
-  // Adoption moves every role off the empty seed, so a fresh start carries its own evidence. A line held back for a pass that follows would leave this empty.
-  assert.deepEqual(resolutionLines(gate), [adoption], "adoption says what the record resolved to");
+  /* Adoption moves every role off the empty seed, so a fresh start carries its own evidence. The record binds nothing, so both roles are guessed and the evidence
+   * is the warning in place of the debug line. A line held back for a pass that follows would leave this at zero.
+   */
+  assert.equal(warnCount(gate, adoption), 1, "adoption says what the record resolved to");
+  assert.deepEqual(resolutionLines(gate), [], "as the warning alone");
 
   // A device update that moves nothing says nothing, so a debug-enabled log does not repeat the resolution on every restatement.
   restateRecord(gate, {});
 
-  assert.deepEqual(resolutionLines(gate), [adoption], "a pass that moved no role adds no line");
+  assert.deepEqual(resolutionLines(gate), [], "a pass that moved no role adds no line");
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and repeats no warning");
 
   const rebind = resolution([ [ "oper2", NEW_SIDE ], [ "oper1", NEW_MAIN ] ], NEW_MAIN, NEW_SIDE);
 
   restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
 
-  assert.deepEqual(resolutionLines(gate), [ adoption, rebind ], "a rebind that moved both roles says what each binding named and where each role landed");
+  assert.deepEqual(resolutionLines(gate), [rebind], "a rebind that moved both roles says what each binding named and where each role landed");
 
   // The main door alone moves back while the side door stays, so a pass counts as moved when any role moved rather than when the last role it read did.
   restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", MAIN_DOOR) ] });
 
-  assert.deepEqual(resolutionLines(gate), [ adoption, rebind, resolution([ [ "oper2", NEW_SIDE ], [ "oper1", MAIN_DOOR ] ], MAIN_DOOR, NEW_SIDE) ],
+  assert.deepEqual(resolutionLines(gate), [ rebind, resolution([ [ "oper2", NEW_SIDE ], [ "oper1", MAIN_DOOR ] ], MAIN_DOOR, NEW_SIDE) ],
     "a pass that moved one role says so as well");
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and passes whose bindings named both roles warn nothing");
 });
 
-test("a gate says at debug level what its bindings resolved to when a role is withdrawn, which moves no door into it", () => {
+test("a gate says what its bindings resolved to when a role is withdrawn, which moves no door into it", () => {
 
   // A topology of one door, so the side arm's name and two-door fallbacks answer nothing and the side door is the binding's to name or to withhold.
   const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], keepAdoptionLines: true,
     options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
-  const adoption = resolution([], MAIN_DOOR, "none");
+  const mainGate = "Main Gate (" + MAIN_DOOR + ")";
 
-  assert.deepEqual(resolutionLines(gate), [adoption], "adoption says the side role holds no door");
+  // The record binds nothing, so adoption guesses its main door from the location and warns it.
+  assert.equal(warnCount(gate, guessWarning({ bindings: [], device: "no door", location: mainGate, main: mainGate, side: "no door" })), 1,
+    "adoption says the side role holds no door");
 
   const arrival = resolution([ [ "oper1", MAIN_DOOR ], [ "oper2", NEW_SIDE ] ], MAIN_DOOR, NEW_SIDE);
 
   restateRecord(gate, { extensions: [ portBinding("oper1", MAIN_DOOR), portBinding("oper2", NEW_SIDE) ] });
 
-  assert.deepEqual(resolutionLines(gate), [ adoption, arrival ], "the side door alone arrives");
+  assert.deepEqual(resolutionLines(gate), [arrival], "the side door alone arrives");
 
   /* The side door's binding goes while the main door stays, so no door moves into any role. The withdrawal still changed a role, which is what earns the line...a
-   * line keyed to the doors that moved in would stay silent here.
+   * line keyed to the doors that moved in would stay silent here. The lone binding left names no side door's port, so the main door is the location's guess
+   * again and the line is the warning.
    */
   restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
 
-  assert.deepEqual(resolutionLines(gate), [ adoption, arrival, resolution([[ "oper1", MAIN_DOOR ]], MAIN_DOOR, "none") ], "and its withdrawal is said as well");
+  assert.equal(warnCount(gate, guessWarning({ bindings: [[ "oper1", MAIN_DOOR ]], device: "no door", location: mainGate, main: mainGate, side: "no door" })), 1,
+    "and its withdrawal is said as well");
+  assert.deepEqual(resolutionLines(gate), [arrival], "as the warning alone");
 });
 
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {

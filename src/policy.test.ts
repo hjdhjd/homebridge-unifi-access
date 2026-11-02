@@ -11,6 +11,7 @@ import { ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVE
   AccessRequestError, createStateStore, selectDoorStates } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_PATH_PREFIX } from "./settings.ts";
 import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, AccessOfficialWebhookEndpoint, AccessStateDevice, AccessStateDoor } from "unifi-access";
+import type { ConnectFailure, GateDoorLocations } from "./policy.ts";
 import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
 import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceDisplayName, deviceHasCapability, deviceModel, deviceName, deviceRecord, deviceSerial, discoverDoorLocations,
@@ -19,7 +20,6 @@ import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStrand
   isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
   reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
-import type { ConnectFailure } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -945,14 +945,14 @@ test("discoverDoorLocations resolves the main door through each strategy in orde
    * and the controller's location binding (Strategy 3) have arms of their own in the ranking tests below.
    */
   assert.deepEqual(discoverDoorLocations({ device: { door: { unique_id: "door9" } } as unknown as AccessStateDevice, doors, sideDoorEligible: false }),
-    { mainDoorLocationId: "door9" });
+    { basis: "guess", mainDoorLocationId: "door9" });
 
   // Strategy 4: an unbound device resolves the door whose name reads as the main entrance.
-  assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors, sideDoorEligible: false }), { mainDoorLocationId: "door2" });
+  assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors, sideDoorEligible: false }), { basis: "guess", mainDoorLocationId: "door2" });
 
   // Strategy 5: with no name matching either way, the first door answers.
   assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors: [ stateDoor("door1", "Alpha"), stateDoor("door2", "Beta") ],
-    sideDoorEligible: false }), { mainDoorLocationId: "door1" });
+    sideDoorEligible: false }), { basis: "guess", mainDoorLocationId: "door1" });
 });
 
 test("discoverDoorLocations resolves the side door through each strategy in order", () => {
@@ -965,15 +965,15 @@ test("discoverDoorLocations resolves the side door through each strategy in orde
   } as unknown as AccessStateDevice;
 
   assert.deepEqual(discoverDoorLocations({ device: extended, doors: [stateDoor("door1", "Gate")], sideDoorEligible: true }),
-    { mainDoorLocationId: "door1", sideDoorLocationId: "door7" });
+    { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door7" });
 
   // Strategy 2: without the extension, a door whose name reads as the side answers - and never the main door itself.
   assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors: [ stateDoor("door1", "Main Gate"), stateDoor("door2", "Pedestrian Gate") ],
-    sideDoorEligible: true }), { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+    sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
 
   // Strategy 3: with exactly two doors and no side name, the door that is not the main one answers.
   assert.deepEqual(discoverDoorLocations({ device: {} as AccessStateDevice, doors: [ stateDoor("door1", "Alpha"), stateDoor("door2", "Beta") ],
-    sideDoorEligible: true }), { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+    sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
 });
 
 test("discoverDoorLocations computes a side door only where one is in scope", () => {
@@ -1251,21 +1251,21 @@ test("discoverDoorLocations ranks the controller's own live binding above the na
   // The embedded door member wins over every fallback below it, as the binding the topology document states about this device directly, and only a published port
   // binding outranks it.
   assert.deepEqual(discoverDoorLocations({ device: { door: { unique_id: "d1" }, location_id: "d2" } as unknown as AccessStateDevice,
-    doors: [ stateDoor("d1", "Alpha"), stateDoor("d2", "Beta") ], sideDoorEligible: false }), { mainDoorLocationId: "d1" });
+    doors: [ stateDoor("d1", "Alpha"), stateDoor("d2", "Beta") ], sideDoorEligible: false }), { basis: "guess", mainDoorLocationId: "d1" });
 
   // A record carrying no embedded door resolves through the location the controller binds it to, which both censuses carry.
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "door2" } as AccessStateDevice, doors, sideDoorEligible: false }),
-    { mainDoorLocationId: "door2" });
+    { basis: "guess", mainDoorLocationId: "door2" });
 
   // A binding naming no door we were handed falls through to the name heuristics, as a record with no binding does.
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "elsewhere" } as AccessStateDevice, doors: [ stateDoor("door1", "Utility"),
-    stateDoor("door2", "Main Entrance") ], sideDoorEligible: false }), { mainDoorLocationId: "door2" });
+    stateDoor("door2", "Main Entrance") ], sideDoorEligible: false }), { basis: "guess", mainDoorLocationId: "door2" });
 
   /* The two picks move together: the side arm excludes whatever the main arm chose, so a main door resolved from the live binding rather than from a name shifts
    * the side pick with it. Asserting the pair is what makes that coupling a stated outcome rather than an incidental one.
    */
   assert.deepEqual(discoverDoorLocations({ device: { location_id: "door2" } as AccessStateDevice, doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "door2", sideDoorLocationId: "door1" });
+    { basis: "guess", mainDoorLocationId: "door2", sideDoorLocationId: "door1" });
 });
 
 test("discoverDoorLocations ranks a port binding above every fallback, whichever order the controller delivered the bindings in", () => {
@@ -1280,42 +1280,42 @@ test("discoverDoorLocations ranks a port binding above every fallback, whichever
     location_id: "door2" } as unknown as AccessStateDevice);
 
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB") ]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
+    { basis: "binding", mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB") ]), doors, sideDoorEligible: false }),
-    { mainDoorLocationId: "doorA" });
+    { basis: "binding", mainDoorLocationId: "doorA" });
 
   // The controller delivers its bindings in whatever order it likes, so the ports name the roles rather than the positions do.
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper2", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
+    { basis: "binding", mainDoorLocationId: "doorA", sideDoorLocationId: "doorB" });
 
   // A record binding the side door's port alone names its side door and lets the main door fall through to the arms below, which is the embedded member here.
   assert.deepEqual(discoverDoorLocations({ device: bound([binding("oper2", "doorB")]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
+    { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
 
   // A binding naming no port identifies no side door, and the main door's binding is trusted only beside one, so the main door is the embedded member's and the
   // side door falls to the names.
   assert.deepEqual(discoverDoorLocations({ device: bound([{ extension_name: "port_setting", target_value: "doorA" }]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+    { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
 
   /* Two bindings, neither of them the side door's, identify no role, so both delivery orders answer the embedded member and the names. A rule taking the main door
    * from the first binding that is not the side door's would answer doorA in one order and doorB in the other.
    */
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper3", "doorB") ]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+    { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper3", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
+    { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "door2" });
 
   /* A third binding beside the side door's leaves the main door to the embedded member, because the main door's binding is trusted only as the one other binding
    * there, while the side door keeps its own port's binding. A rule trusting any binding beside the side door's would answer doorA, the first one delivered.
    */
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper2", "doorB"), binding("oper3", "doorC") ]), doors,
-    sideDoorEligible: true }), { mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
+    sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "door1", sideDoorLocationId: "doorB" });
 
   // The same pair with no side door in scope answers the embedded member in both orders, where a rule reading delivery order would answer doorA or doorB.
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper1", "doorA"), binding("oper3", "doorB") ]), doors, sideDoorEligible: false }),
-    { mainDoorLocationId: "door1" });
+    { basis: "guess", mainDoorLocationId: "door1" });
   assert.deepEqual(discoverDoorLocations({ device: bound([ binding("oper3", "doorB"), binding("oper1", "doorA") ]), doors, sideDoorEligible: false }),
-    { mainDoorLocationId: "door1" });
+    { basis: "guess", mainDoorLocationId: "door1" });
 });
 
 test("discoverDoorLocations chooses both roles among the doors a gate's record binds once it binds two of the topology's doors, in topology order", () => {
@@ -1333,20 +1333,20 @@ test("discoverDoorLocations chooses both roles among the doors a gate's record b
   for(const [ order, extensions ] of [ [ "the gate's binding delivered first", named ], [ "the side door's binding delivered first", [...named].reverse() ] ] as const) {
 
     assert.deepEqual(discoverDoorLocations({ device: record(extensions), doors, sideDoorEligible: true }),
-      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order);
+      { basis: "guess", mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order);
 
     // A location or an embedded door member naming the other hub's door decides nothing, where for a record binding fewer doors either would take the main role.
     assert.deepEqual(discoverDoorLocations({ device: record(extensions, { location_id: "front" }), doors, sideDoorEligible: true }),
-      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the location naming the other hub's door");
+      { basis: "guess", mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the location naming the other hub's door");
     assert.deepEqual(discoverDoorLocations({ device: record(extensions, { door: { unique_id: "front" } }), doors, sideDoorEligible: true }),
-      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the embedded door naming the other hub's door");
+      { basis: "guess", mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the embedded door naming the other hub's door");
   }
 
   // Another hub's door can read as a side door just as easily, and listed first it would take the side role from the side arm reading the whole topology.
   const sideNamed = [ stateDoor("hub", "Side Gate Hub"), stateDoor("entrance", "Entrance Gate"), stateDoor("pedestrian", "Pedestrian Gate") ];
 
   assert.deepEqual(discoverDoorLocations({ device: record([ binding("Entrance Gate", "entrance"), binding("Pedestrian Gate", "pedestrian") ]), doors: sideNamed,
-    sideDoorEligible: true }), { mainDoorLocationId: "entrance", sideDoorLocationId: "pedestrian" }, "another hub's door named like a side door");
+    sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "entrance", sideDoorLocationId: "pedestrian" }, "another hub's door named like a side door");
 
   /* Names neither arm matches leave the first door and the two-door arm to decide, so the doors those arms read must keep topology order: doors taken in the order
    * the bindings arrived would trade the roles whenever the controller reordered its delivery. Choosing among the bound doors is also what resolves a side door
@@ -1358,7 +1358,7 @@ test("discoverDoorLocations chooses both roles among the doors a gate's record b
   for(const [ order, extensions ] of [ [ "Alpha's binding delivered first", unnamed ], [ "Beta's binding delivered first", [...unnamed].reverse() ] ] as const) {
 
     assert.deepEqual(discoverDoorLocations({ device: record(extensions), doors: neutral, sideDoorEligible: true }),
-      { mainDoorLocationId: "alpha", sideDoorLocationId: "beta" }, order);
+      { basis: "guess", mainDoorLocationId: "alpha", sideDoorLocationId: "beta" }, order);
   }
 });
 
@@ -1375,9 +1375,31 @@ test("discoverDoorLocations counts the doors a gate's record binds as topology d
   const absentDoor = { extensions: [ binding("Gate", "gate"), binding("Side Door", "elsewhere") ] } as unknown as AccessStateDevice;
 
   assert.deepEqual(discoverDoorLocations({ device: sharedDoor, doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "front", sideDoorLocationId: "side" }, "two bindings to one door");
+    { basis: "guess", mainDoorLocationId: "front", sideDoorLocationId: "side" }, "two bindings to one door");
   assert.deepEqual(discoverDoorLocations({ device: absentDoor, doors, sideDoorEligible: true }),
-    { mainDoorLocationId: "front", sideDoorLocationId: "side" }, "one binding to a door the topology lacks");
+    { basis: "guess", mainDoorLocationId: "front", sideDoorLocationId: "side" }, "one binding to a door the topology lacks");
+});
+
+test("discoverDoorLocations says the bindings named the roles only when the side door's binding and the one beside it named every role it found", () => {
+
+  const binding = (name: string, doorId: string): Record<string, string> => ({ extension_name: "port_setting", target_name: name, target_value: doorId });
+  const doors = [ stateDoor("gate", "Gate"), stateDoor("side", "Side Door") ];
+  const basisOf = (extensions: Record<string, string>[], sideDoorEligible: boolean): GateDoorLocations["basis"] => {
+
+    return discoverDoorLocations({ device: { extensions } as unknown as AccessStateDevice, doors, sideDoorEligible }).basis;
+  };
+
+  // The side door's binding and the one beside it name both roles, and with no side door in scope they name the one role the answer carries.
+  assert.equal(basisOf([ binding("oper1", "gate"), binding("oper2", "side") ], true), "binding", "an oper2 pair");
+  assert.equal(basisOf([ binding("oper1", "gate"), binding("oper2", "side") ], false), "binding", "an oper2 pair with no side door in scope");
+
+  // The side door's binding names the side door while the main door falls to a fallback arm, which is a guess whether that binding stands alone or beside two.
+  assert.equal(basisOf([binding("oper2", "side")], true), "guess", "a lone oper2 binding");
+  assert.equal(basisOf([ binding("oper1", "gate"), binding("oper2", "side"), binding("oper3", "gate") ], true), "guess", "a third binding beside the side door's");
+
+  // Bindings naming no port, and no bindings at all, leave every role to the fallback arms, with or without a side door in scope.
+  assert.equal(basisOf([ binding("Gate", "gate"), binding("Side Door", "side") ], true), "guess", "bindings named after their doors");
+  assert.equal(basisOf([], false), "guess", "no bindings and no side door in scope");
 });
 
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {
@@ -1391,7 +1413,7 @@ test("a record carrying only the members every census establishes degrades by ab
 
   // No embedded door snapshot means the live binding is what resolves the door.
   assert.deepEqual(discoverDoorLocations({ device: projected, doors: [stateDoor("door1", "Front Door")], sideDoorEligible: false }),
-    { mainDoorLocationId: "door1" });
+    { basis: "guess", mainDoorLocationId: "door1" });
 
   // No display model and no hardware model means the type mapping answers.
   assert.equal(deviceModel(projected), "UA Hub");

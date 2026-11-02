@@ -836,6 +836,21 @@ export function hasDpsEvidence(entry: AccessDoorStateEntry | undefined): boolean
 const SIDE_DOOR_PORT = "oper2";
 
 /**
+ * The doors a UA Gate's discovery landed on, and what decided them.
+ */
+export interface GateDoorLocations {
+
+  /** `binding` when the side door's port binding and the one binding beside it named the roles, and `guess` when any role was left to a fallback arm. */
+  readonly basis: "binding" | "guess";
+
+  /** The main door's location identifier, absent where no main door was discovered. */
+  mainDoorLocationId?: string;
+
+  /** The side door's location identifier, absent where no side door was discovered or none is in scope. */
+  sideDoorLocationId?: string;
+}
+
+/**
  * The main and side door locations a UA Gate resolves to, from its device record and the topology's doors collection - the one statement of the gate's
  * door-discovery heuristic.
  *
@@ -858,18 +873,19 @@ const SIDE_DOOR_PORT = "oper2";
  * or a binding to a door the topology has not learned can, leaves every arm reading the whole topology. Among those doors, the embedded door member and the location
  * decide only when they name one of them.
  *
+ * The answer also says what decided the roles: the bindings, when the side door's binding and the one beside it named them, or a guess, when any role was left to
+ * the arms below them. Only the first identifies the doors, so a caller can tell a resolution it can trust from one a user may need to check.
+ *
  * An options object because a positional boolean beside two structural arguments would read as noise at the call site.
  *
  * @param options - The device record, the topology's doors, and whether the side arm should run.
  *
- * @returns The discovered door location identifiers, each member absent where its door went undiscovered.
+ * @returns The discovered door location identifiers, each member absent where its door went undiscovered, and whether the bindings named the roles.
  */
 export function discoverDoorLocations(options: { device: AccessStateDevice; doors: readonly AccessStateDoor[];
-  sideDoorEligible: boolean; }): { mainDoorLocationId?: string; sideDoorLocationId?: string } {
+  sideDoorEligible: boolean; }): GateDoorLocations {
 
   const { device, doors, sideDoorEligible } = options;
-
-  const discovered: { mainDoorLocationId?: string; sideDoorLocationId?: string } = {};
 
   // The doors this record's own ports are bound to. The side door's binding names its own port, and the main door's is trusted only as the one other binding
   // beside it, so delivery order never decides a role.
@@ -883,6 +899,9 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
   const candidates = scoped ? bound : doors;
 
   const primaryDoorId = device.door?.unique_id;
+
+  // The main door's binding stands beside the side door's alone, so a record carrying it names the side door through its own binding wherever one is in scope.
+  const discovered: GateDoorLocations = { basis: mainBinding ? "binding" : "guess" };
 
   // Strategy 1: Use the door the record's own port binding names as the main door.
   if(mainBinding) {
