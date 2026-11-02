@@ -852,6 +852,12 @@ const SIDE_DOOR_PORT = "oper2";
  * embedded door member and the location the record names fall behind the bindings as topology snapshots - the first of which the official surface never carries -
  * while both still outrank a name that merely looks like a main gate.
  *
+ * Whenever the record binds two or more of the topology's doors, every arm below the bindings chooses among those doors alone, because the topology is every door
+ * on the controller and a door of another hub must never take either role. They keep topology order, so the order the controller delivered the bindings in decides
+ * nothing, and they are counted as doors rather than as bindings: a record whose bindings name fewer than two of the topology's doors, as two bindings to one door
+ * or a binding to a door the topology has not learned can, leaves every arm reading the whole topology. Among those doors, the embedded door member and the location
+ * decide only when they name one of them.
+ *
  * An options object because a positional boolean beside two structural arguments would read as noise at the call site.
  *
  * @param options - The device record, the topology's doors, and whether the side arm should run.
@@ -871,27 +877,34 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
   const sideBinding = bindings.find(binding => binding.name === SIDE_DOOR_PORT);
   const mainBinding = (sideBinding && (bindings.length === 2)) ? bindings.find(binding => binding !== sideBinding) : undefined;
 
+  // The topology's doors this record binds, in topology order, which the arms below the bindings choose among once there are two of them.
+  const bound = doors.filter(door => bindings.some(binding => binding.doorId === door.unique_id));
+  const scoped = bound.length >= 2;
+  const candidates = scoped ? bound : doors;
+
   const primaryDoorId = device.door?.unique_id;
 
   // Strategy 1: Use the door the record's own port binding names as the main door.
   if(mainBinding) {
 
     discovered.mainDoorLocationId = mainBinding.doorId;
-  } else if(primaryDoorId) {
+  } else if(primaryDoorId && (!scoped || candidates.some(door => door.unique_id === primaryDoorId))) {
 
-    // Strategy 2: Use the device's bound door as the main door.
+    // Strategy 2: Use the device's bound door as the main door. A record binding fewer than two doors takes it whether or not the topology carries it, because it
+    // can name a door the topology has not learned yet.
     discovered.mainDoorLocationId = primaryDoorId;
-  } else if(doors.some(door => door.unique_id === device.location_id)) {
+  } else if(candidates.some(door => door.unique_id === device.location_id)) {
 
-    // Strategy 3: Use the location the controller binds this device to, where it names one of the doors we were handed.
+    // Strategy 3: Use the location the controller binds this device to, where it names one of the doors the arms choose among.
     discovered.mainDoorLocationId = device.location_id;
-  } else if(doors.length >= 1) {
+  } else if(candidates.length >= 1) {
 
     // Strategy 4: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
-    const mainDoor = doors.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) && !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name));
+    const mainDoor = candidates.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) &&
+      !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name));
 
     // Strategy 5: Use the first door as the main door.
-    discovered.mainDoorLocationId = mainDoor?.unique_id ?? doors[0]?.unique_id;
+    discovered.mainDoorLocationId = mainDoor?.unique_id ?? candidates[0]?.unique_id;
   }
 
   // Find the side door, where one is in scope.
@@ -904,16 +917,16 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
     } else {
 
       // Strategy 2: Look for a door named like "side", "portillon", "pedestrian".
-      const sideDoor = doors.find(door => (door.unique_id !== discovered.mainDoorLocationId) &&
+      const sideDoor = candidates.find(door => (door.unique_id !== discovered.mainDoorLocationId) &&
         /portillon|side|pedestrian|pieton|wicket|back|secondary/i.test(door.name));
 
       if(sideDoor) {
 
         discovered.sideDoorLocationId = sideDoor.unique_id;
-      } else if(doors.length === 2) {
+      } else if(candidates.length === 2) {
 
         // Strategy 3: If we have exactly two doors, the other one is the side door.
-        const otherDoor = doors.find(door => door.unique_id !== discovered.mainDoorLocationId);
+        const otherDoor = candidates.find(door => door.unique_id !== discovered.mainDoorLocationId);
 
         discovered.sideDoorLocationId = otherDoor?.unique_id;
       }

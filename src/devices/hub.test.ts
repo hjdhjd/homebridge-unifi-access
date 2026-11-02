@@ -46,6 +46,8 @@ const SIDE_DOOR = "8f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
 // which is what tells a door read from the record apart from a name read from the topology.
 const NEW_MAIN = "b21c4d5e-6f70-4a2b-8193-c4d5e6f70819";
 const NEW_SIDE = "c32d5e6f-7081-4b3c-9204-d5e6f7081920";
+// Another hub's door in the controller's topology, which no binding of a gate's record names, so a gate handing it a role would drive a door it does not own.
+const OTHER_DOOR = "d43e6f70-8192-4c4d-a315-e6f708192a31";
 const READER_ID = "d8b3706bb73b";
 
 // The identity every unlock this plugin sends names itself by, written as a literal so the assertions prove the spelling rather than agreeing with whatever the constant
@@ -3206,6 +3208,27 @@ test("a gate carrying a third binding beside its side door's takes the side door
 
   assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1, "the side door follows the port that names it");
   assert.equal(gate.lines.length, 1, "and the main door stays where it stood, silently");
+});
+
+test("a gate whose record binds two of the controller's doors takes its roles from them, so another hub's door its location names takes neither", () => {
+
+  /* The topology lists another hub's door first, under a name the main arm matches, and the record's location names it. The bindings carry the names of the doors
+   * they serve, so neither identifies a role, and the arms below them choose among the gate's two bound doors alone.
+   */
+  const gate = makeGate({ doors: [ { name: "Front Door", unique_id: OTHER_DOOR }, { name: "Main Gate", unique_id: MAIN_DOOR },
+    { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ], options: ["Enable.Hub.Door.Service=Lock"], record: testHub({ device_type: "UGT",
+    extensions: [ portBinding("Main Gate", MAIN_DOOR), portBinding("Pedestrian Gate", SIDE_DOOR) ], location_id: OTHER_DOOR }) });
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: OTHER_DOOR });
+
+  assert.deepEqual(lockPayloads(gate), [], "an unlock of the other hub's door reaches neither of the gate's locks");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), []);
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: SIDE_DOOR });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "while the gate's own main door holds the main role");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and its own side door the side role");
 });
 
 /* The sentence a gate writes at debug level for one resolution of its doors, as the debug sink carries it: the bindings it resolved from and the door each role

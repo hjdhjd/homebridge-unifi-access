@@ -1318,6 +1318,68 @@ test("discoverDoorLocations ranks a port binding above every fallback, whichever
     { mainDoorLocationId: "door1" });
 });
 
+test("discoverDoorLocations chooses both roles among the doors a gate's record binds once it binds two of the topology's doors, in topology order", () => {
+
+  const binding = (name: string, doorId: string): Record<string, string> => ({ extension_name: "port_setting", target_name: name, target_value: doorId });
+  const record = (extensions: Record<string, string>[], overrides: Record<string, unknown> = {}): AccessStateDevice => ({ extensions,
+    ...overrides } as unknown as AccessStateDevice);
+
+  /* The topology lists another hub's door first, under a name the main arm matches, so that arm reading the whole topology would hand it the main role. The
+   * bindings carry the names of the doors they serve rather than the side door's port name, so neither identifies a role and the arms below them decide.
+   */
+  const doors = [ stateDoor("front", "Front Door"), stateDoor("gate", "Gate"), stateDoor("side", "Side Door") ];
+  const named = [ binding("Gate", "gate"), binding("Side Door", "side") ];
+
+  for(const [ order, extensions ] of [ [ "the gate's binding delivered first", named ], [ "the side door's binding delivered first", [...named].reverse() ] ] as const) {
+
+    assert.deepEqual(discoverDoorLocations({ device: record(extensions), doors, sideDoorEligible: true }),
+      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order);
+
+    // A location or an embedded door member naming the other hub's door decides nothing, where for a record binding fewer doors either would take the main role.
+    assert.deepEqual(discoverDoorLocations({ device: record(extensions, { location_id: "front" }), doors, sideDoorEligible: true }),
+      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the location naming the other hub's door");
+    assert.deepEqual(discoverDoorLocations({ device: record(extensions, { door: { unique_id: "front" } }), doors, sideDoorEligible: true }),
+      { mainDoorLocationId: "gate", sideDoorLocationId: "side" }, order + ", the embedded door naming the other hub's door");
+  }
+
+  // Another hub's door can read as a side door just as easily, and listed first it would take the side role from the side arm reading the whole topology.
+  const sideNamed = [ stateDoor("hub", "Side Gate Hub"), stateDoor("entrance", "Entrance Gate"), stateDoor("pedestrian", "Pedestrian Gate") ];
+
+  assert.deepEqual(discoverDoorLocations({ device: record([ binding("Entrance Gate", "entrance"), binding("Pedestrian Gate", "pedestrian") ]), doors: sideNamed,
+    sideDoorEligible: true }), { mainDoorLocationId: "entrance", sideDoorLocationId: "pedestrian" }, "another hub's door named like a side door");
+
+  /* Names neither arm matches leave the first door and the two-door arm to decide, so the doors those arms read must keep topology order: doors taken in the order
+   * the bindings arrived would trade the roles whenever the controller reordered its delivery. Choosing among the bound doors is also what resolves a side door
+   * here at all, where the whole topology holds more than two doors and no side name.
+   */
+  const neutral = [ stateDoor("front", "Front Door"), stateDoor("alpha", "Alpha"), stateDoor("beta", "Beta") ];
+  const unnamed = [ binding("Alpha", "alpha"), binding("Beta", "beta") ];
+
+  for(const [ order, extensions ] of [ [ "Alpha's binding delivered first", unnamed ], [ "Beta's binding delivered first", [...unnamed].reverse() ] ] as const) {
+
+    assert.deepEqual(discoverDoorLocations({ device: record(extensions), doors: neutral, sideDoorEligible: true }),
+      { mainDoorLocationId: "alpha", sideDoorLocationId: "beta" }, order);
+  }
+});
+
+test("discoverDoorLocations counts the doors a gate's record binds as topology doors, so a record binding fewer than two of them reads the whole topology", () => {
+
+  const binding = (name: string, doorId: string): Record<string, string> => ({ extension_name: "port_setting", target_name: name, target_value: doorId });
+  const doors = [ stateDoor("front", "Front Door"), stateDoor("gate", "Gate"), stateDoor("side", "Side Door") ];
+
+  /* Two bindings to one door, a shape a gate driving one door from both of its operators may publish, bind one topology door. Two bindings of which one names a door
+   * the topology has not learned bind one as well. Each resolves over the whole topology, so the other hub's door takes the main role by its name, as it does
+   * for a record binding nothing...a count of bindings rather than of doors would choose among the one bound door instead.
+   */
+  const sharedDoor = { extensions: [ binding("Gate Operator 1", "gate"), binding("Gate Operator 2", "gate") ] } as unknown as AccessStateDevice;
+  const absentDoor = { extensions: [ binding("Gate", "gate"), binding("Side Door", "elsewhere") ] } as unknown as AccessStateDevice;
+
+  assert.deepEqual(discoverDoorLocations({ device: sharedDoor, doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "front", sideDoorLocationId: "side" }, "two bindings to one door");
+  assert.deepEqual(discoverDoorLocations({ device: absentDoor, doors, sideDoorEligible: true }),
+    { mainDoorLocationId: "front", sideDoorLocationId: "side" }, "one binding to a door the topology lacks");
+});
+
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {
 
   const projected = coreRecord();
