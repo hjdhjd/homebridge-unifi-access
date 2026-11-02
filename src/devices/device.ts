@@ -348,9 +348,11 @@ export abstract class AccessDevice extends AccessBase {
 
     /* Inform the user if we've opted for something other than the defaults. homebridge-plugin-utils' logFeature resolves the option itself and speaks only on a
      * deviation, so it needs no guard of its own...and the scope pair handed to it is the pair every read on this device resolves at, which is what keeps what the
-     * user is told and what the plugin does answering one question. The label is a noun phrase because logFeature composes the sentence around it.
+     * user is told and what the plugin does answering one question. It writes through the logger of the level that set the option, so a global setting is said once
+     * rather than once per device. The label is a noun phrase because logFeature composes the sentence around it.
      */
-    this.platform.featureOptions.logFeature("Device.SyncName", "Device name synchronization", this.log, this.id, this.controller.id);
+    this.platform.featureOptions.logFeature({ controller: { id: this.controller.id, log: this.controller.log }, device: { id: this.id, log: this.log },
+      label: "Device name synchronization", log: this.platform.log, option: "Device.SyncName" });
 
     /* The custom name is announced as the name HomeKit carries, as HomeKit's naming rules clean it, rather than through logFeature, which would announce the value
      * as stored. A value HomeKit can carry nothing of is refused by the rule above, and a refusal the user would otherwise never see is said once, here.
