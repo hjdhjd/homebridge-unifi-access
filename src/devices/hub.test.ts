@@ -1916,6 +1916,41 @@ test("a topology dropping a device's record refuses at once, whatever the hub st
   await assert.rejects(triggerGet(current), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and the verdict reads the record that is gone");
 });
 
+// The record loop's statement, over the real store: a proof about what a delivery leaves on a record cannot rest on a double that moves the record whole. It reads what
+// the client took, past the change gate.
+test("the record loop states what the live record reads: a dropped record offline at once, its return online, and a v2 delivery offline", async () => {
+
+  const stated = (hub: HubHarness): unknown[] => hub.mqtt.published.filter(({ topic }) => topic === (HUB_SERIAL + "/availability")).map(({ payload }) => payload);
+  const { document, harness, store } = storedHub();
+  const running = harness.loop();
+
+  await settle();
+
+  assert.deepEqual(stated(harness), ["online"], "an adoption states the record it was adopted on");
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [], id: MAIN_DOOR, name: "Door Hub" }]) });
+  await settle();
+
+  assert.equal(harness.hub.uda.is_online, true, "the hub holds the last value it had through the removal delay");
+  assert.deepEqual(stated(harness), [ "online", "offline" ], "while the statement reads the record that is gone");
+
+  store.applyRefreshDocuments({ controller: null, topology: document });
+  await settle();
+
+  assert.deepEqual(stated(harness), [ "online", "offline", "online" ], "the record's return wakes the statement");
+
+  deliverV2(store, { online: false });
+  await settle();
+
+  assert.deepEqual(stated(harness), [ "online", "offline", "online", "offline" ], "and one false flag from a v2 delivery states offline");
+
+  harness.hub.cleanup();
+
+  await running;
+
+  assert.deepEqual(stated(harness), [ "online", "offline", "online", "offline" ], "and the removal's offline finds that statement standing, so it is the same publish");
+});
+
 test("a hub with no door control surface refuses every door command with the one sentence that says so", async () => {
 
   const hub = makeHub({ hubless: true });

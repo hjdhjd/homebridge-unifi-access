@@ -24,6 +24,7 @@ import type { AccessDevice } from "../devices/device.ts";
 import { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
 import { Buffer } from "node:buffer";
+import type { TestMqttPublish } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { signWebhookDelivery } from "unifi-access/testing";
@@ -288,7 +289,8 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
 /* The connection monitor a controller observes, with the transitions an arm hands it. The generator ends on the caller's own abort, which is the lifetime the real
  * monitor's iterator has, so a controller torn down mid-arm stops walking exactly as it does in the field.
  */
-function connectionDouble(): { connection: unknown; drive: (from: string, to: string) => Promise<void> } {
+function connectionDouble(): { connection: { isHealthy: boolean; isLost: boolean; observe: (opts: { signal: AbortSignal }) => AsyncGenerator };
+  drive: (from: string, to: string) => Promise<void>; } {
 
   const bus = new EventEmitter();
 
@@ -357,7 +359,7 @@ function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; devi
   return { calls, device: device as unknown as AccessDevice, errors };
 }
 
-test("the connection observer pushes reachability on every transition and restores only where a recovery completed", async (t) => {
+test("the connection observer states availability on every transition and restores only where a recovery completed", async (t) => {
 
   const monitor = connectionDouble();
   const harness = makeController({ connection: monitor.connection, controllerInfo: { host: { mac: CONTROLLER_MAC } } });
@@ -2894,4 +2896,237 @@ test("the debug echo carries the library's own sentence and its whole context, a
 
   assert.deepEqual(quiet.lines.slice(quietBefore).filter(line => line.includes("recovery is polling")),
     ["warn: " + quiet.controller.name + ": " + LOST_OPENING + ": the request timed out."], "with debug off the user's line is the whole of it");
+});
+
+// The topic the plugin's own statement goes on, and those of the controller and the hub the rows below stand up.
+const PLUGIN_TOPIC = "availability";
+const CONTROLLER_TOPIC = "112233445566/availability";
+const HUB_TOPIC = "AABBCCDDEE01/availability";
+
+// The user's setting that retires a departing accessory at once rather than after the delay.
+const DELAY_OFF = "Disable.Controller.DelayDeviceRemoval";
+
+// One retained statement, as the client double records it.
+function stated(topic: string, payload: "offline" | "online"): TestMqttPublish {
+
+  return { payload, retain: true, topic };
+}
+
+// The accessory a previous run left for the hub the rows below name, carrying the identity an orphan's statement goes out under.
+function restoredHub(): AccessAccessory {
+
+  return accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" }, "Restored Hub");
+}
+
+/* A real controller with the MQTT double in place of the client its login would build, over a hub whose record reads every flag available, or over no record at all for
+ * an arm about an accessory no device answers for. The double reads connected from construction, so its login has no session edge to cross and an arm drives each
+ * session itself.
+ *
+ * @param options - What the arm varies: the connection it moves, the controller document, the user's settings, and whether the hub's record stands.
+ *
+ * @returns The controller's harness, its client, its store, and the way to read and to establish a session.
+ */
+function availabilityController(options: { connection?: unknown; controllerInfo?: { host: { mac: string } } | null; options?: string[]; recordless?: boolean } = {}):
+{ harness: ControllerHarness; mqtt: TestMqttClient; newSession: () => void; statements: () => TestMqttPublish[]; store: ReturnType<typeof createStateStore> } {
+
+  const record = hubRecord({ alias: "", is_adopted: true, is_connected: true, is_online: true, name: "Plain Hub", unique_id: "plain" });
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(options.recordless ? [] : [record]) });
+
+  const harness = makeController({ connection: options.connection, controllerInfo: (options.controllerInfo === undefined) ? { host: { mac: CONTROLLER_MAC } } :
+    options.controllerInfo, handles: new Map([[ "plain", deviceHandle(record) ]]), options: options.options, store });
+  const mqtt = new TestMqttClient();
+
+  harness.controller.mqtt = mqtt as unknown as MqttClient;
+
+  return {
+
+    harness,
+    mqtt,
+    newSession: (): void => {
+
+      mqtt.connected = false;
+      mqtt.connected = true;
+    },
+    // Every availability statement since the last reading, in the order the client took them, so each arm reads only what its own step caused.
+    statements: (): TestMqttPublish[] => mqtt.published.splice(0).filter(({ topic }) => topic.endsWith(PLUGIN_TOPIC)),
+    store
+  };
+}
+
+test("a session states the plugin's availability, the controller's, then the device's, and a moved verdict states the controller's then the device's", async (t) => {
+
+  const { connection, drive } = connectionDouble();
+  const { harness, mqtt, newSession, statements } = availabilityController({ connection });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  assert.deepEqual(statements(), [stated(HUB_TOPIC, "online")], "an adoption states the device's own, and the login crossed no session to state the other");
+
+  newSession();
+
+  assert.deepEqual(statements(), [ stated(PLUGIN_TOPIC, "online"), stated(CONTROLLER_TOPIC, "online"), stated(HUB_TOPIC, "online") ],
+    "each session opens on the plugin's statement, then the controller's, ahead of every device's");
+
+  mqtt.published.length = 0;
+  connection.isHealthy = false;
+  await drive("healthy", "degraded");
+  await drive("degraded", "throttled");
+
+  assert.deepEqual(mqtt.published, [], "a blip moves no verdict, so it publishes nothing at all");
+
+  connection.isLost = true;
+  await drive("degraded", "lost");
+
+  assert.deepEqual(statements(), [ stated(CONTROLLER_TOPIC, "offline"), stated(HUB_TOPIC, "offline") ], "a loss states the controller, then the device");
+
+  await drive("lost", "reconnecting");
+
+  assert.deepEqual(statements(), [], "and reconnecting repeats nothing while the loss holds");
+
+  connection.isLost = false;
+  connection.isHealthy = true;
+  await drive("reconnecting", "healthy");
+
+  assert.deepEqual(statements(), [ stated(CONTROLLER_TOPIC, "online"), stated(HUB_TOPIC, "online") ], "a recovery states each online");
+
+  await mqtt.end();
+
+  assert.deepEqual(statements(), [ stated(CONTROLLER_TOPIC, "offline"), stated(HUB_TOPIC, "offline") ], "and a clean end states each offline, once");
+});
+
+test("a clean end states its offline whatever was stated last, because the broker has to hold it", async (t) => {
+
+  const monitor = connectionDouble();
+  const { harness, mqtt, statements } = availabilityController({ connection: monitor.connection });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  monitor.connection.isLost = true;
+  await monitor.drive("degraded", "lost");
+  statements();
+
+  await mqtt.end();
+
+  assert.deepEqual(statements(), [ stated(CONTROLLER_TOPIC, "offline"), stated(HUB_TOPIC, "offline") ], "offline already standing is stated again");
+});
+
+test("a controller reached with an API token alone states its availability under its address identity", async (t) => {
+
+  const { harness, newSession, statements } = availabilityController({ controllerInfo: null });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  statements();
+  newSession();
+
+  assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, "1-2-3-4/availability", HUB_TOPIC ]);
+});
+
+// A disabled device publishes and subscribes nothing, the removal of its restored accessory included, and each road to that removal is a row of its own, so a defect on
+// a later road is read rather than cut short by an earlier one.
+for(const { label, recordless } of [ { label: "its adoption gate, its record standing", recordless: false },
+  { label: "the orphan sweep's timer, its record gone", recordless: true } ]) {
+
+  test("a disabled device's removal by " + label + " publishes and subscribes nothing", async (t) => {
+
+    const { harness, mqtt, newSession, statements } = availabilityController({ options: ["Disable.Device.AABBCCDDEE01"], recordless });
+
+    t.after(() => harness.shutdown.abort());
+
+    harness.restore(restoredHub());
+
+    await harness.controller.login();
+
+    harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+    assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the accessory is gone");
+    assert.deepEqual(mqtt.published, [], "with nothing published");
+    assert.deepEqual(mqtt.subscriptions, [], "and nothing subscribed");
+
+    newSession();
+
+    assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, CONTROLLER_TOPIC ], "and a later session says nothing of it");
+  });
+}
+
+test("a device removed while running states one offline, and no later session repeats it", async (t) => {
+
+  const { harness, newSession, statements, store } = availabilityController({ options: [DELAY_OFF] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  statements();
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the device is removed");
+  assert.deepEqual(statements(), [stated(HUB_TOPIC, "offline")], "stating one offline");
+
+  newSession();
+
+  assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, CONTROLLER_TOPIC ], "and the next session says nothing of it");
+});
+
+test("an orphan's retirement states one retained offline, once its delay is served, and no later session repeats it", async (t) => {
+
+  const { harness, newSession, statements } = availabilityController({ recordless: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(restoredHub());
+
+  await harness.controller.login();
+
+  assert.deepEqual(statements(), [], "serving the delay states nothing");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the orphan is retired");
+  assert.deepEqual(statements(), [stated(HUB_TOPIC, "offline")], "stating its one offline, retained");
+
+  newSession();
+
+  assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, CONTROLLER_TOPIC ], "and the next session says nothing of it");
+});
+
+test("an accessory recording no identity retires with a broker client and states nothing, because there is no topic to state it on", async (t) => {
+
+  const { harness, statements } = availabilityController({ options: [DELAY_OFF], recordless: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" }, "Restored Hub"));
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the accessory is retired at the login's sweep");
+  assert.deepEqual(statements(), [], "with nothing stated, because it records no identity to state it under");
+});
+
+test("an orphan retired with no broker session states nothing, then or on the next session, which is the ruled limit of a statement with no session", async (t) => {
+
+  const { harness, mqtt, statements } = availabilityController({ options: [DELAY_OFF], recordless: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(restoredHub());
+  mqtt.connected = false;
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the orphan is retired at the login's sweep");
+  assert.deepEqual(mqtt.published, [], "with no session to take its statement");
+
+  mqtt.connected = true;
+
+  assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, CONTROLLER_TOPIC ], "and the session that follows says nothing of it");
 });

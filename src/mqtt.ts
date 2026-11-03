@@ -27,7 +27,7 @@ const TELEMETRY_GROUP = "Telemetry Topics";
  */
 export const mqttTopics = mqttTopicCatalog({
 
-  availability: { ...mqttAvailabilityEntry, devices: ["allDevices"], group: AVAILABILITY_GROUP },
+  availability: { ...mqttAvailabilityEntry, devices: [ "allDevices", "controller" ], group: AVAILABILITY_GROUP },
   doorbell: { devices: ["doorbellHub"], get: "`true` will trigger a publish event of the current doorbell ring status.", group: DOOR_GROUP, label: "doorbell",
     publish: "`true` when ringing, `false` when the ring ends.", topic: "doorbell" },
   dps: { devices: [ "ultra", "hub", "hubDoorMini", "gate", "enterprisePort" ], get: "`true` will trigger a publish event of the current door position sensor state.",

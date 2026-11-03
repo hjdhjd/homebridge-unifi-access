@@ -26,7 +26,7 @@ I've provided MQTT support for those that are interested - I'm genuinely curious
 
 `homebridge-unifi-access` will publish MQTT events if you've configured a broker in the controller-specific settings. The plugin supports a rich set of capabilities over MQTT. This includes:
 
-  * Device availability, stated on each device's own retained `availability` topic. A device is available only when its statement and the plugin-level `availability` statement both read `online`.
+  * Device and controller availability, each stated on a retained `availability` topic of its own.
   * Doorbell ring events.
   * Lock events, including triggering locks via MQTT.
   * Door position sensor (DPS) events.
@@ -75,9 +75,9 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 
 #### Availability Topics
 
-| Topic           | Access Device Type  | Message Published
-|-----------------|---------------------|----------------------------------
-| `availability`  | All devices         | `online` when the plugin can reach the device, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. A device is available only when this topic and the plugin-level `availability` topic both read `online`.
+| Topic           | Access Device Type       | Message Published
+|-----------------|--------------------------|----------------------------------
+| `availability`  | All devices, Controller  | `online` when the plugin can reach the device, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. A device is available only when this topic and the plugin-level `availability` topic both read `online`.
 
 #### Door and Lock Topics
 
@@ -108,7 +108,9 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 
 <!-- MQTT PUBLISHED:END -->
 
-Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to, and each time the plugin establishes a session with the broker, when every device restates its availability and the current value of each of its state topics whose HomeKit control is present. The `doorbell`, `unlock`, `sidedoor/unlock`, and `telemetry` topics report events rather than state, so they are never restated. A device's topic is published only while the HomeKit control it reports on is present: a control the user has turned off, or one the hardware is not reporting, publishes nothing, whether at a change, at an event, or when a session begins. Its get and set topics are subscribed only while that control is present, so an absent control answers no get and takes no set. When Homebridge shuts down cleanly, `homebridge-unifi-access` states `offline` on the `availability` topic of every device it manages before it ends its broker session, so the broker holds each device as unavailable while the plugin is not running.
+The controller's `availability` topic goes out under the controller's identity rather than a device's, the same identity the `telemetry` topic describes.
+
+Messages are published to MQTT when an action occurs on an Access device that triggers the respective event, when an MQTT message is received for one of the topics `homebridge-unifi-access` subscribes to, and each time the plugin establishes a session with the broker, when the controller restates its availability and every device restates its availability and the current value of each of its state topics whose HomeKit control is present. The `doorbell`, `unlock`, `sidedoor/unlock`, and `telemetry` topics report events rather than state, so they are never restated. A device's topic is published only while the HomeKit control it reports on is present: a control the user has turned off, or one the hardware is not reporting, publishes nothing, whether at a change, at an event, or when a session begins. Its get and set topics are subscribed only while that control is present, so an absent control answers no get and takes no set. When Homebridge shuts down cleanly, `homebridge-unifi-access` states `offline` on the `availability` topic of every device and controller it manages before it ends its broker session, so the broker holds each as unavailable while the plugin is not running.
 
 ### <A NAME="subscribe"></A>Topics Subscribed
 
@@ -133,6 +135,10 @@ The topics that `homebridge-unifi-access` subscribes to are:
 | `sidedoor/lock/set`  | UA Gate             | `true` to lock, `false` to unlock. This controls the side door lock relay.
 
 <!-- MQTT SUBSCRIBED:END -->
+
+A `set` message follows the same rule HomeKit does: while a device or its controller reads `offline` on its `availability` topic, `homebridge-unifi-access` refuses
+the message and logs an error rather than trying to carry it out. A brief interruption in the connection to the controller doesn't count, and messages are carried
+out as usual through one.
 
 ### <A NAME="unlock-attribution"></A>Unlock Attribution
 

@@ -234,12 +234,16 @@ export abstract class AccessDevice extends AccessBase {
     /* Observe our own record and keep everything downstream of it current. The loop is the only writer of uda after construction and the reducer's merge is its only
      * source, so a partial update from either notification dialect lands as a merge rather than as a truncating whole-record assignment.
      *
-     * A yield whose record has left the state is skipped in its entirety - no statement, no characteristic writes, no delivery - so a device inside its removal grace
-     * never emits an update about a record that is gone.
+     * Availability is stated ahead of everything else, because it reads the record that is live and not the one this device holds, so a record leaving the state is
+     * stated offline at once and through the removal delay, and the yield that brings it back wakes the statement that says so. A yield whose record has left the state
+     * withholds everything else - no characteristic writes, no delivery - so a device inside its removal grace never emits an update about a record that is gone.
      */
     this.controller.spawnLoop(this.name + " updates", async () => {
 
       for await (const projection of this.projection.observe({ signal: this.signal })) {
+
+        // State availability on this device's own topic, the one statement of it wherever it is triggered from.
+        this.publishAvailability();
 
         const record = projection.peek();
 
@@ -249,9 +253,6 @@ export abstract class AccessDevice extends AccessBase {
         }
 
         this.uda = record;
-
-        // State availability on this device's own topic, the one statement of it wherever it is triggered from.
-        this.publishAvailability();
 
         /* Sync the controller's name for this device into HomeKit, if configured to do so. homebridge-plugin-utils writes only the names that differ, the information
          * service's cut to HomeKit's length limit as that service carries them, so a yield whose names all match writes and saves nothing, a name past that limit

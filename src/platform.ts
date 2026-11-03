@@ -526,8 +526,9 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   /* The shutdown sequence, in the order homebridge-plugin-utils' graceful MQTT end asks for. Homebridge emits its shutdown without awaiting any listener and exits a
    * few seconds later, so this runs inside that window, with the stopping state already raised.
    *
-   *   1. End every controller's MQTT client gracefully, all at once. Each device registered its retained offline as a final word, and each client states its words
-   *      while its broker session still holds, waits for them within a bounded grace, and then tears itself down, which fires its will for the plugin-level topic.
+   *   1. End every controller's MQTT client gracefully, all at once. The controller and each device registered a retained offline as a final word, and each client
+   *      states its words while its broker session still holds, waits for them within a bounded grace, and then tears itself down, which fires its will for the
+   *      plugin-level topic.
    *   2. Abort the plugin's lifetime, which tears every controller down through its own terminal signal. It comes only once every end has finished, because an abort
    *      ahead of an end releases each word's registration with the lifetime it lives under and leaves the word unsaid.
    *

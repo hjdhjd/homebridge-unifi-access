@@ -576,7 +576,7 @@ test("a present record yields exactly one update carrying the wire's own packet 
   assert.equal(device.uda.alias, "Renamed");
 });
 
-test("a record that has left the state produces no update and no statement", async () => {
+test("a record that has left the state states offline at once and produces no update", async () => {
 
   const mqtt = new TestMqttClient();
   const harness = makeHarness([undefined], { mqtt });
@@ -586,7 +586,7 @@ test("a record that has left the state produces no update and no statement", asy
   await harness.loop();
 
   assert.equal(harness.emissions.length, 0, "a departed device must never emit a stale update");
-  assert.deepEqual(mqtt.published, [], "and states nothing");
+  assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "and the one statement reads the record that is gone");
   assert.equal(device.uda, held, "the held record must be left exactly as construction seeded it");
 });
 

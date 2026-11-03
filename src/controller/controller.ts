@@ -11,8 +11,8 @@ import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefus
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
-import { TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, membershipDelta,
-  mqttConnectionSettings, onAbort, prefixedLog, resolveNameOverride, retry, superviseLoop } from "homebridge-plugin-utils";
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
+  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, prefixedLog, resolveNameOverride, retry, superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
   deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac,
   serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
@@ -22,6 +22,7 @@ import type { AccessDevice } from "../devices/device.ts";
 import { AccessEvents } from "./events.ts";
 import { AccessHub } from "../devices/hub.ts";
 import type { AccessPlatform } from "../platform.ts";
+import { mqttTopics } from "../mqtt.ts";
 
 /**
  * The connect port: how a controller reaches its Access controller.
@@ -276,8 +277,8 @@ export class AccessController {
     /* Initialize MQTT, if configured. The library resolves both settings in one place, and the rule it applies is that a configured option answers in every state
      * it can be in: an option the user turned off, or enabled without giving it a value, is the user saying MQTT is off for this controller. The controller's own
      * configuration properties answer only where no option speaks. A null answer means there is nothing to connect to, so no client is constructed at all. The
-     * platform ends the client gracefully at shutdown, so each device states its final word while the session still holds, and the client binds to our terminal
-     * shutdown signal as well, so its connection can never outlive the plugin.
+     * platform ends the client gracefully at shutdown, so this controller and each device state their final words while the session still holds, and the client binds
+     * to our terminal shutdown signal as well, so its connection can never outlive the plugin.
      *
      * A controller reached with an API token alone answers by its address identity, so a per-controller option entry addresses it exactly as it addresses a
      * credentialed controller and its broker and topic resolve at controller scope like any other's. The configuration properties answer only where no option
@@ -286,6 +287,8 @@ export class AccessController {
     const mqttSettings = mqttConnectionSettings({ config: this.config, controller: this.id, featureOptions: this.platform.featureOptions });
 
     this.mqtt ??= mqttSettings && createMqttClient({ ...mqttSettings, log: this.log }, { signal: this.signal });
+
+    this.#configureAvailability();
 
     // Inform the user about the devices we see. This fires once here, so a device that arrives mid-run gets no retroactive line...the adding-to-HomeKit line covers
     // it instead.
@@ -307,7 +310,7 @@ export class AccessController {
     // Spawn the observe loop that keeps every hub's door state current.
     this.#startDoorStateObserver();
 
-    // Spawn the observe loop that pushes controller-level reachability to every device and heals what an outage staled.
+    // Spawn the observe loop that states the controller's availability and every device's on each transition, and heals what an outage staled.
     this.#startConnectionObserver();
 
     /* Bring our webhook registration into line, after the observers and off the startup path. The membership seed above constructs every hub synchronously, so by
@@ -878,14 +881,16 @@ export class AccessController {
     }
   }
 
-  /* Observe the controller's connection and keep every device honest about it. This is the single consumer of the connection's state stream in this process, and it
+  /* Observe the controller's connection and keep the broker honest about it. This is the single consumer of the connection's state stream in this process, and it
    * carries both of the controller-wide duties that stream drives on the one iterator.
    *
-   * Controller health is one fact with one reader. Rather than every device subscribing to a monitor that can only ever tell them all the same thing, this loop walks
-   * the configured devices and pushes each its recomputed reachability, while each device's own record loop pulls the per-device half of that composition. Push where
-   * the fact is controller-wide, pull where it is per-device.
+   * The controller's verdict is one fact with one reader. Rather than every device subscribing to a monitor that can only ever tell them all the same thing, this loop
+   * states the controller's own availability and then has each configured device state its own, while each device's own record loop pulls the per-device half of that
+   * verdict. Push where the fact is controller-wide, pull where it is per-device. Every statement is change-gated, so a transition that leaves a verdict where it stood,
+   * a blip above all, publishes nothing.
    *
-   * No initial walk is needed: the connection is healthy by construction where login() reaches this, and every carrier seeds its own value when it is configured.
+   * No initial walk is needed: a broker session's own registrations state every verdict, the controller's ahead of each device's, and a device states its own when it is
+   * configured.
    */
   #startConnectionObserver(): void {
 
@@ -894,6 +899,8 @@ export class AccessController {
       for await (const transition of this.client.connection.observe({ signal: this.signal })) {
 
         this.log.debug("Controller connection: %s -> %s.", transition.from, transition.to);
+
+        this.#publishAvailability();
 
         /* The per-device isolation is what keeps one device's fault from costing its siblings their push: without it, a single synchronous throw would unwind the
          * whole loop through superviseLoop's terminal catch and end availability pushes for every device on this controller. The restore walk below carries its own
@@ -1268,11 +1275,42 @@ export class AccessController {
     // Cleanup our device instance.
     accessDevice?.cleanup();
 
+    /* An accessory no instance answered for has no cleanup to say its last word, so an enabled device's retained offline is stated here, once: nothing registers it for a
+     * later session. A device the user disabled has no MQTT surface, this statement included, and its removal reaches here with no instance from its adoption gate and
+     * from the orphan sweep alike, so the option is what keeps that path silent. The option is read directly because the context's identity is a plain string, where
+     * hasFeature takes a decorated serial.
+     */
+    if(!accessDevice && accessory.context.id && this.platform.featureOptions.test("Device", accessory.context.id, this.id)) {
+
+      this.mqttPublish(mqttTopic(accessory.context.id, mqttTopics.availability.topic), MQTT_AVAILABILITY_OFFLINE, { ifChanged: true, retain: true });
+    }
+
     // Finally, remove it from our list of configured devices and HomeKit.
     this.configuredDevices.delete(accessory.UUID);
 
     // Unregister the accessory and delete its remnants from HomeKit and the plugin, through the platform's one exit for that.
     this.platform.unregisterAccessory(accessory);
+  }
+
+  /* Register this controller's own availability statement with the client, the one registration ahead of every device's, so its connect restatement opens each session's.
+   * The final word is what the graceful end states while its session holds, published under the very signal the end hands it, the one signal it admits, and with no
+   * change gate, because the broker has to hold offline whatever this controller last stated.
+   */
+  #configureAvailability(): void {
+
+    const mqtt = this.mqtt;
+
+    mqtt?.onConnect(() => this.#publishAvailability(), { signal: this.signal });
+    mqtt?.onEnd(async (signal: AbortSignal): Promise<void> => mqtt.publish(mqttTopic(this.id, mqttTopics.availability.topic), MQTT_AVAILABILITY_OFFLINE,
+      { retain: true, signal }), { signal: this.signal });
+  }
+
+  // State this controller's availability from its verdict, retained so a subscriber attaching later reads it, and change-gated so a path leaving it standing publishes
+  // nothing.
+  #publishAvailability(): void {
+
+    this.mqttPublish(mqttTopic(this.id, mqttTopics.availability.topic), this.isAvailable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE,
+      { ifChanged: true, retain: true });
   }
 
   /**

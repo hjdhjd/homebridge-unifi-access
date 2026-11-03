@@ -151,7 +151,7 @@ test("the catalog declares the wire topics every subscriber already relies on", 
   assert.equal(mqttTopics[MQTT_DEVICE_COLUMN].heading, "Access Device Type");
 });
 
-test("the catalog carries the library's availability entry for every device, under a heading of its own", () => {
+test("the catalog carries the library's availability entry for every device and the controller, under a heading of its own", () => {
 
   /* The label, the message text, and the tail are the library's, so every plugin in the family states a device's reachability in the same words on the same tail.
    * The catalog adds the device kinds and the heading alone, which is all a consumer spreading the entry is asked for.
@@ -159,6 +159,6 @@ test("the catalog carries the library's availability entry for every device, und
   const { devices, group, ...entry } = mqttTopics.availability;
 
   assert.deepEqual(entry, mqttAvailabilityEntry);
-  assert.deepEqual(devices, ["allDevices"]);
+  assert.deepEqual(devices, [ "allDevices", "controller" ]);
   assert.equal(group, "Availability Topics");
 });
