@@ -1,7 +1,7 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * device.test.ts: Tests for what every AccessDevice composes: the observe loop, reachability and its HomeKit and MQTT projections, the debug gate, identity capture,
- * timers and listeners bound to the device lifetime, and name synchronization.
+ * device.test.ts: Tests for what every AccessDevice composes: the observe loop, the availability verdict and what HomeKit and MQTT read from it, the debug gate,
+ * identity capture, timers and listeners bound to the device lifetime, and name synchronization.
  */
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, MqttOfflineError, mqttGetTopic, mqttSetTopic, mqttTopic } from "homebridge-plugin-utils";
@@ -97,7 +97,7 @@ class TimerDevice extends AccessDevice {
   }
 }
 
-// A device record that reads as fully online, which is what the availability sweep below writes from.
+// A device record that reads as fully online.
 function record(overrides: Record<string, unknown> = {}): AccessStateDevice & { mac: string } {
 
   return hubRecord({ alias: "", is_adopted: true, is_connected: true, is_online: true, ...overrides });
@@ -133,16 +133,12 @@ interface Harness {
   // The record the projection answers from, which an arm moves to read the verdict, undefined standing for a record that has left the state.
   live: { record: AccessStateDevice | undefined };
   loop: () => Promise<void>;
-  // What the device wrote to the service carrying no availability characteristic, which is nothing where the arm asked for no such service.
-  readonly otherWrites: { characteristic: string; value: unknown }[];
   projection: AccessDeviceProjection;
   // What the device attached to the bridge and what it later detached, by event name, so a registration and its teardown can be read as a pair.
   registrations: string[];
   removals: string[];
   // The UUIDs each save Homebridge accepted named, in the order it accepted them, which only an arm that put the accessory on the bridge can see.
   readonly saves: string[][];
-  // What the device wrote to the service carrying availability, which is every availability statement HomeKit was shown.
-  readonly statusWrites: { characteristic: string; value: unknown }[];
   warnings: string[];
 }
 
@@ -161,11 +157,11 @@ interface Harness {
  *
  * @param script - The records the projection yields, in order.
  * @param init   - The accessory's name, whether it is registered so its saves reach Homebridge, the device record construction seeds this device from, the
- *                 broker double the controller publishes through where an arm reads what reached the broker, the feature-option entries the engine resolves
- *                 against, and whether the accessory carries a service with no availability characteristic beside the one that has it.
+ *                 broker double the controller publishes through where an arm reads what reached the broker, and the feature-option entries the engine resolves
+ *                 against.
  */
 function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessoryName?: string; bridged?: boolean; construction?: AccessStateDevice & { mac: string };
-  mqtt?: TestMqttClient; options?: string[]; otherService?: boolean; } = {}): Harness {
+  mqtt?: TestMqttClient; options?: string[]; } = {}): Harness {
 
   const clock = new TestClock();
   const emissions: AccessEventPacket[] = [];
@@ -173,7 +169,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
   const removals: string[] = [];
   const infoLines: string[] = [];
   const warnings: string[] = [];
-  const stood = makeAccessory({ name: init.accessoryName, other: init.otherService });
+  const stood = makeAccessory({ name: init.accessoryName });
   const construction = init.construction ?? record();
   const engine = new FeatureOptions(featureOptionCategories, featureOptions, init.options ?? []);
   // A connection that reads healthy unless an arm says otherwise, which is the state a device is configured under in the field.
@@ -248,10 +244,6 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     },
     live,
     loop: (): Promise<void> => loop(),
-    get otherWrites(): { characteristic: string; value: unknown }[] {
-
-      return stood.other ? writesOn(stood.accessory, stood.other) : [];
-    },
     projection: projection as unknown as AccessDeviceProjection,
     registrations,
     removals,
@@ -259,24 +251,16 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
 
       return savesOn(api);
     },
-    get statusWrites(): { characteristic: string; value: unknown }[] {
-
-      return writesOn(stood.accessory, stood.carrier);
-    },
     warnings
   };
 }
 
-// The accessory a device is stood up on, and the services on it an arm reads the device's writes from.
+// The accessory a device is stood up on, and the service on it an arm reads the device's writes from.
 interface DeviceAccessory {
 
   accessory: TestAccessAccessory;
-  // The service carrying StatusActive, which is what the availability sweep writes.
-  carrier: Service;
   // The information service HAP gives every accessory at construction, which the device stamps and a rename writes into.
   information: Service;
-  // When asked for, a service carrying no availability characteristic, so a sweep can be read for what it left alone as well as for what it wrote.
-  other?: Service;
 }
 
 /* Stand up the accessory a device is built on: Homebridge's own, so the library's reflection over the first service's constructor finds HAP's information service
@@ -284,25 +268,20 @@ interface DeviceAccessory {
  * its information service's name at once, as HAP sets them together at construction, because the device reads its current name from that characteristic before it decides
  * whether a record's alias is a change.
  *
- * The carrier's StatusActive is attached here, because the sweep asks the service whether it carries the characteristic before it writes, and HAP attaches one only
- * when it is first asked for. The information service carries no availability characteristic, as the real one carries none, so the sweep passes over it. The
- * accessory records from the moment each service joins it, so what an arm reads is what the device wrote after construction.
+ * The accessory records from the moment each service joins it, so what an arm reads is what the device wrote after construction.
  *
- * @param options - name: the accessory's name, "Test Hub" by default; other: whether a service carrying no availability characteristic joins the carrier.
+ * @param options - name: the accessory's name, "Test Hub" by default.
  *
- * @returns The accessory and the services an arm reads writes from.
+ * @returns The accessory and the service an arm reads writes from.
  */
-function makeAccessory({ name = "Test Hub", other = false }: { name?: string; other?: boolean } = {}): DeviceAccessory {
+function makeAccessory({ name = "Test Hub" }: { name?: string } = {}): DeviceAccessory {
 
   const accessory = makeTestAccessory(name);
   const information = accessory.getService(Service.AccessoryInformation);
-  const carrier = accessory.addService(Service.ContactSensor, name);
 
   assert.ok(information, "HAP gives every accessory an information service at construction");
 
-  carrier.getCharacteristic(Characteristic.StatusActive);
-
-  return { accessory, carrier, information, other: other ? accessory.addService(Service.Switch, name) : undefined };
+  return { accessory, information };
 }
 
 test("availability composes the controller's verdict with the device's own record", async () => {
@@ -310,7 +289,8 @@ test("availability composes the controller's verdict with the device's own recor
   /* Both records read fully online, so what separates the two harnesses is the controller's connection alone. Each arm drives its own harness rather than one flipped
    * mid-script, because the script harness walks a single observe pass per loop call and replays nothing.
    */
-  const outage = makeHarness([record()]);
+  const lost = new TestMqttClient();
+  const outage = makeHarness([record()], { mqtt: lost });
 
   outage.connection.isLost = true;
 
@@ -319,16 +299,16 @@ test("availability composes the controller's verdict with the device's own recor
   await outage.loop();
 
   assert.equal(unavailable.isAvailable, false, "a device behind a lost controller is unavailable, whatever its own record last said");
-  assert.deepEqual(outage.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }],
-    "and the loop projects that verdict rather than the record's flags");
+  assert.deepEqual(lost.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "and the loop states that verdict rather than the record's flags");
 
-  const healthy = makeHarness([record()]);
+  const standing = new TestMqttClient();
+  const healthy = makeHarness([record()], { mqtt: standing });
   const available = new TestDevice(healthy.controller, healthy.projection, healthy.accessory, healthy.construction);
 
   await healthy.loop();
 
   assert.equal(available.isAvailable, true, "the same record behind a connection not lost reads available");
-  assert.deepEqual(healthy.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: true }]);
+  assert.deepEqual(standing.published, [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
 });
 
 test("a reader wrapped in the device's rule answers while the device is available and refuses with the communication-failure status while it is not, " +
@@ -373,55 +353,35 @@ test("a reader wrapped in the device's rule answers while the device is availabl
   assert.equal(read(), true, "and a record that returns answers");
 });
 
-test("a reachability refresh writes every service carrying availability and only those, reading the composition afresh each time", () => {
-
-  const harness = makeHarness([], { otherService: true });
-  const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
-
-  device.refreshReachability();
-
-  assert.deepEqual(harness.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: true }], "the service reporting the characteristic is written");
-  assert.deepEqual(harness.otherWrites, [], "and the one that does not report it is left alone");
-
-  // The push reads the composition at the moment it runs rather than a value captured when the device was built, which is what makes the controller observer's walk
-  // worth anything at all. The accessory's record restarts here, so what the second refresh wrote is read on its own.
-  harness.accessory.clearObservations();
-  harness.connection.isLost = true;
-  device.refreshReachability();
-
-  assert.deepEqual(harness.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }]);
-  assert.deepEqual(harness.otherWrites, []);
-});
-
-test("a reachability refresh states the device's availability on its own topic, retained, and only when the reading moves", () => {
+test("the availability statement goes on the device's own topic, retained, and only when the verdict moves", () => {
 
   const mqtt = new TestMqttClient();
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  device.refreshReachability();
-  device.refreshReachability();
+  device.publishAvailability();
+  device.publishAvailability();
 
-  /* The second refresh leaves reachability where the first put it, so the client's change gate answers it with nothing sent. A refresh runs on every record
-   * delivery, and a statement per delivery would repeat to the broker a word it already holds.
+  /* The second call leaves the verdict where the first put it, so the client's change gate answers it with nothing sent. The record loop states availability on every
+   * delivery, and a publish per delivery would repeat to the broker a word it already holds.
    */
   assert.deepEqual(mqtt.published, [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
 
   harness.connection.isLost = true;
-  device.refreshReachability();
-  device.refreshReachability();
+  device.publishAvailability();
+  device.publishAvailability();
 
-  assert.deepEqual(mqtt.published.slice(1), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "a move to unreachable is stated once, in the other word");
+  assert.deepEqual(mqtt.published.slice(1), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "a move to unavailable is stated once, in the other word");
 
   harness.connection.isLost = false;
-  device.refreshReachability();
+  device.publishAvailability();
 
   assert.deepEqual(mqtt.published.slice(2), [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }], "and the way back is stated once as well");
 });
 
 test("the record loop states availability on the deliveries that move it and on no other", async () => {
 
-  // Each reading arrives twice: the first delivery of each moves reachability, and the one behind it restates it with an unrelated member changed.
+  // Each reading arrives twice: the first delivery of each moves the verdict, and the one behind it restates it with an unrelated member changed.
   const mqtt = new TestMqttClient();
   const harness = makeHarness([ record(), record({ alias: "Renamed" }), record({ is_online: false }), record({ alias: "Renamed Again", is_online: false }) ],
     { mqtt });
@@ -430,8 +390,7 @@ test("the record loop states availability on the deliveries that move it and on 
 
   await harness.loop();
 
-  // HomeKit's availability is written on every delivery, while the broker hears only the deliveries that moved the reading.
-  assert.equal(harness.statusWrites.length, 4);
+  // The broker hears only the deliveries that moved the verdict.
   assert.deepEqual(mqtt.published, [ { payload: "online", retain: true, topic: AVAILABILITY_TOPIC }, { payload: "offline", retain: true, topic: AVAILABILITY_TOPIC } ]);
 });
 
@@ -441,7 +400,7 @@ test("removal states offline as the device's last word, past the end of its own 
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  device.refreshReachability();
+  device.publishAvailability();
 
   /* The removal's statement is held in flight across the abort that ends the device's lifetime, which is where a statement bound to that lifetime is withdrawn:
    * the double admits a held publish again, against the signal it carries, once it is released, as the client races its acknowledgement against that signal.
@@ -455,8 +414,8 @@ test("removal states offline as the device's last word, past the end of its own 
   assert.deepEqual(mqtt.published, [ { payload: "online", retain: true, topic: AVAILABILITY_TOPIC }, { payload: "offline", retain: true, topic: AVAILABILITY_TOPIC } ],
     "the offline goes out once, retained, and survives the abort it was issued ahead of");
 
-  // Nothing the removed device does afterwards reaches its topics. This refresh would state online over the offline if anything but the ended lifetime stopped it.
-  device.refreshReachability();
+  // Nothing the removed device does afterwards reaches its topics. This call would state online over the offline if anything but the ended lifetime stopped it.
+  device.publishAvailability();
   await settle();
 
   assert.equal(mqtt.published.length, 2, "a removed device states nothing further");
@@ -466,7 +425,7 @@ test("removal states offline as the device's last word, past the end of its own 
    */
   const readopted = new TestDevice(harness.controller, harness.projection, makeAccessory().accessory, harness.construction);
 
-  readopted.refreshReachability();
+  readopted.publishAvailability();
 
   assert.deepEqual(mqtt.published.slice(2), [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
 });
@@ -480,7 +439,7 @@ test("a device's final word is its retained offline, stated through the client's
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  device.refreshReachability();
+  device.publishAvailability();
 
   const before = mqtt.published.length;
 
@@ -490,7 +449,7 @@ test("a device's final word is its retained offline, stated through the client's
   assert.equal(mqtt.aborted, true, "and the end tears the client down once the word is said");
 });
 
-test("an unreachable device that has already stated offline states it again as its final word, because the word is never weighed against its last " +
+test("an unavailable device that has already stated offline states it again as its final word, because the word is never weighed against its last " +
   "statement", async () => {
 
   const mqtt = new TestMqttClient();
@@ -498,9 +457,9 @@ test("an unreachable device that has already stated offline states it again as i
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   harness.connection.isLost = true;
-  device.refreshReachability();
+  device.publishAvailability();
 
-  assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "the unreachable device has stated offline already");
+  assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "the unavailable device has stated offline already");
 
   const before = mqtt.published.length;
 
@@ -533,7 +492,7 @@ test("a device removed before shutdown states no final word, because its removal
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  device.refreshReachability();
+  device.publishAvailability();
   device.cleanup();
   await settle();
 
@@ -545,24 +504,24 @@ test("a device removed before shutdown states no final word, because its removal
 
 /* A contract arm over the client's own quieting, which is what keeps the word the device's last statement: once the end begins, a publish carrying any signal but the
  * one the end handed out is refused. On this side it goes red for a shutdown that states the words some way other than through the client's end. The device starts
- * unreachable, so the online its refresh would state is a change the change gate lets through rather than one it suppresses.
+ * unavailable, so the online it would state is a change the change gate lets through rather than one it suppresses.
  */
-test("a reachability change while the end states the word records no online behind it", async () => {
+test("an availability change while the end states the word records no online behind it", async () => {
 
   const mqtt = new TestMqttClient();
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   harness.connection.isLost = true;
-  device.refreshReachability();
+  device.publishAvailability();
 
   const before = mqtt.published.length;
-  // The word is held mid-flight, which holds the end inside its grace while the device's reachability comes back.
+  // The word is held mid-flight, which holds the end inside its grace while the device's availability comes back.
   const release = mqtt.holdPublishes();
   const ended = mqtt.end();
 
   harness.connection.isLost = false;
-  device.refreshReachability();
+  device.publishAvailability();
   release();
 
   assert.deepEqual(await ended, [], "the end records no refusal");
@@ -615,20 +574,19 @@ test("a present record yields exactly one update carrying the wire's own packet 
 
   // The loop is the only writer of the held record, and it wrote the record the yield carried.
   assert.equal(device.uda.alias, "Renamed");
-  assert.equal(harness.statusWrites.length, 1);
-  assert.deepEqual(harness.statusWrites[0], { characteristic: Characteristic.StatusActive.UUID, value: true });
 });
 
-test("a record that has left the state produces no update, no write, and no refresh", async () => {
+test("a record that has left the state produces no update and no statement", async () => {
 
-  const harness = makeHarness([undefined]);
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([undefined], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
   const held = device.uda;
 
   await harness.loop();
 
   assert.equal(harness.emissions.length, 0, "a departed device must never emit a stale update");
-  assert.equal(harness.statusWrites.length, 0);
+  assert.deepEqual(mqtt.published, [], "and states nothing");
   assert.equal(device.uda, held, "the held record must be left exactly as construction seeded it");
 });
 
@@ -636,14 +594,14 @@ test("a delivered update carrying an offline record drives availability false", 
 
   // The record rail is what carries connectivity: the newer notification dialect folds its own online field onto this member, so a device going offline reaches the
   // observe loop as an ordinary record update rather than as a signal of its own.
-  const harness = makeHarness([record({ is_online: false })]);
+  const mqtt = new TestMqttClient();
+  const harness = makeHarness([record({ is_online: false })], { mqtt });
 
   new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
   await harness.loop();
 
-  assert.equal(harness.statusWrites.length, 1, "every delivered update must write availability once");
-  assert.deepEqual(harness.statusWrites[0], { characteristic: Characteristic.StatusActive.UUID, value: false });
+  assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "a delivered offline record is stated offline");
 });
 
 test("a timer armed on a device is drained by cleanup and can never arm again afterwards", () => {

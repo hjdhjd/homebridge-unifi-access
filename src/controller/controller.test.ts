@@ -343,9 +343,9 @@ function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; devi
         throw new Error("this device is not answering");
       }
     },
-    refreshReachability: (): void => {
+    publishAvailability: (): void => {
 
-      calls.push("refresh");
+      calls.push("publish");
 
       if(options.faults) {
 
@@ -373,22 +373,22 @@ test("the connection observer pushes reachability on every transition and restor
   // A recovery concluding at healthy: availability is pushed, and the hook fires because the edge left the reconnecting state for something other than lost.
   await monitor.drive("reconnecting", "healthy");
 
-  assert.deepEqual(stub.calls, [ "refresh", "restore" ]);
+  assert.deepEqual(stub.calls, [ "publish", "restore" ]);
 
   // A recovery concluding while the transport's breaker happens to be open exits to throttled instead, and is every bit as completed as the one above.
   await monitor.drive("reconnecting", "throttled");
 
-  assert.deepEqual(stub.calls.slice(2), [ "refresh", "restore" ]);
+  assert.deepEqual(stub.calls.slice(2), [ "publish", "restore" ]);
 
   // An ordinary fault edge: availability is restated and stands where it was through a blip, and nothing recovered, so there is nothing to refresh behind it.
   await monitor.drive("healthy", "degraded");
 
-  assert.deepEqual(stub.calls.slice(4), ["refresh"]);
+  assert.deepEqual(stub.calls.slice(4), ["publish"]);
 
   // A plain throttle cycle arrives at healthy having done no stream work and missed no packets, which is what rules the arrival state out as the trigger on its own.
   await monitor.drive("throttled", "healthy");
 
-  assert.deepEqual(stub.calls.slice(5), ["refresh"]);
+  assert.deepEqual(stub.calls.slice(5), ["publish"]);
 });
 
 test("one device's fault on either of the observer's walks costs its siblings nothing", async (t) => {
@@ -409,8 +409,8 @@ test("one device's fault on either of the observer's walks costs its siblings no
   // One edge drives both walks, and the faulting device is first in the map on each of them.
   await monitor.drive("reconnecting", "healthy");
 
-  assert.deepEqual(faulting.calls, [ "refresh", "restore" ], "the faulting device is asked on both walks");
-  assert.deepEqual(sibling.calls, [ "refresh", "restore" ], "and the device behind it receives both, so each walk's isolation holds on its own");
+  assert.deepEqual(faulting.calls, [ "publish", "restore" ], "the faulting device is asked on both walks");
+  assert.deepEqual(sibling.calls, [ "publish", "restore" ], "and the device behind it receives both, so each walk's isolation holds on its own");
   assert.equal(faulting.errors.length, 2, "each fault is reported through the device's own log rather than unwinding the loop");
 });
 
@@ -778,13 +778,13 @@ test("the connection observer's lifetime is the controller's own terminal signal
 
   await monitor.drive("reconnecting", "healthy");
 
-  assert.deepEqual(stub.calls, [ "refresh", "restore" ]);
+  assert.deepEqual(stub.calls, [ "publish", "restore" ]);
 
   harness.shutdown.abort();
 
   await monitor.drive("reconnecting", "healthy");
 
-  assert.deepEqual(stub.calls, [ "refresh", "restore" ], "a transition driven after the plugin's lifetime ended walks nothing");
+  assert.deepEqual(stub.calls, [ "publish", "restore" ], "a transition driven after the plugin's lifetime ended walks nothing");
 });
 
 test("a departure with the delay on removes the accessory only once its whole delay has been served", () => {

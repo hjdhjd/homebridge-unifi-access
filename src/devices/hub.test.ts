@@ -1660,26 +1660,25 @@ test("rows landing while the startup seed is out outrank the answer that seed co
   assert.equal(harness.fetches.length, 1, "with no read asked for behind it");
 });
 
-test("a dressed sensor's availability read consults the live composition, answering under a healthy controller and refusing once the connection moves", async () => {
+/* An outage shows only as a refusal: nothing a device states on the broker reaches a service, so HomeKit learns of it on its next read. Nothing pushes here beyond the
+ * walk the controller's connection observer makes, so a refusal that follows the flip can only have come from the handler consulting the verdict.
+ */
+test("an outage writes nothing to HomeKit, and the next read refuses", async () => {
 
   const harness = makeGate();
-  const sensor = contactSensor(harness, AccessReservedNames.CONTACT_DPS);
+  const reading = contactSensor(harness, AccessReservedNames.CONTACT_DPS).getCharacteristic(Characteristic.ContactSensorState);
 
-  const availability = sensor.getCharacteristic(Characteristic.StatusActive);
-
-  assert.equal(await triggerGet(availability), true, "a sensor dressed under a healthy controller reads available");
+  await assert.doesNotReject(triggerGet(reading), "a sensor under a connection not lost answers");
 
   // The accessory's record restarts here, so the read of its writes below holds only what followed the flip.
   harness.accessory.clearObservations();
 
-  /* Nothing pushes from here: no observer walk and no record delivery runs in this arm. A refusal that follows the flip can therefore only have come from the
-   * handler consulting the composition, which is exactly what a dress that wrote the characteristic and registered nothing would fail by answering the cached value.
-   */
   harness.connection.isLost = true;
+  harness.hub.publishAvailability();
 
-  await assert.rejects(triggerGet(availability), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+  await assert.rejects(triggerGet(reading), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "a read taken after the connection moved is refused with the status HomeKit renders as Not Responding");
-  assert.deepEqual(writesOn(harness.accessory, sensor), [], "with no push behind it at all");
+  assert.deepEqual(harness.services.flatMap(service => writesOn(harness.accessory, service)), [], "with nothing written to any service");
 });
 
 // The characteristics no handler refuses, wherever they sit: the names HomeKit reads as identity and the user edits, and the event HAP answers null for without asking.
@@ -5349,12 +5348,11 @@ test("a hub creates a terminal input's sensor the moment its wiring reports live
       Characteristic.ContactSensorState.CONTACT_DETECTED, subtype + " is seeded from the reading its record carries");
   }
 
-  const availability = await Promise.all(TERMINAL_SUBTYPES.map(async (subtype): Promise<unknown> => {
+  await Promise.all(TERMINAL_SUBTYPES.map(async (subtype): Promise<void> => {
 
-    return triggerGet(contactSensor(harness, subtype).getCharacteristic(Characteristic.StatusActive));
+    assert.equal(await triggerGet(contactSensor(harness, subtype).getCharacteristic(Characteristic.ContactSensorState)),
+      Characteristic.ContactSensorState.CONTACT_DETECTED, subtype + " is dressed with the handler its reading answers reads from");
   }));
-
-  assert.deepEqual(availability, TERMINAL_SUBTYPES.map(() => true), "and every sensor is dressed with the availability it answers reads from");
 
   for(const sentence of TERMINAL_ENABLED) {
 
@@ -5995,12 +5993,12 @@ test("a sensor of tamper-capable hardware carries the characteristic from creati
   assert.deepEqual(topicPayloads(harness, "tamper"), ["true"], "while the topic carries every change of the held verdict, an adoption included");
 });
 
-test("a sensor the accessory arrived carrying is dressed at adoption from what the hub holds, and refuses availability and its tamper status once the " +
+test("a sensor the accessory arrived carrying is dressed at adoption from what the hub holds, and refuses its reading and its tamper status once the " +
   "device cannot be reached", async () => {
 
   const restored = carried(Service.ContactSensor, AccessReservedNames.CONTACT_REX);
 
-  /* What a previous run left in the accessory cache: a reading, a raised tamper status, and an availability, every one of them stale. The record below reads open
+  /* What a previous run left in the accessory cache: a reading, a raised tamper status, and a Status Active, every one of them stale. The record below reads open
    * and establishes no tamper reading, so a carried sensor written closed and raised is what tells a dressing that ran from one that skipped the sensor it found.
    */
   restored.updateCharacteristic(Characteristic.ContactSensorState, Characteristic.ContactSensorState.CONTACT_DETECTED);
@@ -6017,18 +6015,65 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
     "the reading the record carries replaces the stale one");
   assert.equal(sensor.getCharacteristic(Characteristic.StatusTampered).value, Characteristic.StatusTampered.NOT_TAMPERED,
     "nothing established renders normal, which a dressing that skipped the sensor it found would fail by leaving it raised");
-  assert.equal(await triggerGet(sensor.getCharacteristic(Characteristic.StatusActive)), true,
-    "the handler is registered on a sensor the hub never created, which a creation-only dressing would fail by answering the cached false");
+  assert.equal(sensor.testCharacteristic(Characteristic.StatusActive), false, "the Status Active it arrived with comes off");
+  assert.equal(await triggerGet(sensor.getCharacteristic(Characteristic.ContactSensorState)), Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
+    "the handler is registered on a sensor the hub never created");
   assert.strictEqual(await triggerGet(sensor.getCharacteristic(Characteristic.StatusTampered)), Characteristic.StatusTampered.NOT_TAMPERED,
     "and its tamper status is answered by the handler registered on that same sensor");
 
   harness.connection.isLost = true;
 
-  await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.StatusActive)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
-    "and a read once the connection moved is refused rather than answered from what was last written");
+  await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.ContactSensorState)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+    "and a read once the connection moved is refused rather than answered from what was last written, which a creation-only dressing would answer from the cache");
   await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.StatusTampered)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "and so is its tamper status");
   assert.deepEqual(topicPayloads(harness, "tamper"), [], "while an adoption publishes nothing");
+});
+
+/* No fact about a contact sensor could drive Status Active, so none carries it on any subtype, and a stale copy restored from the cache comes off at adoption. The
+ * accessory is put on the bridge because a characteristic coming off changes what Homebridge's cache holds, so what an arm reads is what that cache is handed.
+ */
+test("no contact sensor carries Status Active on any subtype, whether created fresh or carried from the cache with a stale value", () => {
+
+  const positions = [ AccessReservedNames.CONTACT_DPS, AccessReservedNames.CONTACT_DPS_SIDE ];
+  const gateFor = (existing: Service[] = []): HubHarness => makeGate({ bridged: true, doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], existing,
+    record: testHub({ configs: [], device_type: "UGT" }) });
+  const fresh: [ HubHarness, string[] ][] = [ [ gateFor(), positions ], [ makeHub({ record: wiredHub("on") }), TERMINAL_SUBTYPES ] ];
+
+  for(const [ harness, subtypes ] of fresh) {
+
+    for(const subtype of subtypes) {
+
+      assert.equal(contactSensor(harness, subtype).testCharacteristic(Characteristic.StatusActive), false, "a fresh " + subtype + " carries none");
+    }
+  }
+
+  // A sensor the cache hands back, with the value a previous run last wrote.
+  const stale = (subtype: string): Service => {
+
+    const restored = carried(Service.ContactSensor, subtype);
+
+    restored.updateCharacteristic(Characteristic.StatusActive, false);
+
+    return restored;
+  };
+
+  const held: [ HubHarness, string[] ][] = [ [ gateFor(positions.map(stale)), positions ],
+    [ makeHub({ bridged: true, existing: TERMINAL_SUBTYPES.map(stale), record: wiredHub("on") }), TERMINAL_SUBTYPES ] ];
+
+  for(const [ harness, subtypes ] of held) {
+
+    for(const subtype of subtypes) {
+
+      assert.equal(contactSensor(harness, subtype).testCharacteristic(Characteristic.StatusActive), false, "a carried " + subtype + " loses the one it arrived with");
+    }
+
+    assert.deepEqual(windowSaves(harness), [[harness.accessory.UUID]], "and the accessory reaches the next save without it");
+
+    restateRecord(harness, { alias: "Renamed" });
+
+    assert.deepEqual(windowSaves(harness), [], "while a later pass finds nothing to take off and saves nothing");
+  }
 });
 
 test("a tamper capability appearing mid-run dresses every standing sensor once, from the verdict the delivery brings", () => {

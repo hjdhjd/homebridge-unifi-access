@@ -664,12 +664,11 @@ export class AccessHub extends AccessDevice {
      */
     this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, (packet) => this.handleRemoteUnlock(packet));
 
-    /* State this device's reachability once adoption is complete. Neither trigger that restates it reaches a device at adoption: the record loop yields on the first
-     * change after it starts rather than on the record it starts from, and the controller's connection observer pushes on a transition alone. The sensors were
-     * dressed with this same reading above, so what this adds is the MQTT statement, which a device adopted mid-session would otherwise withhold until its record
-     * next moved.
+    /* State this device's availability once adoption is complete. Neither trigger that restates it reaches a device at adoption: the record loop yields on the first
+     * change after it starts rather than on the record it starts from, and the controller's connection observer walks on a transition alone, so a device adopted
+     * mid-session would otherwise withhold the statement until its record next moved.
      */
-    this.refreshReachability();
+    this.publishAvailability();
   }
 
   // Configure the access method switches for HomeKit.
@@ -1191,7 +1190,7 @@ export class AccessHub extends AccessDevice {
    * The transition the gate answers tells a created sensor from one found on the accessory, and the pass tells whether a found sensor is one an earlier pass
    * dressed: restored from the accessory cache, it carries the values it last held and none of its handlers, so adoption dresses it exactly as a creation does. The
    * dressing is the only writer of a sensor's starting values, with the tamper attach below the one exception; every change after it reaches the sensor through the
-   * sweeps alone.
+   * reading's own writers and the tamper sweep alone.
    *
    * The gate's own answer is what this reads rather than a second lookup, because a lookup after the gate would find the sensor the gate just created and answer
    * it as kept, and a sensor created on a device update would go undressed.
@@ -1220,6 +1219,14 @@ export class AccessHub extends AccessDevice {
       this.platform.persistence.persist(this.accessory);
     }
 
+    /* No contact sensor carries Status Active, because no fact about a sensor could drive it: reachability is No Response's to say, and nothing here can be switched off.
+     * A sensor restored from the cache can still carry one, so it comes off on every pass, the accessory marked for the next save when it does.
+     */
+    if(presenceChanged(validCharacteristic({ characteristic: this.hap.Characteristic.StatusActive, service, validate: false }))) {
+
+      this.platform.persistence.persist(this.accessory);
+    }
+
     if(dressing) {
 
       this.#dressSensor(service, reading);
@@ -1227,7 +1234,7 @@ export class AccessHub extends AccessDevice {
 
     /* The tamper status is written, and its reader registered, from the held verdict whenever this pass put the characteristic on the sensor, or the sensor is
      * being dressed and the characteristic already stands - which is a sensor restored from the cache on capable hardware. So a standing sensor whose
-     * characteristic stood already keeps what the sweeps last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
+     * characteristic stood already keeps what the tamper sweep last wrote, a sensor carrying none has nothing to write, and no sensor is written twice for one event.
      */
     if((tamper === "attached") || (dressing && (tamper === "kept"))) {
 
@@ -1236,13 +1243,10 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  /* Dress a sensor the first time this hub holds it: its reading and its availability. HomeKit carries an optional characteristic only once something has written
-   * it, so the availability write is what puts that characteristic on the sensor at all, which is what lets the availability sweep reach every sensor without the
-   * hub keeping a roster. The availability handler answers every later read from the live composition through the device's Not Responding rule, so a read while
-   * the device can be reached shows where it stands even when nothing has pushed since the composition last moved, and a read while it cannot is refused rather
-   * than answered from the last push. The reading's handler answers the stored reading through that same rule, so a sensor that cannot be reached refuses its
-   * reading rather than showing the last one. The tamper status is written by the settling helper above, where the presence reconcile left the characteristic
-   * standing, which is what lets the tamper sweep reach every sensor for the same reason.
+  /* Dress a sensor the first time this hub holds it: its reading. The reading's handler answers the stored reading through the device's Not Responding rule, so a sensor
+   * the plugin cannot vouch for refuses its reading rather than showing the last one, and that refusal is all an outage shows on a sensor. The tamper status is written
+   * by the settling helper above, where the presence reconcile left the characteristic standing, which is what lets the tamper sweep reach every sensor without the hub
+   * keeping a roster, because HomeKit carries an optional characteristic only once something has written it.
    */
   #dressSensor(service: Service, reading: CharacteristicValue): void {
 
@@ -1250,8 +1254,6 @@ export class AccessHub extends AccessDevice {
 
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, reading);
     contact.onGet(this.answering(() => contact.value ?? reading));
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isAvailable);
-    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(this.answering(() => this.isAvailable));
   }
 
   /* How a tamper verdict renders in HomeKit - the one statement of it, read by the settling helper's own write and by the projection's sweep. Nothing established
@@ -3164,8 +3166,8 @@ export class AccessHub extends AccessDevice {
 
   /* Handle a device update, delivered once our own record has folded.
    *
-   * Availability is deliberately absent from here: the device base's record loop writes it from the same delivery, to every service that reports the characteristic, so
-   * an arm here would be a second updater of one reading. Lock and door position are absent for the same reason - the door-state model carries both, and its
+   * Availability is deliberately absent from here: the device base's record loop states it from the same delivery and writes no service, so an arm here would be a
+   * second statement of one reading. Lock and door position are absent for the same reason - the door-state model carries both, and its
    * delivery owns them. The access method model is a reading this handler does own, under that same doctrine: the record restates its configuration rows on every
    * delivery, so this is where they reach the model, and the switches read the model rather than the rows.
    */

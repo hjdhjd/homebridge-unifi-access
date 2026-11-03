@@ -9,7 +9,7 @@ import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessH
 import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
   Nullable, ValidServiceOptions, ValidServiceResult } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, ownedName, prefixedLog,
-  presenceChanged, resolveNameOverride, setAccessoryName, setServiceName, updateServices, validService, watchServiceName } from "homebridge-plugin-utils";
+  presenceChanged, resolveNameOverride, setAccessoryName, setServiceName, validService, watchServiceName } from "homebridge-plugin-utils";
 import { deviceDisplayName, deviceSerial, recordAvailable, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
@@ -234,7 +234,7 @@ export abstract class AccessDevice extends AccessBase {
     /* Observe our own record and keep everything downstream of it current. The loop is the only writer of uda after construction and the reducer's merge is its only
      * source, so a partial update from either notification dialect lands as a merge rather than as a truncating whole-record assignment.
      *
-     * A yield whose record has left the state is skipped in its entirety - no refresh, no characteristic writes, no delivery - so a device inside its removal grace
+     * A yield whose record has left the state is skipped in its entirety - no statement, no characteristic writes, no delivery - so a device inside its removal grace
      * never emits an update about a record that is gone.
      */
     this.controller.spawnLoop(this.name + " updates", async () => {
@@ -250,8 +250,8 @@ export abstract class AccessDevice extends AccessBase {
 
         this.uda = record;
 
-        // Project availability from the composed reachability, which is the one statement of that projection wherever it is triggered from.
-        this.refreshReachability();
+        // State availability on this device's own topic, the one statement of it wherever it is triggered from.
+        this.publishAvailability();
 
         /* Sync the controller's name for this device into HomeKit, if configured to do so. homebridge-plugin-utils writes only the names that differ, the information
          * service's cut to HomeKit's length limit as that service carries them, so a yield whose names all match writes and saves nothing, a name past that limit
@@ -288,27 +288,17 @@ export abstract class AccessDevice extends AccessBase {
     });
   }
 
-  /* Restate this device's availability to every service that carries the characteristic, and on this device's own MQTT availability topic. The controller's
-   * connection observer pushes it whenever controller-level reachability may have moved, and this device's own record loop calls it on every delivery, so every
-   * scope the composition spans reaches HomeKit and the broker through one statement rather than through a writer each.
+  /* State this device's availability on its own topic, read from the same verdict every wrapped handler refuses on, so what HomeKit is refused and what the broker holds
+   * cannot disagree. The controller's connection observer calls it whenever the controller's half may have moved and this device's own record loop calls it on every
+   * delivery, so every scope the verdict spans reaches the broker through one statement. An outage writes nothing to HomeKit: a refusal is answered on the next read, so
+   * nothing here pushes to a service. The statement is retained, so a subscriber attaching mid-session reads the last one without waiting for the next, and it composes
+   * with the plugin-level statement the client makes: a device is available only when both read online. A subclass's broker-session restatement opens with it.
    *
-   * The characteristic's own value is the single source of what HomeKit was last shown, so nothing here shadows it with a flag that could drift from it. The MQTT
-   * statement keeps no copy either: the client's change gate is what remembers the last statement it delivered.
+   * It is change-gated because the record loop states it on every delivery. The client remembers what it last delivered on the topic and forgets it at every broker
+   * session, so a delivery that leaves the verdict where it stood publishes nothing, and the first statement after an outage always goes out. Nothing here keeps a copy
+   * of its own, because the client's change gate is what remembers the last statement it delivered.
    */
-  public refreshReachability(): void {
-
-    updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isAvailable);
-    this.publishAvailability();
-  }
-
-  /* State this device's availability on its own topic, read from the same composition every StatusActive carrier reads, so what HomeKit is shown and what the broker
-   * holds cannot disagree. The statement is retained, so a subscriber attaching mid-session reads the last one without waiting for the next, and it composes with
-   * the plugin-level statement the client makes: a device is available only when both read online. A subclass's broker-session restatement opens with it.
-   *
-   * It is change-gated because the record loop refreshes reachability on every delivery. The client remembers what it last delivered on the topic and forgets it
-   * at every broker session, so a delivery that leaves reachability where it stood publishes nothing, and the first statement after an outage always goes out.
-   */
-  protected publishAvailability(): void {
+  public publishAvailability(): void {
 
     const payload: MqttAvailabilityPayload = this.isAvailable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
 
@@ -319,7 +309,7 @@ export abstract class AccessDevice extends AccessBase {
    * because a recovery relaunches the stream without replaying the packets the gap swallowed - so anything a device maintains from that rail may be standing on a
    * reading the controller has since moved past.
    *
-   * The base keeps no such state beyond the availability refreshReachability above already restates, and a device class that does keep some overrides this.
+   * The base keeps no such state beyond the availability publishAvailability above already restates, and a device class that does keep some overrides this.
    */
   public onConnectionRestored(): void {
 

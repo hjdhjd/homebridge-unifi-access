@@ -903,7 +903,7 @@ export class AccessController {
 
           try {
 
-            device.refreshReachability();
+            device.publishAvailability();
           } catch(error) {
 
             device.log.error("Unable to update the availability state: %s.", formatErrorMessage(error));
