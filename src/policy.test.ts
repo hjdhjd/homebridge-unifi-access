@@ -20,7 +20,7 @@ import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStrand
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, gateDoorRelayKey, hasDpsEvidence, hubSensorChoices,
   hubSensorModels,
   isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
-  reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
+  reclaimFenceOpen, recordAvailable, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -1192,6 +1192,19 @@ test("deviceDisplayName puts a resolved custom name ahead of every other candida
     "a custom name names the device before the walk reaches the alias, so an alias HomeKit cannot carry is not reported");
   assert.deepEqual(deviceDisplayName(coreRecord({ alias: "Front Door" }), { override: null }), { name: "Front Door", passedOver: null },
     "no custom name is the device's own name");
+});
+
+test("recordAvailable reads a record vouching for its device only when every flag is true, and a record gone never does", () => {
+
+  const whole = hubRecord({ is_adopted: true, is_connected: true, is_online: true });
+
+  assert.equal(recordAvailable(whole), true, "every flag true");
+  assert.equal(recordAvailable(undefined), false, "a record gone");
+
+  for(const flag of [ "is_adopted", "is_connected", "is_managed", "is_online" ]) {
+
+    assert.equal(recordAvailable({ ...whole, [flag]: false }), false, flag + " false");
+  }
 });
 
 test("isManagedRecord admits only a managed record whose hardware identity is established", () => {

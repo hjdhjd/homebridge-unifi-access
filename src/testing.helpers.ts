@@ -2,7 +2,8 @@
  *
  * testing.helpers.ts: The fixture builders more than one suite reads - the Homebridge runtime and the builder of every Homebridge API double, the accessories
  * built on that runtime and the readers of what HAP recorded on them, the line a name watch logs as it restores a name, the topology documents, the configuration
- * rows, a UA Gate's port bindings, the managed device records, and the platform and controller doubles every suite stands its devices up over.
+ * rows, a UA Gate's port bindings, the managed device records, the platform and controller doubles every suite stands its devices up over, and the cast that reads a
+ * real platform's plumbing.
  *
  * Every accessory, service and characteristic a suite touches is the real thing. This file loads the Homebridge runtime once, through homebridge-plugin-utils'
  * Homebridge double, and makeTestApi builds every API double a suite uses over it, so an accessory is Homebridge's own PlatformAccessory over the hap-nodejs copy
@@ -407,6 +408,21 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
   return surface as unknown as AccessPlatform;
 }
 
+/* A real platform's own plumbing as an arm drives it: the controllers it constructed, the launch that starts them, and the reclaim that consumes their reports. All
+ * three are private, which is right - nothing in the plugin reads them from outside - so this states the cast once for every arm that reaches in.
+ */
+export interface PlatformInternals {
+
+  controllers: AccessController[];
+  launchControllers: () => void;
+  reclaimStranded: (reports: Promise<{ controller: AccessController; outcome: AccessLoginOutcome }>[]) => Promise<void>;
+}
+
+export function platformInternals(platform: AccessPlatform): PlatformInternals {
+
+  return platform as unknown as PlatformInternals;
+}
+
 /**
  * The saves Homebridge accepted on an API double, in the order it accepted them, each read as the UUIDs of the accessories it named. A save is one update call, so
  * the accessories one save window gathered read as one entry however often each was marked, and an accessory off the bridge, which the persistence never hands
@@ -427,7 +443,7 @@ export function savesOn(api: TestHomebridgeApi): string[][] {
  * reads of its controller, so a member the plugin starts reading enters here by the same grep, and a double missing a listed member is a compile error in this one
  * place rather than a silent fallback at every site that stands one up.
  */
-type ControllerSurface = Pick<AccessController, "client" | "config" | "events" | "getDeviceName" | "hasFeature" | "id" | "log" | "login" | "mqtt" |
+type ControllerSurface = Pick<AccessController, "client" | "config" | "events" | "getDeviceName" | "hasFeature" | "id" | "isAvailable" | "log" | "login" | "mqtt" |
   "mqttPublish" | "name" | "ownershipKey" | "platform" | "reclaimClaims" | "reclaimKeys" | "resolveDeviceModel" | "signal" | "spawnLoop">;
 
 /* The client members the plugin reads, each optional because an arm supplies only the ones its path reaches: the official surface and the transport are whatever the
@@ -437,7 +453,7 @@ type ControllerSurface = Pick<AccessController, "client" | "config" | "events" |
 export interface ControllerClientDouble {
 
   capabilities?: Pick<AccessCapabilities, "mode">;
-  connection?: { readonly isHealthy: boolean };
+  connection?: { readonly isHealthy?: boolean; readonly isLost: boolean };
   doorStates?: ReadonlyMap<string, AccessDoorStateEntry>;
   official?: unknown;
   on?: (event: string, handler: (packet: AccessEventPacket) => void) => Disposable;
@@ -498,7 +514,7 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
   const resolveDeviceModel = options.resolveDeviceModel ?? deviceModel;
   const surface: ControllerSurface = {
 
-    client: { capabilities: { mode: "credential" }, connection: { isHealthy: true }, doorStates: new Map<string, AccessDoorStateEntry>(), official: null,
+    client: { capabilities: { mode: "credential" }, connection: { isLost: false }, doorStates: new Map<string, AccessDoorStateEntry>(), official: null,
       on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }),
       state: { snapshot: (): unknown => ({ devices: new Map(), doors: new Map() }) }, transport: null,
       ...options.client } as unknown as AccessClient,
@@ -507,6 +523,11 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
     getDeviceName: options.getDeviceName ?? ((): string => "Test Hub [UA Hub]"),
     hasFeature: options.hasFeature ?? ((option: string, device?: DecoratedSerial): boolean => platform.featureOptions.test(option, device, id)),
     id,
+    // The controller's verdict as the real getter reads it, so an arm moves it through the connection its client holds rather than by naming an answer of its own.
+    get isAvailable(): boolean {
+
+      return !this.client.connection.isLost;
+    },
     log: { ...silentLog(), ...options.log },
     login: options.login ?? (async (): Promise<AccessLoginOutcome> => "reporting"),
     mqtt: mqtt as unknown as Nullable<MqttClient>,

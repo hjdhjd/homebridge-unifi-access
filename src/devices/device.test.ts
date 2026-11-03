@@ -119,17 +119,19 @@ interface Harness {
   clock: TestClock;
   // The admission record this device is constructed on - the narrowed record membership admits a device by, and the source of the identity a device captures once.
   construction: AccessStateDevice & { mac: string };
+  // What the controller's connection answers about itself, in a holder the client double reads live so an arm can state it before the device is stood up and move it
+  // afterwards: the first fault's flag, which only a blip's arm sets false, and the verdict the library reaches once it has concluded the connection lost.
+  connection: { isHealthy: boolean; isLost: boolean };
   controller: AccessController;
   emissions: AccessEventPacket[];
   // The engine this harness seeded, so an arm can ask it the same question the device asks it.
   featureOptions: FeatureOptions;
-  // What the controller's connection answers about its own health, in a holder the client double reads live so an arm can state it before the device is stood up
-  // and move it afterwards.
-  health: { isHealthy: boolean };
   // The lines the deviation log lands on, rendered as the logger would render them. It speaks at info, which is the channel a user reads at startup.
   infoLines: string[];
   // What the device wrote to the accessory's information service, the identity stamp and a rename's names among them.
   readonly infoWrites: { characteristic: string; value: unknown }[];
+  // The record the projection answers from, which an arm moves to read the verdict, undefined standing for a record that has left the state.
+  live: { record: AccessStateDevice | undefined };
   loop: () => Promise<void>;
   // What the device wrote to the service carrying no availability characteristic, which is nothing where the arm asked for no such service.
   readonly otherWrites: { characteristic: string; value: unknown }[];
@@ -144,14 +146,14 @@ interface Harness {
   warnings: string[];
 }
 
-/* Build the harness around one scripted observation. The projection yields once per entry in the script and answers peek() with that entry, so an entry of undefined
- * is a record that left the state between the yield and the read - the removal-grace window.
+/* Build the harness around one scripted observation. The projection answers peek() live, as the library's does: it starts at the construction record and each scripted
+ * record takes its place ahead of the yield, so an entry of undefined is a record that left the state between the yield and the read - the removal-grace window.
  *
  * The platform double carries the real feature-option engine, seeded with whatever entries the arm configures, and a warn channel that captures what it is handed.
  * That is what lets the debug arms drive a device's own gate end to end - the composition, the scope resolution, and the channel the line lands on - rather than
  * asserting against a stub that decided the answer for them.
  *
- * The controller is the shared double, told only what this suite varies: the health holder its client reads live, the registration and emission recorders, the
+ * The controller is the shared double, told only what this suite varies: the connection holder its client reads live, the registration and emission recorders, the
  * identity, the broker double an arm reads publishes from, the platform above, and the loop capture. Its device name and its own name are separate members there,
  * so a rendered prefix an arm reads shows for itself that no controller half reached it.
  *
@@ -175,8 +177,8 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
   const construction = init.construction ?? record();
   const engine = new FeatureOptions(featureOptionCategories, featureOptions, init.options ?? []);
   // A connection that reads healthy unless an arm says otherwise, which is the state a device is configured under in the field.
-  const health = { isHealthy: true };
-  let peekIndex = 0;
+  const connection = { isHealthy: true, isLost: false };
+  const live: { record: AccessStateDevice | undefined } = { record: construction };
   let loop: () => Promise<void> = async (): Promise<void> => undefined;
 
   const projection = {
@@ -184,12 +186,14 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     config: construction,
     observe: async function *(): AsyncGenerator {
 
-      for(const _entry of script) {
+      for(const entry of script) {
+
+        live.record = entry;
 
         yield projection;
       }
     },
-    peek: (): AccessStateDevice | undefined => script[peekIndex++]
+    peek: (): AccessStateDevice | undefined => live.record
   };
 
   // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this device's persistence made.
@@ -211,20 +215,11 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
 
   const controller = makeControllerDouble({
 
-    /* The client the availability composition reads its controller-wide half through. The nesting is the composition's own read path, and it matters because the
-     * shared double spreads this client over a default whose connection always reads healthy...a holder placed anywhere else is ignored, and the composition reads
-     * healthy whatever the arm sets.
+    /* The client the availability verdict reads its controller-wide half through. The nesting is the verdict's own read path, and it matters because the shared double
+     * spreads this client over a default whose connection is never lost...a holder placed anywhere else is ignored, and the verdict reads available whatever the arm
+     * sets.
      */
-    client: {
-
-      connection: {
-
-        get isHealthy(): boolean {
-
-          return health.isHealthy;
-        }
-      }
-    },
+    client: { connection },
     events: {
 
       emitPacket: (packet: AccessEventPacket): void => { emissions.push(packet); },
@@ -241,16 +236,17 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
 
     accessory: stood.accessory,
     clock,
+    connection,
     construction,
     controller,
     emissions,
     featureOptions: engine,
-    health,
     infoLines,
     get infoWrites(): { characteristic: string; value: unknown }[] {
 
       return writesOn(stood.accessory, stood.information);
     },
+    live,
     loop: (): Promise<void> => loop(),
     get otherWrites(): { characteristic: string; value: unknown }[] {
 
@@ -309,58 +305,72 @@ function makeAccessory({ name = "Test Hub", other = false }: { name?: string; ot
   return { accessory, carrier, information, other: other ? accessory.addService(Service.Switch, name) : undefined };
 }
 
-test("availability composes controller health with the device's own online state", async () => {
+test("availability composes the controller's verdict with the device's own record", async () => {
 
   /* Both records read fully online, so what separates the two harnesses is the controller's connection alone. Each arm drives its own harness rather than one flipped
    * mid-script, because the script harness walks a single observe pass per loop call and replays nothing.
    */
   const outage = makeHarness([record()]);
 
-  outage.health.isHealthy = false;
+  outage.connection.isLost = true;
 
-  const unreachable = new TestDevice(outage.controller, outage.projection, outage.accessory, outage.construction);
+  const unavailable = new TestDevice(outage.controller, outage.projection, outage.accessory, outage.construction);
 
   await outage.loop();
 
-  assert.equal(unreachable.isOnline, true, "the record's own flags still read online, which is what makes controller health the term under test");
-  assert.equal(unreachable.isReachable, false, "a device behind an unhealthy controller cannot be reached, whatever its own record last said");
+  assert.equal(unavailable.isAvailable, false, "a device behind a lost controller is unavailable, whatever its own record last said");
   assert.deepEqual(outage.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }],
-    "and the loop projects that composition rather than the record's flags");
+    "and the loop projects that verdict rather than the record's flags");
 
   const healthy = makeHarness([record()]);
-  const reachable = new TestDevice(healthy.controller, healthy.projection, healthy.accessory, healthy.construction);
+  const available = new TestDevice(healthy.controller, healthy.projection, healthy.accessory, healthy.construction);
 
   await healthy.loop();
 
-  assert.equal(reachable.isReachable, true, "the same record behind a healthy controller reads reachable");
+  assert.equal(available.isAvailable, true, "the same record behind a connection not lost reads available");
   assert.deepEqual(healthy.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: true }]);
 });
 
-test("a reader wrapped in the device's rule answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
-  "consulting the composition on every read", () => {
+test("a reader wrapped in the device's rule answers while the device is available and refuses with the communication-failure status while it is not, " +
+  "consulting the verdict on every read", () => {
 
   /* The rule is driven through the device the base really bound rather than through a wrapper the arm built, which is what makes the bind site itself the thing
-   * under test. Each term of the composition is moved on its own, because a reader that consulted only one of them would pass on the other's strength.
+   * under test. Each term of the verdict is moved on its own, because a reader that consulted only one of them would pass on the other's strength.
    */
   const harness = makeHarness([record()]);
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
   const read = device.answer(() => true);
+  const refusal = { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE };
 
-  assert.equal(read(), true, "a reader answers under a healthy controller and an online record");
+  assert.equal(read(), true, "a reader answers under a connection not lost and an online record");
 
-  harness.health.isHealthy = false;
+  harness.connection.isHealthy = false;
+
+  assert.equal(read(), true, "and through a blip, where only the library's first-fault flag has moved");
+
+  harness.connection.isHealthy = true;
+  harness.connection.isLost = true;
 
   // The controller term refuses with HAP's own status error carrying the communication-failure status.
-  assert.throws(() => read(), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+  assert.throws(() => read(), refusal);
 
-  harness.health.isHealthy = true;
+  harness.connection.isLost = false;
 
-  assert.equal(read(), true, "and the next read after recovery answers, because the rule consults the composition on every read rather than capturing it once");
+  assert.equal(read(), true, "and the next read after recovery answers, because the rule consults the verdict on every read rather than capturing it once");
 
-  device.uda = { ...device.uda, is_online: false };
+  // The device's own record gates the read from there, read live from the projection and never from what the device holds through a removal delay.
+  harness.live.record = record({ is_online: false });
 
-  // The device's own record gates the read from there, refusing it the same way.
-  assert.throws(() => read(), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+  assert.equal(device.uda.is_online, true, "the device still holds the record it last took");
+  assert.throws(() => read(), refusal);
+
+  harness.live.record = undefined;
+
+  assert.throws(() => read(), refusal);
+
+  harness.live.record = record();
+
+  assert.equal(read(), true, "and a record that returns answers");
 });
 
 test("a reachability refresh writes every service carrying availability and only those, reading the composition afresh each time", () => {
@@ -376,7 +386,7 @@ test("a reachability refresh writes every service carrying availability and only
   // The push reads the composition at the moment it runs rather than a value captured when the device was built, which is what makes the controller observer's walk
   // worth anything at all. The accessory's record restarts here, so what the second refresh wrote is read on its own.
   harness.accessory.clearObservations();
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
   device.refreshReachability();
 
   assert.deepEqual(harness.statusWrites, [{ characteristic: Characteristic.StatusActive.UUID, value: false }]);
@@ -397,13 +407,13 @@ test("a reachability refresh states the device's availability on its own topic, 
    */
   assert.deepEqual(mqtt.published, [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }]);
 
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
   device.refreshReachability();
   device.refreshReachability();
 
   assert.deepEqual(mqtt.published.slice(1), [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "a move to unreachable is stated once, in the other word");
 
-  harness.health.isHealthy = true;
+  harness.connection.isLost = false;
   device.refreshReachability();
 
   assert.deepEqual(mqtt.published.slice(2), [{ payload: "online", retain: true, topic: AVAILABILITY_TOPIC }], "and the way back is stated once as well");
@@ -487,7 +497,7 @@ test("an unreachable device that has already stated offline states it again as i
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
   device.refreshReachability();
 
   assert.deepEqual(mqtt.published, [{ payload: "offline", retain: true, topic: AVAILABILITY_TOPIC }], "the unreachable device has stated offline already");
@@ -543,7 +553,7 @@ test("a reachability change while the end states the word records no online behi
   const harness = makeHarness([], { mqtt });
   const device = new TestDevice(harness.controller, harness.projection, harness.accessory, harness.construction);
 
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
   device.refreshReachability();
 
   const before = mqtt.published.length;
@@ -551,7 +561,7 @@ test("a reachability change while the end states the word records no online behi
   const release = mqtt.holdPublishes();
   const ended = mqtt.end();
 
-  harness.health.isHealthy = true;
+  harness.connection.isLost = false;
   device.refreshReachability();
   release();
 

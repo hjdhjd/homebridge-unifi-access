@@ -1490,6 +1490,16 @@ export class AccessController {
     return this.#name;
   }
 
+  /* Whether the plugin can vouch for what this controller feeds, the verdict every device's own starts from: unavailable once unifi-access has concluded the connection
+   * lost, until recovery. It reads that fact and never the library's first-fault flag, which also reads false while the library is still probing, while it re-bootstraps
+   * a controller it has already proven reachable and while its request breaker is open: none of those mean the values have gone stale, and refusing on them would mark
+   * every accessory No Response for a blip the library is already handling. It reads the connected client, so nothing ahead of a connect reads it.
+   */
+  public get isAvailable(): boolean {
+
+    return !this.client.connection.isLost;
+  }
+
   // Whether client-side errors should reach the user. True in every phase but shutdown, where the teardown cascade produces noise about a connection we are
   // deliberately ending.
   public get logApiErrors(): boolean {

@@ -3,17 +3,18 @@
  * controller.test.ts: Tests for the controller's delayed removals and its membership resolution.
  */
 /* eslint-disable camelcase */
-import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
+import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HAPStatus, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
-  AccessRequestError, createStateStore, selectAccessPoints } from "unifi-access";
+  AccessNetworkError, AccessRequestError, createStateStore, selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
+import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi, platformInternals,
+  readerRecord, savesOn } from "../testing.helpers.ts";
 import { EventEmitter, on } from "node:events";
 import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
-import { ROOT_ID, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn } from "../testing.helpers.ts";
-import { TestClock, TestHttpListener, TestMqttClient, drainClock, settle } from "homebridge-plugin-utils/testing";
+import { TestClock, TestHttpListener, TestMqttClient, drainClock, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
@@ -21,6 +22,7 @@ import type { AccessControllerConnect } from "./controller.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import type { AccessDevice } from "../devices/device.ts";
 import { AccessPlatform } from "../platform.ts";
+import { AccessReservedNames } from "../types.ts";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import { format } from "node:util";
@@ -109,7 +111,7 @@ function deviceHandle(record: Record<string, unknown>): unknown {
 
       // Nothing observes in these arms.
     },
-    peek: (): undefined => undefined
+    peek: (): Record<string, unknown> => record
   };
 }
 
@@ -172,7 +174,7 @@ function clientDouble(options: { connection?: unknown; controllerInfo: Record<st
 
     accessPoint: (): undefined => undefined,
     // A connection that reads healthy and yields nothing unless an arm supplies one it drives, which is what keeps every other arm's observer inert.
-    connection: options.connection ?? { isHealthy: true, observe: async function *(): AsyncGenerator {
+    connection: options.connection ?? { isHealthy: true, isLost: false, observe: async function *(): AsyncGenerator {
 
       // Nothing transitions in these arms.
     } },
@@ -295,6 +297,7 @@ function connectionDouble(): { connection: unknown; drive: (from: string, to: st
     connection: {
 
       isHealthy: true,
+      isLost: false,
       observe: async function *(opts: { signal: AbortSignal }): AsyncGenerator<{ from: string; to: string }> {
 
         try {
@@ -377,7 +380,7 @@ test("the connection observer pushes reachability on every transition and restor
 
   assert.deepEqual(stub.calls.slice(2), [ "refresh", "restore" ]);
 
-  // An ordinary fault edge: availability moves, but nothing recovered, so there is nothing to refresh behind it.
+  // An ordinary fault edge: availability is restated and stands where it was through a blip, and nothing recovered, so there is nothing to refresh behind it.
   await monitor.drive("healthy", "degraded");
 
   assert.deepEqual(stub.calls.slice(4), ["refresh"]);
@@ -415,6 +418,118 @@ test("one device's fault on either of the observer's walks costs its siblings no
 function namedHubRecord(name: string, id: string, mac: string): Record<string, unknown> {
 
   return hubRecord({ alias: "", mac, name, unique_id: id });
+}
+
+test("a controller's verdict follows the library's conclusion that the connection is lost, and never its first-fault flag", () => {
+
+  const connection = { isHealthy: false, isLost: false };
+  const { controller } = makeController({ connection });
+
+  assert.equal(controller.isAvailable, true, "a first fault the library is still handling takes nothing away");
+
+  connection.isLost = true;
+
+  assert.equal(controller.isAvailable, false, "and a conclusion that the connection is lost does");
+
+  connection.isHealthy = true;
+  connection.isLost = false;
+
+  assert.equal(controller.isAvailable, true, "until the library clears it");
+});
+
+/* The whole road a restored accessory travels, over a real platform and a real controller. The switch stands bare because a reader with no configuration rows and no
+ * official surface never seeds its access methods, so no pass reaches it and the sweep's handlers stay on it for the run, which is how a read here tells what the
+ * controller's device list holds from what a hub bound.
+ */
+test("a restored characteristic refuses ahead of the login, follows the hub a real controller holds for it, and refuses again past its removal", async (t) => {
+
+  const api = makeTestApi();
+  const quiet = (): void => undefined;
+  const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+  const platform = new AccessPlatform(log as unknown as Logging, { controllers: [], options: [], platform: "UniFi Access" }, api as unknown as API);
+  const reader = readerRecord({ alias: "", capabilities: [ "is_reader", "pin_code" ], is_adopted: true, is_connected: true, is_online: false });
+  const store = createStateStore({});
+  const connection = { isHealthy: true, isLost: false, observe: async function *(): AsyncGenerator {
+
+    // Nothing transitions in this arm, whose lever is what the connection answers.
+  } };
+
+  t.after(() => void api.emit(APIEvent.SHUTDOWN));
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([reader]) });
+
+  const client = clientDouble({ connection, controllerInfo: null, handles: new Map([[ reader.unique_id, deviceHandle(reader) ]]), store });
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => client);
+  const accessory = makeTestAccessory("Restored Reader", "AABBCCDDEE02");
+  const on = accessory.addService(new Service.Switch("Restored PIN", AccessReservedNames.SWITCH_ACCESSMETHOD_PIN)).getCharacteristic(Characteristic.On);
+
+  on.updateValue(true);
+  api.restorePlatformAccessories({ accessories: [accessory], platform, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+  platformInternals(platform).controllers.push(controller);
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "nothing holds the accessory ahead of the login, so a read refuses");
+  await assert.rejects(triggerSet(on, false), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and so does a write");
+
+  assert.equal(on.value, true, "storing nothing");
+
+  await controller.login();
+
+  assert.ok(controller.configuredDevices.has(accessory.UUID), "the login holds a hub for the accessory");
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and a device configured but offline goes on refusing");
+
+  reader.is_online = true;
+
+  assert.equal(await triggerGet(on), true, "a record available answers the value the characteristic holds");
+
+  connection.isLost = true;
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "a lost controller refuses it");
+
+  connection.isLost = false;
+
+  assert.equal(await triggerGet(on), true, "and a recovery answers again, with nothing rewired");
+
+  controller.removeHomeKitDevice(accessory, true);
+
+  assert.ok(!controller.configuredDevices.has(accessory.UUID), "the removal retires the hub");
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and a retired hub's restored characteristic refuses");
+});
+
+// A connect that holds no device leaves every restored accessory registered and refusing, whether its retry is still running or has stopped, and each road is a row of
+// its own, so a defect on a later road is read rather than cut short by an earlier one.
+for(const { failure, label } of [
+
+  { failure: new AccessNetworkError("The controller refused the connection.", { code: "ECONNREFUSED" }), label: "a controller down at start" },
+  { failure: new AccessConfigurationError("The controller address carries more than a host and a port."), label: "an address no URL can carry" }
+]) {
+
+  test("a restored characteristic refuses and stays registered under " + label, async (t) => {
+
+    const api = makeTestApi();
+    const quiet = (): void => undefined;
+    const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+    const platform = new AccessPlatform(log as unknown as Logging, { controllers: [], options: [], platform: "UniFi Access" }, api as unknown as API);
+
+    t.after(() => void api.emit(APIEvent.SHUTDOWN));
+
+    const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+      throw failure;
+    });
+    const accessory = makeTestAccessory("Restored Reader", "AABBCCDDEE02");
+    const on = accessory.addService(new Service.Switch("Restored PIN", AccessReservedNames.SWITCH_ACCESSMETHOD_PIN)).getCharacteristic(Characteristic.On);
+
+    api.restorePlatformAccessories({ accessories: [accessory], platform, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+    platformInternals(platform).controllers.push(controller);
+
+    // The login is started rather than awaited, because a controller that is down retries until shutdown ends it, and the read below is what that outage answers.
+    void controller.login();
+
+    await settle(DISPATCH_SETTLE_TURNS);
+    await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "no device holds the accessory, so a read refuses");
+
+    assert.ok(platform.accessories.includes(accessory), "and the accessory stays registered");
+  });
 }
 
 test("a device whose adoption throws costs its siblings nothing: the next device is added, the pass's removal runs, and the device list keeps observing",

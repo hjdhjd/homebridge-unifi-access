@@ -3,13 +3,13 @@
  * platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, and its reclaim of accessories nothing answers for.
  */
 import type { API, Logging } from "homebridge";
-import { APIEvent, onAbort } from "homebridge-plugin-utils";
+import { APIEvent, HAPStatus, onAbort } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
+import { Characteristic, Service, accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, platformInternals, savesOn } from "./testing.helpers.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
-import { TestMqttClient, settle, settleUntil, stopListening } from "homebridge-plugin-utils/testing";
-import { accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, savesOn } from "./testing.helpers.ts";
+import { TestMqttClient, hapStatus, settle, settleUntil, stopListening, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { mock, test } from "node:test";
 import type { AccessClient } from "unifi-access";
 import { AccessController } from "./controller/controller.ts";
@@ -80,21 +80,6 @@ function makeHarness(): Harness {
       return api.calls.flatMap((call) => (call.kind === "update") ? [call.accessories.length] : []);
     }
   };
-}
-
-/* The platform's own plumbing as the arms below drive it: the controllers it constructed, the launch that starts them, and the reclaim that consumes their
- * reports. All three are private, which is right - nothing in the plugin reads them from outside - so this states the cast once for every arm that reaches in.
- */
-interface PlatformInternals {
-
-  controllers: AccessController[];
-  launchControllers: () => void;
-  reclaimStranded: (reports: Promise<{ controller: AccessController; outcome: AccessLoginOutcome }>[]) => Promise<void>;
-}
-
-function platformInternals(platform: AccessPlatform): PlatformInternals {
-
-  return platform as unknown as PlatformInternals;
 }
 
 /* The controllers a platform actually constructed.
@@ -179,6 +164,170 @@ test("a controller with no identity at all is refused", () => {
 
   assert.equal(refused.length, 0);
   assert.ok(harness.lines.includes("info: No UniFi Access login credentials or API token have been configured."));
+});
+
+// A controller as the restore sweep reads one: the devices it holds, keyed by accessory, each standing in for the verdict a real device reads.
+function deviceList(devices: Map<string, { isAvailable: boolean }>): AccessController {
+
+  return { configuredDevices: devices } as unknown as AccessController;
+}
+
+// Nothing maintains a restored value until a controller holds a device for the accessory, so it refuses until then, and from that moment on it follows that device. A
+// characteristic a device binds late, or never, stays on the sweep's handler once it is held, which is why the sweep follows the device rather than refusing outright.
+test("a restored accessory refuses outside its identity until a controller holds a device for it, then follows it, and refuses again once it is gone", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [], options: [], platform: "UniFi Access" });
+  const accessory = cachedAccessory("restored", "Restored", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:03" });
+  const service = accessory.addService(new Service.Switch("Restored Switch"));
+  const on = service.getCharacteristic(Characteristic.On);
+
+  service.addCharacteristic(Characteristic.ConfiguredName);
+  on.updateValue(true);
+  harness.restore(platform, accessory);
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "an empty controller list holds nothing, so the accessory refuses");
+
+  for(const identity of [ service.getCharacteristic(Characteristic.Name), service.getCharacteristic(Characteristic.ConfiguredName),
+    accessory.getService(Service.AccessoryInformation)?.getCharacteristic(Characteristic.Manufacturer) ]) {
+
+    assert.ok(identity, "the fixture carries the identity characteristic");
+
+    // eslint-disable-next-line no-await-in-loop -- Each read is its own assertion.
+    await assert.doesNotReject(triggerGet(identity), identity.displayName + " answers as identity");
+  }
+
+  const device = { isAvailable: true };
+  const held = new Map([[ accessory.UUID, device ]]);
+
+  // The first controller holds nothing, so an answer can only have come from reading past it to the second.
+  platformInternals(platform).controllers.push(deviceList(new Map()), deviceList(held));
+
+  assert.equal(await triggerGet(on), true, "a device on the second controller answers for the accessory, with the value it holds");
+
+  device.isAvailable = false;
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and the accessory refuses when the device does");
+
+  device.isAvailable = true;
+  held.delete(accessory.UUID);
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and an entry deleted leaves no device to follow");
+});
+
+// With no set handler HAP stores a write and reports success, so a hub's write to an accessory nothing stands behind would read as done. Each write here goes through
+// HAP's own write path, which is where a refused write stores nothing.
+test("a restored accessory refuses a write and stores nothing until a controller holds a device for it, then takes the write while that device answers", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [], options: [], platform: "UniFi Access" });
+  const accessory = cachedAccessory("restored", "Restored", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:03" });
+  const on = accessory.addService(new Service.Switch("Restored Switch")).getCharacteristic(Characteristic.On);
+  const lock = accessory.addService(new Service.LockMechanism("Restored Lock")).getCharacteristic(Characteristic.LockTargetState);
+
+  on.updateValue(true);
+  lock.updateValue(Characteristic.LockTargetState.SECURED);
+  harness.restore(platform, accessory);
+
+  await assert.rejects(triggerSet(on, false), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "an accessory no controller holds refuses a write");
+  await assert.rejects(triggerSet(lock, Characteristic.LockTargetState.UNSECURED), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and so does a lock");
+
+  assert.equal(on.value, true, "the switch holds the value it restored");
+  assert.equal(lock.value, Characteristic.LockTargetState.SECURED, "and so does the lock");
+
+  const device = { isAvailable: true };
+  const held = new Map([[ accessory.UUID, device ]]);
+
+  platformInternals(platform).controllers.push(deviceList(held));
+
+  await assert.doesNotReject(triggerSet(on, false), "a characteristic no device bound takes the write once its accessory is held");
+
+  assert.equal(on.value, false, "and stores it");
+
+  device.isAvailable = false;
+
+  await assert.rejects(triggerSet(on, true), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and refuses when the device does");
+
+  assert.equal(on.value, false, "storing nothing");
+
+  device.isAvailable = true;
+  held.delete(accessory.UUID);
+
+  await assert.rejects(triggerSet(on, true), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and an entry deleted leaves no device to follow");
+});
+
+// HAP holds one write handler per characteristic, so a device's replaces the sweep's outright, and what the device bound decides the write from then on.
+test("a device's own write handler replaces the sweep's, and the sweep is not consulted again", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [], options: [], platform: "UniFi Access" });
+  const accessory = cachedAccessory("restored", "Restored", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:03" });
+  const on = accessory.addService(new Service.Switch("Restored Switch")).getCharacteristic(Characteristic.On);
+  const writes: unknown[] = [];
+
+  harness.restore(platform, accessory);
+  on.onSet((value) => void writes.push(value));
+
+  await assert.doesNotReject(triggerSet(on, true), "the device's handler answers, with no entry standing for the sweep to read");
+
+  assert.deepEqual(writes, [true], "and it ran");
+  assert.equal(on.value, true, "and HAP stored what it accepted");
+});
+
+// A name is the user's to edit whatever the plugin knows. HAP's own writes to a characteristic it holds arrive through the entry point a write handler sits on, so a
+// handler on one HomeKit cannot write would swallow them, which handleSetRequest reads here directly.
+test("a name and a characteristic carrying no write permission take no write handler", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [], options: [], platform: "UniFi Access" });
+  const accessory = cachedAccessory("restored", "Restored", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:03" });
+  const lock = accessory.addService(new Service.LockMechanism("Restored Lock"));
+  const current = lock.getCharacteristic(Characteristic.LockCurrentState);
+  const name = lock.addCharacteristic(Characteristic.ConfiguredName);
+
+  current.updateValue(Characteristic.LockCurrentState.SECURED);
+  name.updateValue("Before");
+  harness.restore(platform, accessory);
+
+  await assert.rejects(triggerGet(current), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "the lock's current state still refuses a read");
+  await assert.doesNotReject(current.handleSetRequest(Characteristic.LockCurrentState.UNSECURED), "and HAP's own write to it lands");
+
+  assert.equal(current.value, Characteristic.LockCurrentState.UNSECURED, "storing the value HAP wrote");
+
+  await assert.doesNotReject(triggerSet(name, "After"), "and an accessory no controller holds still takes the user's edit of its name");
+
+  assert.equal(name.value, "After", "storing it");
+});
+
+// The global Device option decides whether a controller logs in, and has no say over the sweep: a restored accessory no device will ever hold refuses, and stays
+// registered, so turning the plugin back on finds it where the user left it. An entry the walk passes over holds nothing either.
+test("a restored accessory no controller will ever hold refuses and stays registered, under a global disable and an entry with no address or identity", async () => {
+
+  const harness = makeHarness();
+  const disabled = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Disable.Device"], platform: "UniFi Access" });
+  const accessory = cachedAccessory("restored", "Restored", { controller: "1.2.3.4", mac: "aa:bb:cc:dd:ee:03" });
+  const on = accessory.addService(new Service.Switch("Restored Switch")).getCharacteristic(Characteristic.On);
+  const [controller] = configuredControllers(disabled);
+
+  harness.restore(disabled, accessory);
+
+  assert.ok(controller, "the entry carries an address and an identity, so a controller is constructed for it");
+  assert.equal(await controller.login(), "unavailable", "and the global option stops it before any connect");
+
+  await assert.rejects(triggerGet(on), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "the restored accessory refuses");
+
+  assert.ok(disabled.accessories.includes(accessory), "and stays registered");
+  assert.deepEqual(harness.unregistered, [], "with nothing asking Homebridge to let it go");
+
+  const unusable = makeHarness();
+  const passedOver = unusable.make({ controllers: [ { address: "" }, { address: "5.6.7.8" } ], options: [], platform: "UniFi Access" });
+  const stranded = cachedAccessory("stranded", "Stranded", { controller: "5.6.7.8", mac: "aa:bb:cc:dd:ee:04" });
+  const switched = stranded.addService(new Service.Switch("Stranded Switch")).getCharacteristic(Characteristic.On);
+
+  unusable.restore(passedOver, stranded);
+
+  assert.deepEqual(configuredControllers(passedOver), [], "neither entry constructs a controller");
+  await assert.rejects(triggerGet(switched), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "so its restored accessory refuses too");
 });
 
 test("an accessory the platform is not carrying leaves its one exit untouched, which is what makes a repeat harmless", () => {

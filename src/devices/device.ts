@@ -10,7 +10,7 @@ import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandl
   Nullable, ValidServiceOptions, ValidServiceResult } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, ownedName, prefixedLog,
   presenceChanged, resolveNameOverride, setAccessoryName, setServiceName, updateServices, validService, watchServiceName } from "homebridge-plugin-utils";
-import { deviceDisplayName, deviceSerial, serialForm } from "../policy.ts";
+import { deviceDisplayName, deviceSerial, recordAvailable, serialForm } from "../policy.ts";
 import type { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
 import type { AccessController } from "../controller/controller.ts";
@@ -137,11 +137,11 @@ export abstract class AccessBase {
 export abstract class AccessDevice extends AccessBase {
 
   public accessory!: AccessAccessory;
-  /* This device's Not Responding rule, bound once at construction from the availability composition below and read afresh on every wrapped read, so a device that
-   * cannot be reached refuses on the very next read and one that comes back answers on it. Every readable characteristic a subclass wires goes through it, which
-   * leaves exactly one place that decides whether this device can answer at all, while the availability push and the gate the door commands open with read that
-   * same composition, so what HomeKit is shown, what it is refused, and what a command refuses on agree by construction. The error class comes from the runtime
-   * HAP namespace the plugin holds, because homebridge-plugin-utils carries no HAP dependency of its own.
+  /* This device's Not Responding rule, bound once at construction from the availability verdict below and read afresh on every wrapped read and write, so a device the
+   * plugin cannot vouch for refuses on the very next request and one that comes back answers on it. Every handler a subclass wires goes through it, which leaves
+   * exactly one place that decides whether this device can answer at all, while the MQTT statement and the gate the door commands open with read that same verdict, so
+   * what HomeKit is refused, what the broker holds, and what a command refuses on agree by construction. The error class comes from the runtime HAP namespace the plugin
+   * holds, because homebridge-plugin-utils carries no HAP dependency of its own.
    */
   protected readonly answering: ReturnType<typeof notResponding>;
   public hints: AccessHints;
@@ -202,8 +202,8 @@ export abstract class AccessDevice extends AccessBase {
 
     this.#deviceController = new AbortController();
     this.#ownedParts = new Map();
-    // The predicate closes over this device rather than capturing a value, so every wrapped read consults the composition as it stands at that moment.
-    this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.isReachable });
+    // The predicate closes over this device rather than capturing a value, so every wrapped handler consults the verdict as it stands at that moment.
+    this.answering = notResponding({ errorClass: this.hap.HapStatusError, unavailable: () => !this.isAvailable });
     // Every hint at its neutral default, so the object is a complete and honest description of a device nothing has been configured for yet. configureHints() then
     // states each one the user's settings actually decide.
     this.hints = { hasSideDoor: false, logEvents: new Set(), nameOverride: null, nameOwned: false, syncName: false };
@@ -297,7 +297,7 @@ export abstract class AccessDevice extends AccessBase {
    */
   public refreshReachability(): void {
 
-    updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isReachable);
+    updateServices(this.accessory, this.hap.Characteristic.StatusActive, this.isAvailable);
     this.publishAvailability();
   }
 
@@ -310,7 +310,7 @@ export abstract class AccessDevice extends AccessBase {
    */
   protected publishAvailability(): void {
 
-    const payload: MqttAvailabilityPayload = this.isReachable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
+    const payload: MqttAvailabilityPayload = this.isAvailable ? MQTT_AVAILABILITY_ONLINE : MQTT_AVAILABILITY_OFFLINE;
 
     this.mqttPublish(mqttTopics.availability, payload, { ifChanged: true, retain: true });
   }
@@ -619,24 +619,19 @@ export abstract class AccessDevice extends AccessBase {
     return name === undefined ? false : Object.values(AccessReservedNames).map(x => x.toUpperCase()).includes(name.toUpperCase());
   }
 
-  /* Whether this device can be reached, composed over the scopes that each gate it. Controller health gates every device at once: an outage freezes the record's
-   * own online flags at whatever they last said, so the device-scope read below cannot be trusted on its own while the controller is unreachable. The device's own
-   * state gates it from there.
+  /* Whether the plugin can vouch for this device, composed over the scopes that each gate it. The controller's verdict gates every device at once: an outage freezes a
+   * record's flags at whatever they last said, so the record cannot be trusted on its own while the controller is lost. The device's own record gates it from there, and
+   * it is read live from the projection rather than from uda, which keeps its last value through a removal delay, so a device whose record has left the state refuses
+   * at once. A controller reboot adds no term of its own: the plugin induces none, and one that happens anyway reads as an ordinary loss.
    *
-   * This is the plugin's single availability composition. Every StatusActive carrier reads it, every readable characteristic answers by it through the rule bound
-   * above, and so does the gate the door commands open with, so what HomeKit is shown, what it is refused, and what an operation refuses on answer one question.
-   * unifi-access deliberately ships no composition of its own, because last-known device state is all it can honestly own...composing per-operation reachability
-   * is the consumer's business, and this is where the consumer does it.
+   * This is the plugin's single availability verdict. Every handler answers by it through the rule bound above, and so do the MQTT statement and the gate the door
+   * commands open with, so what HomeKit is refused, what the broker holds, and what an operation refuses on answer one question. unifi-access deliberately ships no
+   * composition of its own, because last-known device state is all it can honestly own...composing the verdict is the consumer's business, and this is where the
+   * consumer does it.
    */
-  public get isReachable(): boolean {
+  public get isAvailable(): boolean {
 
-    return this.controller.client.connection.isHealthy && this.isOnline;
-  }
-
-  // Utility function to determine whether or not a device is currently online.
-  public get isOnline(): boolean {
-
-    return ([ "is_adopted", "is_connected", "is_managed", "is_online" ] as const).every(key => this.uda[key]);
+    return this.controller.isAvailable && recordAvailable(this.projection.peek());
   }
 
   /* The name this device's log lines are prefixed with: the device alone, in the form this family of plugins shares. The controller half is left out deliberately -

@@ -10,14 +10,14 @@
  * to agree on the event vocabulary rather than assumed to.
  */
 /* eslint-disable camelcase */
-import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, ServiceEventTypes, mqttGetTopic, mqttSetTopic, setAccessoryName,
+import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, Perms, ServiceEventTypes, mqttGetTopic, mqttSetTopic, setAccessoryName,
   setServiceName } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import { AccessAbortedError, AccessApiError, AccessCapabilityError, AccessClient, AccessDeclinedError, createStateStore } from "unifi-access";
 import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, RESTORED_LINE, Service, configRows, doorsTopology, eventsFrom, gatePort, gatePorts, hap, hubRecord,
+import { Characteristic, GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, RESTORED_LINE, Service, configRows, doorsTopology, eventsFrom, gatePort, gatePorts, hubRecord,
   makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
 import { EventEmitter, getEventListeners, on } from "node:events";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
@@ -160,6 +160,9 @@ interface HubHarness {
   // The time source every timer this hub arms is registered on, so an arm advances the hub's own timeline rather than the process's global timers.
   clock: TestClock;
   commands: RecordedCommand[];
+  // What the controller's connection answers about itself, in a holder the client double reads live so an arm can move it under a hub that is already running: the first
+  // fault's flag, which only a blip's arm sets false, and the verdict the library reaches once it has concluded the connection lost.
+  connection: { isHealthy: boolean; isLost: boolean };
   debugs: string[];
   deliver: (event: string, delivery: unknown) => void;
   // The topology's doors, the map the client double's snapshot answers from, so an arm can teach a running gate a door or lose one under it.
@@ -167,10 +170,11 @@ interface HubHarness {
   emit: (event: string, packet: unknown) => void;
   errors: string[];
   fetches: string[];
-  // What the controller's connection answers about its own health, in a holder the client double reads live so an arm can move it under a hub that is already running.
-  health: { isHealthy: boolean };
   hub: AccessHub;
   lines: string[];
+  // The record the hub's projection answers from, which an arm moves to read the verdict, undefined standing for a record that has left the state. An arm over a store
+  // moves the store instead.
+  live: { record: AccessStateDevice | undefined };
   // The hub's own record loop, as the construction handed it to the controller, which walks the arm's record script once per call.
   loop: () => Promise<void>;
   mqtt: TestMqttClient;
@@ -234,10 +238,13 @@ interface HubOptions {
   rejectFrom?: number;
   // The error a doorbell ring or cancel rejects with, standing in for a controller that refuses the dispatch. The ring is recorded before it is thrown.
   ringRefusal?: Error;
-  // The records the hub's own observation yields, one per entry, when an arm drives its record loop. An arm naming none observes nothing.
-  script?: AccessStateDevice[];
+  // The records the hub's own observation yields, one per entry, when an arm drives its record loop. An entry of undefined is a record that has left the state, and an
+  // arm naming none observes nothing.
+  script?: (AccessStateDevice | undefined)[];
   // What the official settings read answers, called with the ordinal of the read so an arm can answer a retry differently from the attempt that failed.
   settings?: (fetch: number) => Promise<unknown>;
+  // A real store the hub's projection reads through in place of the script, for an arm about what the library's own reducer leaves on a record.
+  store?: ReturnType<typeof createStateStore>;
   // The error an unlock naming an actor rejects with, standing in for a client that cannot carry the attribution. An unlock naming none is answered normally.
   unlockRefusal?: Error;
 }
@@ -346,25 +353,40 @@ function makeHub(options: HubOptions = {}): HubHarness {
     warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters))
   } });
 
-  /* The hub's own observation yields once per scripted record and answers peek() with that record, so an arm naming no script observes nothing. The loop the
-   * construction hands the controller is held rather than run, so an arm drives it when it is ready to read what a record changed. A switch write the hub hands the
-   * library is recorded before it answers, so an arm reads what a switch sent whichever way the write then goes.
+  /* The hub's own observation yields once per scripted record and answers peek() live, as the library's projection does: it starts at the construction record and each
+   * scripted record takes its place ahead of the yield, so an arm naming no script observes nothing and an arm moving the holder moves what every later read finds. An
+   * arm naming a store reads each of them from it, running the real reducer behind them. The loop the construction hands the controller is held rather than run, so an
+   * arm drives it when it is ready to read what a record changed. A switch write the hub hands the library is recorded before it answers, so an arm reads what a switch
+   * sent whichever way the write then goes.
    */
+  const { store } = options;
   const script = options.script ?? [];
-  let peekIndex = 0;
+  const live: { record: AccessStateDevice | undefined } = { record };
   let loop: () => Promise<void> = async (): Promise<void> => undefined;
 
   const projection = {
 
     config: record,
-    observe: async function *(): AsyncGenerator {
+    observe: async function *(opts: { signal?: AbortSignal } = {}): AsyncGenerator {
 
-      for(const _entry of script) {
+      if(store) {
+
+        for await (const _entry of store.observe((state) => state.devices.get(record.unique_id), opts)) {
+
+          yield projection;
+        }
+
+        return;
+      }
+
+      for(const entry of script) {
+
+        live.record = entry;
 
         yield projection;
       }
     },
-    peek: (): AccessStateDevice | undefined => script[peekIndex++],
+    peek: (): AccessStateDevice | undefined => store ? store.snapshot().devices.get(record.unique_id) : live.record,
     setAccessMethod: async (method: string, enabled: boolean, opts: { signal?: AbortSignal } = {}): Promise<void> => {
 
       accessMethodWrites.push({ enabled, method, signal: opts.signal });
@@ -431,17 +453,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
     }
   } : null;
 
-  // The connection the availability composition reads its controller-wide half through, answering from a holder so an arm can move controller health mid-arm and see
-  // what a live read makes of it.
-  const health = { isHealthy: true };
-
-  const connection = {
-
-    get isHealthy(): boolean {
-
-      return health.isHealthy;
-    }
-  };
+  // The connection the availability verdict reads its controller-wide half through, a holder the client reads live, so an arm can move it mid-arm and see what a live
+  // read makes of it.
+  const connection = { isHealthy: true, isLost: false };
 
   const controller = makeControllerDouble({
 
@@ -502,6 +516,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     accessory,
     clock,
     commands,
+    connection,
     debugs,
     deliver: (event: string, delivery: unknown): void => {
 
@@ -529,9 +544,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     errors,
     fetches,
-    health,
     hub,
     lines,
+    live,
     loop: (): Promise<void> => loop(),
     mqtt,
     mqttGet: async (tail: string): Promise<string | undefined> => mqtt.invokeGet(mqttGetTopic(HUB_SERIAL + "/" + tail)),
@@ -757,6 +772,7 @@ async function switchReads(harness: HubHarness, subtype: string): Promise<unknow
 function restateRecord(harness: HubHarness, overrides: Record<string, unknown>): void {
 
   harness.hub.uda = { ...harness.hub.uda, ...overrides } as unknown as AccessStateDevice;
+  harness.live.record = harness.hub.uda;
   harness.emit(HUB_ID, { event: ACCESS_DEVICE_UPDATE_EVENT });
 }
 
@@ -1659,114 +1675,246 @@ test("a dressed sensor's availability read consults the live composition, answer
   /* Nothing pushes from here: no observer walk and no record delivery runs in this arm. A refusal that follows the flip can therefore only have come from the
    * handler consulting the composition, which is exactly what a dress that wrote the characteristic and registered nothing would fail by answering the cached value.
    */
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
 
   await assert.rejects(triggerGet(availability), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "a read taken after the connection moved is refused with the status HomeKit renders as Not Responding");
   assert.deepEqual(writesOn(harness.accessory, sensor), [], "with no push behind it at all");
 });
 
-test("every reader a hub wires answers while the device can be reached and refuses with the communication-failure status while it cannot, " +
-  "whichever service carries it", async (t) => {
+// The characteristics no handler refuses, wherever they sit: the names HomeKit reads as identity and the user edits, and the event HAP answers null for without asking.
+const CENSUS_EXEMPT = new Set([ Characteristic.ConfiguredName.UUID, Characteristic.Name.UUID, Characteristic.ProgrammableSwitchEvent.UUID ]);
 
-  /* Every reader this hub wires registers through the prototype's own onGet, so the registrations the spy records are the census of readers with nothing listed by
-   * hand, and a reader wired past the rule is caught here without anyone naming it.
-   */
-  const registered: Mock<Characteristic["onGet"]> = t.mock.method(Characteristic.prototype, "onGet");
+// A service kind as a census row names one: its type and, where it has one, its subtype.
+type CensusService = readonly [ { readonly UUID: string; readonly name?: string }, string? ];
 
-  // The registrations one construction added, taken as the slice between the census before it and the census after it.
-  const wiredBy = (build: () => HubHarness): { harness: HubHarness; slice: typeof registered.mock.calls } => {
+/* Every characteristic on an accessory the rule covers. HomeKit reads each of these and writes those carrying the paired-write permission, so each must refuse, and the
+ * list comes from the accessory rather than from the registrations, so a characteristic left with no handler at all is read with nobody naming it.
+ *
+ * @param harness - The hub to read.
+ *
+ * @returns Each covered characteristic, labeled with its service for a failure message.
+ */
+function coveredCharacteristics(harness: HubHarness): { characteristic: Characteristic; label: string }[] {
 
-    const from = registered.mock.calls.length;
-    const harness = build();
+  return harness.services.filter(service => service.UUID !== Service.AccessoryInformation.UUID).flatMap(service => service.characteristics
+    .filter(({ UUID }) => !CENSUS_EXEMPT.has(UUID)).map(characteristic => ({ characteristic, label: service.displayName + " / " + characteristic.displayName })));
+}
 
-    return { harness, slice: registered.mock.calls.slice(from) };
-  };
+/* Read every covered characteristic under each thing that takes the verdict away, and write each one HomeKit can write, each refused with the status HomeKit shows as No
+ * Response, then read each through a blip and once it has recovered, answered. Each lever moves on its own, because a handler consulting only one of them would pass on
+ * the others' strength, and the record's levers move what the projection answers and never what the hub holds, because the verdict reads the record live. A write of the
+ * value it holds keeps the request valid whatever the characteristic's range, so the refusal is the only thing it can meet. A row names the services its fixture is
+ * there to stand up, so a fixture that stopped standing one up reddens rather than reading less.
+ *
+ * @param harness  - The hub to read.
+ * @param services - The services the fixture stands up.
+ */
+async function assertCensus(harness: HubHarness, services: readonly CensusService[]): Promise<void> {
 
-  /* What one hub's own registrations prove: each reader answers the value its characteristic holds while the device can be reached, each refuses once it
-   * cannot - at the handler itself and through HAP's read path in front of it - and a recovery clears the refusal with nothing rewired.
-   */
-  const proves = async (harness: HubHarness, slice: typeof registered.mock.calls): Promise<void> => {
+  for(const [ kind, subtype ] of services) {
 
-    const [first] = slice;
+    assert.ok(harness.services.some(service => (service.UUID === kind.UUID) && ((subtype === undefined) || (service.subtype === subtype))),
+      "the fixture stood up the " + (subtype ?? kind.name ?? kind.UUID) + " service");
+  }
 
-    assert.ok(first, "the hub wired at least one reader");
+  const covered = coveredCharacteristics(harness);
+  const standing = harness.live.record;
 
-    /* Each characteristic's stored value is taken before any request goes out, because a reader answering that store would make a value read afterwards agree
-     * with itself whatever the handler did.
-     */
-    const held = slice.map((call): { characteristic: Characteristic; value: unknown } => {
+  assert.ok(covered.length, "the census read something");
 
-      const characteristic = call.this as Characteristic;
+  // Each stored value is taken before any request goes out, because a reader answering that store would make a value read afterwards agree with itself whatever it did.
+  const held = covered.map(({ characteristic, label }) => ({ characteristic, label, value: characteristic.value }));
 
-      return { characteristic, value: characteristic.value };
-    });
+  await Promise.all(held.map(async ({ characteristic, label, value }): Promise<void> => {
 
-    await Promise.all(held.map(async (reader): Promise<void> => {
+    assert.strictEqual(await triggerGet(characteristic), value, label + " answers the value it holds while the device is available");
+  }));
 
-      assert.strictEqual(await triggerGet(reader.characteristic), reader.value,
-        "a reader answers while the device can be reached, and answers the value the characteristic holds");
+  const levers: { label: string; move: () => void }[] = [
+
+    { label: "the controller is lost", move: (): void => { harness.connection.isLost = true; } },
+    ...[ "is_adopted", "is_connected", "is_managed", "is_online" ].map(flag => ({ label: flag + " reads false",
+      move: (): void => { harness.live.record = { ...standing, [flag]: false } as AccessStateDevice; } })),
+    { label: "the record is gone", move: (): void => { harness.live.record = undefined; } }
+  ];
+
+  for(const lever of levers) {
+
+    lever.move();
+
+    // eslint-disable-next-line no-await-in-loop -- Each lever moves only once the last has been read and put back.
+    await Promise.all(covered.map(async ({ characteristic, label }): Promise<void> => {
+
+      await assert.rejects(triggerGet(characteristic), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), label + " refuses a read while " + lever.label);
+
+      if(characteristic.props.perms.includes(Perms.PAIRED_WRITE)) {
+
+        await assert.rejects(triggerSet(characteristic, characteristic.value ?? false), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+          label + " refuses a write while " + lever.label);
+      }
     }));
 
-    harness.health.isHealthy = false;
+    harness.connection.isLost = false;
+    harness.live.record = standing;
+  }
 
-    await Promise.all(slice.map(async (call): Promise<void> => {
+  // A first fault the library is still handling takes nothing away, so the first-fault flag reading false answers as a recovery does.
+  harness.connection.isHealthy = false;
 
-      const characteristic = call.this as Characteristic;
-      const [handler] = call.arguments;
+  await Promise.all(covered.map(async ({ characteristic, label }): Promise<void> => {
 
-      // The rule refuses with HAP's own status error.
-      assert.throws(() => handler({}), { constructor: hap.HapStatusError, hapStatus: HAPStatus.SERVICE_COMMUNICATION_FAILURE });
+    await assert.doesNotReject(triggerGet(characteristic), label + " answers through a blip");
+  }));
 
-      await assert.rejects(triggerGet(characteristic), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
-        "which HAP's read path renders as the status HomeKit shows as Not Responding");
-    }));
+  harness.connection.isHealthy = true;
 
-    harness.health.isHealthy = true;
+  await Promise.all(held.map(async ({ characteristic, label, value }): Promise<void> => {
 
-    await assert.doesNotReject(triggerGet(first.this as Characteristic),
-      "and the next read after recovery answers, with nothing rewired");
-  };
+    assert.strictEqual(await triggerGet(characteristic), value, label + " answers the value it holds once the device has recovered, with nothing rewired");
+  }));
+}
 
-  /* These hubs between them carry every service a hub offers: a doorbell reader with its lock, both automation triggers, and a PIN switch; an opener over wired
-   * terminal inputs; a UA Gate driving two doors; and a UA Ultra whose sensors carry a tamper status.
-   */
-  const reader = wiredBy(() => makeReader({ options: [ "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger" ],
+test("a doorbell reader's every characteristic but identity refuses reads and writes on the verdict and answers on recovery", async () => {
+
+  const harness = makeReader({ options: [ "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger" ],
     record: testHub({ capabilities: [ "is_hub", "is_reader", "door_bell", "pin_code" ],
-      configs: [ ...wiredRows("on"), { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" } ] }) }));
-  const opener = wiredBy(() => makeOpener({ record: wiredHub("on") }));
-  const gate = wiredBy(() => makeGate({ options: ["Enable.Hub.SideDoor.Lock.Trigger"] }));
-  const ultra = wiredBy(() => makeHub({ record: tamperUltra({ "tamper_event": "true" }) }));
+      configs: [ ...wiredRows("on"), { device_id: HUB_ID, key: "pin_code", tag: "open_door_mode", value: "yes" } ] }) });
 
-  await proves(reader.harness, reader.slice);
-  await proves(opener.harness, opener.slice);
-  await proves(gate.harness, gate.slice);
-  await proves(ultra.harness, ultra.slice);
+  await assertCensus(harness, [ [Service.LockMechanism], [Service.Doorbell], [ Service.Switch, AccessReservedNames.SWITCH_ACCESSMETHOD_PIN ],
+    [ Service.Switch, AccessReservedNames.SWITCH_DOORBELL_TRIGGER ], [ Service.Switch, AccessReservedNames.SWITCH_LOCK_TRIGGER ],
+    [ Service.ContactSensor, AccessReservedNames.CONTACT_REX ] ]);
 });
 
-test("a door command refuses locally whenever the composition reads unreachable, on either of its two terms", async () => {
+test("an opener over wired terminal inputs refuses every characteristic but identity on the verdict and answers on recovery", async () => {
 
-  const refusal = LOG_PREFIX + "Unable to unlock the door. The device cannot be reached.";
+  await assertCensus(makeOpener({ record: wiredHub("on") }), [ [Service.GarageDoorOpener], [ Service.ContactSensor, AccessReservedNames.CONTACT_REL ],
+    [ Service.ContactSensor, AccessReservedNames.CONTACT_REN ], [ Service.ContactSensor, AccessReservedNames.CONTACT_REX ] ]);
+});
 
-  // The controller term: a record that reads perfectly online, behind a connection that is not healthy.
-  const outage = makeHub();
+test("a UA Gate refuses every characteristic of both doors but identity on the verdict and answers on recovery", async () => {
 
-  outage.health.isHealthy = false;
+  await assertCensus(makeGate({ options: ["Enable.Hub.SideDoor.Lock.Trigger"] }), [ [Service.GarageDoorOpener],
+    [ Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE ], [ Service.Switch, AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER ] ]);
+});
 
-  await writeLock(lockService(outage), Characteristic.LockTargetState.UNSECURED);
+test("a UA Ultra refuses its sensors' tamper status with the rest of it on the verdict and answers on recovery", async () => {
 
-  assert.deepEqual(outage.commands, [], "an unreachable controller is refused here rather than dispatched into");
-  assert.ok(outage.errors.includes(refusal), "and the refusal names reachability, since a controller outage says nothing about the device itself");
+  const harness = makeHub({ record: tamperUltra({ "tamper_event": "true" }) });
+  const sensor = harness.services.find(service => (service.UUID === Service.ContactSensor.UUID) && service.testCharacteristic(Characteristic.StatusTampered));
 
-  /* The device term: a healthy connection over a record that reads offline. Driving the two separately is what makes dropping either half of the composition fail
-   * here, where one combined arm would pass on the surviving half's strength.
-   */
-  const offline = makeHub({ record: testHub({ is_online: false }) });
+  assert.ok(sensor, "the fixture stood up a sensor carrying the tamper status");
 
-  await writeLock(lockService(offline), Characteristic.LockTargetState.UNSECURED);
+  await assertCensus(harness, [[Service.LockMechanism]]);
+});
 
-  assert.deepEqual(offline.commands, [], "a device its own record calls offline is refused the same way");
-  assert.ok(offline.errors.includes(refusal));
+// A reader with nothing selected and a reader with a doorbell alone hold nothing HomeKit can be refused on, so they cannot show No Response. This row holds that known
+// limit where it can be seen, and a characteristic one of them gains reopens it.
+test("a reader with nothing selected and a reader with a doorbell alone carry no characteristic the verdict could refuse", () => {
+
+  assert.deepEqual(coveredCharacteristics(makeHub({ record: testHub({ capabilities: ["is_reader"] }) })).map(({ label }) => label), [], "nothing selected");
+
+  const doorbell = makeHub({ record: testHub({ capabilities: [ "is_reader", "door_bell" ] }) });
+
+  assert.ok(hasDoorbell(doorbell), "the fixture stood up the doorbell");
+  assert.deepEqual(coveredCharacteristics(doorbell).map(({ label }) => label), [], "a doorbell alone");
+});
+
+/* What a door command refuses on is what HomeKit refuses on. A first fault carries each surface, and each thing that takes the verdict away fails HomeKit's write with
+ * the status and no line, its handler's wrapper standing ahead of the command, and refuses the set with the sentence, which is all an MQTT set has to answer with.
+ */
+test("HomeKit and MQTT door commands read one verdict: a blip carries them, and a lost, offline or vanished device fails the write and refuses the set", async () => {
+
+  const blippedSet = makeHub();
+
+  blippedSet.connection.isHealthy = false;
+
+  await blippedSet.mqttSet("lock", "false");
+  await settle();
+
+  assert.equal(blippedSet.commands.length, 1, "a blip carries a set");
+  assert.deepEqual(blippedSet.errors, [], "with no refusal");
+
+  const blippedWrite = makeHub();
+
+  blippedWrite.connection.isHealthy = false;
+
+  await writeLock(lockService(blippedWrite), Characteristic.LockTargetState.UNSECURED);
+
+  assert.equal(blippedWrite.commands.length, 1, "and a HomeKit write");
+  assert.deepEqual(blippedWrite.errors, [], "with no refusal");
+
+  const levers: [ string, (hub: HubHarness) => void ][] = [
+
+    [ "a lost controller", (hub): void => { hub.connection.isLost = true; } ],
+    [ "a record reading offline", (hub): void => { hub.live.record = testHub({ is_online: false }); } ],
+    [ "a record that has left the state", (hub): void => { hub.live.record = undefined; } ]
+  ];
+
+  for(const [ label, move ] of levers) {
+
+    const hub = makeHub();
+
+    move(hub);
+
+    // eslint-disable-next-line no-await-in-loop -- Each lever stands up its own hub, and the order keeps a failure's message about the first it reached.
+    await assert.rejects(writeLock(lockService(hub), Characteristic.LockTargetState.UNSECURED), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
+      "the write fails with the status under " + label);
+
+    assert.deepEqual(hub.commands, [], "and commands nothing under " + label);
+    assert.deepEqual(hub.errors, [], "and logs nothing under " + label);
+
+    // eslint-disable-next-line no-await-in-loop -- As above.
+    await hub.mqttSet("lock", "false");
+    // eslint-disable-next-line no-await-in-loop -- As above.
+    await settle();
+
+    assert.deepEqual(hub.commands, [], "the set commands nothing under " + label);
+    assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door. The device cannot be reached."], "and says so under " + label);
+  }
+});
+
+// The v2 dialect names one of the flags the verdict reads, and the reducer behind it leaves the other where the last delivery put it, so only the real merge shows this.
+test("a v2 delivery moves the online flag alone: one flag false refuses, and a return leaves the verdict refusing until the other flag is refreshed", async () => {
+
+  const { document, harness, store } = storedHub();
+  const current = lockService(harness).getCharacteristic(Characteristic.LockCurrentState);
+  const flags = (): unknown[] => [ store.snapshot().devices.get(HUB_ID)?.is_connected, store.snapshot().devices.get(HUB_ID)?.is_online ];
+
+  await assert.doesNotReject(triggerGet(current), "a record available answers");
+
+  deliverV2(store, { online: false });
+
+  assert.deepEqual(flags(), [ true, false ], "the delivery moves the online flag and leaves the connected one");
+  await assert.rejects(triggerGet(current), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and one false flag is enough to refuse");
+
+  deliverV2(store, { online: true });
+
+  await assert.doesNotReject(triggerGet(current), "the dialect gives back what it alone took away");
+
+  deliverDeviceUpdate(store, { is_connected: false, is_online: false });
+  deliverV2(store, { online: true });
+
+  assert.deepEqual(flags(), [ false, true ], "an original-dialect delivery moved both, and a v2 return moves one");
+  await assert.rejects(triggerGet(current), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "so the verdict goes on refusing");
+
+  store.applyRefreshDocuments({ controller: null, topology: document });
+
+  await assert.doesNotReject(triggerGet(current), "until a refresh restates the other flag");
+});
+
+test("a topology dropping a device's record refuses at once, whatever the hub still holds through its removal delay", async () => {
+
+  const { harness, store } = storedHub();
+  const current = lockService(harness).getCharacteristic(Characteristic.LockCurrentState);
+
+  await assert.doesNotReject(triggerGet(current), "a record available answers");
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [], id: MAIN_DOOR, name: "Door Hub" }]) });
+
+  assert.equal(store.snapshot().devices.get(HUB_ID), undefined, "the record has left the state");
+  assert.equal(harness.hub.uda.is_online, true, "while the hub holds the last value it had");
+  await assert.rejects(triggerGet(current), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE), "and the verdict reads the record that is gone");
 });
 
 test("a hub with no door control surface refuses every door command with the one sentence that says so", async () => {
@@ -1830,12 +1978,14 @@ test("a door that cannot be reached is refused for that reason before its relock
 
   const hub = makeHub();
 
-  // A door the controller reports unlocked, so the write below is a genuine relock rather than a sync from an event, which is how the relock arm sets it up too.
+  // A door the controller reports unlocked, so the set below is a genuine relock rather than a sync from an event, which is how the relock arm sets it up too. It goes
+  // over MQTT because a HomeKit write is refused by its handler's wrapper before any door command is reached.
   hub.setDoorState({ dps: "none", location_id: MAIN_DOOR, lock: "unlock" });
   hub.hub.refreshDoorState();
-  hub.health.isHealthy = false;
+  hub.connection.isLost = true;
 
-  await writeLock(lockService(hub), Characteristic.LockTargetState.SECURED);
+  await hub.mqttSet("lock", "true");
+  await settle();
 
   assert.deepEqual(hub.commands, [], "an unreachable door dispatches nothing whatever its relay is configured for");
 
@@ -2223,7 +2373,7 @@ test("a broker session hears the hub's availability right behind the plugin-leve
   assert.ok(session.slice(2).length > 0, "and the held state topics follow it");
 
   // A hub its controller cannot reach says so on the session too, in the other word.
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
 
   assert.deepEqual(restoreSession(harness.mqtt)[1], { payload: "offline", retain: true, topic: HUB_SERIAL + "/availability" });
 });
@@ -3638,9 +3788,40 @@ function followStore(gate: HubHarness, store: ReturnType<typeof createStateStore
   }
 
   gate.hub.uda = record;
+  gate.live.record = record;
   gate.emit(HUB_ID, { event: ACCESS_DEVICE_UPDATE_EVENT });
 
   return true;
+}
+
+/* A door hub over a real store, adopted on the record that store holds, so the verdict reads what the library's own reducer leaves on it. The record loop stays unrun
+ * unless an arm runs it, because a read through the projection needs none.
+ *
+ * @returns The hub, the store behind it, and the topology document it was seeded from.
+ */
+function storedHub(): { document: ReturnType<typeof doorsTopology>; harness: HubHarness; store: ReturnType<typeof createStateStore> } {
+
+  const store = createStateStore({});
+  const document = gateDocument(testHub(), [{ name: "Door Hub", unique_id: MAIN_DOOR }]);
+
+  store.applyRefreshDocuments({ controller: null, topology: document });
+
+  return { document, harness: makeHub({ record: store.snapshot().devices.get(HUB_ID) as AccessStateDevice & { mac: string }, store }), store };
+}
+
+/* Hand the store one device update in the v2 dialect through the library's own classifier, which takes the identity from the packet's meta rather than from its data.
+ *
+ * @param store - The store to deliver to.
+ * @param data  - The members the delivery carries, in that dialect's own names.
+ */
+function deliverV2(store: ReturnType<typeof createStateStore>, data: Record<string, unknown>): void {
+
+  const event = AccessClient.classifyPacket({ data, event: "access.data.v2.device.update", event_object_id: "v2-event", meta: { id: HUB_ID }, receiver_id: "",
+    save_to_history: false } as unknown as AccessEventPacket);
+
+  assert.ok(event, "the v2 shape must classify as something the library models");
+
+  store.dispatch(event);
 }
 
 // Every announcement that a door moved into a role, which is what a held role never makes.
@@ -5841,7 +6022,7 @@ test("a sensor the accessory arrived carrying is dressed at adoption from what t
   assert.strictEqual(await triggerGet(sensor.getCharacteristic(Characteristic.StatusTampered)), Characteristic.StatusTampered.NOT_TAMPERED,
     "and its tamper status is answered by the handler registered on that same sensor");
 
-  harness.health.isHealthy = false;
+  harness.connection.isLost = true;
 
   await assert.rejects(triggerGet(sensor.getCharacteristic(Characteristic.StatusActive)), hapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE),
     "and a read once the connection moved is refused rather than answered from what was last written");

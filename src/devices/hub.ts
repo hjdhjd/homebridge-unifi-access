@@ -717,7 +717,7 @@ export class AccessHub extends AccessDevice {
          * where the client holds credentials - and reads answer from the access method state model, which the record's configuration rows and the official
          * settings read feed.
          */
-        service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+        service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(async (value: CharacteristicValue) => {
 
           const enabled = value === true;
 
@@ -755,7 +755,7 @@ export class AccessHub extends AccessDevice {
            * record's rows keep the model current from there.
            */
           this.#foldMethodValue(accessMethod.method, enabled);
-        });
+        }));
       }
 
       /* Initialize the switch from the same model its reads answer from, so what HomeKit is handed and what the handler would answer agree from the first pass. The
@@ -1250,8 +1250,8 @@ export class AccessHub extends AccessDevice {
 
     service.updateCharacteristic(this.hap.Characteristic.ContactSensorState, reading);
     contact.onGet(this.answering(() => contact.value ?? reading));
-    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isReachable);
-    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(this.answering(() => this.isReachable));
+    service.updateCharacteristic(this.hap.Characteristic.StatusActive, this.isAvailable);
+    service.getCharacteristic(this.hap.Characteristic.StatusActive).onGet(this.answering(() => this.isAvailable));
   }
 
   /* How a tamper verdict renders in HomeKit - the one statement of it, read by the settling helper's own write and by the projection's sweep. Nothing established
@@ -1394,7 +1394,7 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.LockCurrentState).onGet(this.answering(lockStateGetter));
     service.getCharacteristic(this.hap.Characteristic.LockTargetState).onGet(this.answering(lockStateGetter));
 
-    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.LockTargetState).onSet(this.answering(async (value: CharacteristicValue) => {
 
       const currentState = lockStateGetter();
       const targetLocked = value === this.hap.Characteristic.LockTargetState.SECURED;
@@ -1413,7 +1413,7 @@ export class AccessHub extends AccessDevice {
       }
 
       service.updateCharacteristic(this.hap.Characteristic.LockCurrentState, lockStateGetter());
-    });
+    }));
   }
 
   // Configure a GarageDoorOpener service.
@@ -1443,7 +1443,7 @@ export class AccessHub extends AccessDevice {
 
     target.onGet(this.answering(() => target.value ?? this.#doorStateFromEvidence().target));
 
-    target.onSet(async (value: CharacteristicValue) => {
+    target.onSet(this.answering(async (value: CharacteristicValue) => {
 
       const isUaGate = this.uda.device_type === "UGT";
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
@@ -1515,7 +1515,7 @@ export class AccessHub extends AccessDevice {
 
         this.#enterDoorTransition(next);
       }
-    });
+    }));
 
     // ObstructionDetected is required - we always report no obstruction.
     service.getCharacteristic(this.hap.Characteristic.ObstructionDetected).onGet(this.answering(() => false));
@@ -1550,7 +1550,7 @@ export class AccessHub extends AccessDevice {
     // The manual direction: with an official path the switch rings and cancels the doorbell, and without one it only reflects ring events. Whatever the outcome,
     // every write schedules exactly one wake that re-reads ring truth at fire time and settles the switch back onto the mirror...the controller's own ring and
     // cancel events stay the single owner of ring state, and the wake is a read of that state, never a second writer.
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(async (value: CharacteristicValue) => {
 
       const official = this.controller.client.official;
       const action = doorbellTriggerAction({ officialAvailable: official !== null, ringing: this.doorbellRingRequestId !== null, value: value === true });
@@ -1609,7 +1609,7 @@ export class AccessHub extends AccessDevice {
       }
 
       this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, this.doorbellRingRequestId !== null), revertDelay);
-    });
+    }));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, false);
@@ -1643,7 +1643,7 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.hkLockState !== this.hap.Characteristic.LockCurrentState.SECURED));
 
     // The switch drives the lock through the hub lock command, and a refused command puts the switch back.
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(async (value: CharacteristicValue) => {
 
       // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
       if(!(await this.hubLockCommand(!value))) {
@@ -1651,7 +1651,7 @@ export class AccessHub extends AccessDevice {
         // Revert our state.
         this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), CHARACTERISTIC_REVERT_DELAY_MS);
       }
-    });
+    }));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, false);
@@ -1717,7 +1717,7 @@ export class AccessHub extends AccessDevice {
     service.getCharacteristic(this.hap.Characteristic.On).onGet(this.answering(() => this.hkSideDoorLockState !== this.hap.Characteristic.LockCurrentState.SECURED));
 
     // The switch drives the side door lock through the side door lock command, and a refused command puts the switch back.
-    service.getCharacteristic(this.hap.Characteristic.On).onSet(async (value: CharacteristicValue) => {
+    service.getCharacteristic(this.hap.Characteristic.On).onSet(this.answering(async (value: CharacteristicValue) => {
 
       // If we are on, we are in an unlocked state. If we are off, we are in a locked state.
       if(!(await this.hubSideDoorLockCommand(!value))) {
@@ -1725,7 +1725,7 @@ export class AccessHub extends AccessDevice {
         // Revert our state.
         this.timers.schedule(() => service.updateCharacteristic(this.hap.Characteristic.On, !value), CHARACTERISTIC_REVERT_DELAY_MS);
       }
-    });
+    }));
 
     // Initialize the switch.
     service.updateCharacteristic(this.hap.Characteristic.On, false);
@@ -2451,7 +2451,7 @@ export class AccessHub extends AccessDevice {
   }
 
   /* The preamble every door command shares: name the door, resolve the control surface the command dispatches through, and refuse outright when the device cannot
-   * be reached or carries no such surface. The surface travels in the answer rather than being re-checked by each caller, because TypeScript cannot carry a
+   * be vouched for or carries no such surface. The surface travels in the answer rather than being re-checked by each caller, because TypeScript cannot carry a
    * narrowing of the optional handle across a function boundary...holding it in the target is what makes it non-optional where the command dispatches.
    *
    * @param options - The verb a refusal names, and whether the side door of a UA Gate is the target.
@@ -2463,11 +2463,12 @@ export class AccessHub extends AccessDevice {
     const { action, isSideDoor } = options;
     const doorName = this.#doorCommandName(isSideDoor);
 
-    /* A device we cannot reach has nothing to command, so we refuse here rather than dispatching into a controller that cannot carry it. The refusal names
-     * reachability rather than the device's own state, because the composition it reads answers for the controller as well, and claiming a device is offline on the
-     * strength of a controller outage would assert knowledge we do not have.
+    /* A device we cannot vouch for has nothing to command, so we refuse here on the verdict HomeKit's own refusal reads, and a command works through a brief blip
+     * whichever surface sent it. A HomeKit write is refused ahead of this by the rule its handler is wrapped in, so what this speaks for is an MQTT set, which has no
+     * status to answer with and says so in the log. The refusal names reachability rather than the device's own state, because the verdict answers for the controller as
+     * well, and claiming a device is offline on the strength of a controller outage would assert knowledge we do not have.
      */
-    if(!this.isReachable) {
+    if(!this.isAvailable) {
 
       this.#refuseDoorCommand({ action, doorName, reason: "The device cannot be reached." });
 

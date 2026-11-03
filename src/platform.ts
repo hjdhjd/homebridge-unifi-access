@@ -4,8 +4,8 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch,
-  localAddressFor, systemClock } from "homebridge-plugin-utils";
+import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, Perms, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch,
+  localAddressFor, notResponding, systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
@@ -217,12 +217,47 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     return listed;
   }
 
-  // This gets called when homebridge restores cached accessories at startup. We intentionally avoid doing anything significant here, and save all that logic
-  // for device discovery.
+  // This gets called when homebridge restores cached accessories at startup. Device discovery does the significant work, and all this does beyond tracking the accessory
+  // is tell HomeKit the truth until then: whatever the feature options read, so a plugin disabled globally leaves its restored accessories refusing and registered.
   public configureAccessory(accessory: AccessAccessory): void {
 
     // Add this to the accessory array so we can track it.
     this.#accessories.push(accessory);
+
+    this.#answerUnclaimed(accessory);
+  }
+
+  /* Answer for a restored accessory until a controller holds a device for it. A value restored from the cache is one nobody can vouch for yet and a write has nothing
+   * behind it to reach, so every characteristic refuses a read and every one HomeKit can write refuses the write until a controller's device list holds it. From then on
+   * each follows that device's verdict, answering the value it holds and taking the value written. Following the device is what makes this right rather than merely
+   * cautious: a characteristic a device binds late, or never, stays on these handlers once it is held, and a handler that only refused would leave it refusing forever.
+   * Where a device binds a handler of its own, that one replaces this and nothing here is consulted again.
+   *
+   * The controllers' device lists are the record, and nothing here keeps a second one: an entry is set as a device's construction returns, so a construction that throws
+   * never sets it, and it is deleted just ahead of the one exit, so a retired device's characteristics go back to refusing.
+   *
+   * What stays out: the information service's values are static identity, and so are the names HomeKit reads and the user edits, which stay answerable and writable
+   * whatever else is true. A characteristic HomeKit cannot write takes no write handler, because HAP's own writes to one arrive through the same entry point and must
+   * land whatever the accessory is answering.
+   */
+  #answerUnclaimed(accessory: AccessAccessory): void {
+
+    const { Characteristic: { ConfiguredName, Name }, HapStatusError, Service: { AccessoryInformation } } = this.api.hap;
+    const answering = notResponding({ errorClass: HapStatusError,
+      unavailable: () => !this.controllers.some(({ configuredDevices }) => configuredDevices.get(accessory.UUID)?.isAvailable) });
+
+    for(const service of accessory.services.filter(({ UUID }) => UUID !== AccessoryInformation.UUID)) {
+
+      for(const characteristic of service.characteristics.filter(({ UUID }) => ![ ConfiguredName.UUID, Name.UUID ].includes(UUID))) {
+
+        characteristic.onGet(answering(() => characteristic.value));
+
+        if(characteristic.props.perms.includes(Perms.PAIRED_WRITE)) {
+
+          characteristic.onSet(answering(() => undefined));
+        }
+      }
+    }
   }
 
   /**

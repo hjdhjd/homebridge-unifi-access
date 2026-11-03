@@ -1427,6 +1427,20 @@ export function isManagedRecord(device: AccessStateDevice): device is AccessStat
   return device.is_managed && Boolean(device.mac);
 }
 
+/**
+ * Whether a device's live record vouches for the device, the one rule HomeKit's refusal, the MQTT availability statements and the settings panel's label all read: a
+ * record that is adopted, connected, managed and online. A record gone reads false, because a device that has left the controller's state is one nobody can vouch for,
+ * whatever it last said.
+ *
+ * @param record - The device's live record, or undefined where the record has left the state.
+ *
+ * @returns `true` when the record stands and every flag it carries reads true.
+ */
+export function recordAvailable(record: AccessStateDevice | undefined): boolean {
+
+  return ([ "is_adopted", "is_connected", "is_managed", "is_online" ] as const).every(key => record?.[key] === true);
+}
+
 /* What the webhook port setting resolves to. A setting that is absent or turned off is the default, silently: nothing was said. A setting that is present and a whole
  * number from 1 to 65535 is the port, with 0 refused because an ephemeral port cannot be registered. Anything else present is invalid, answered as the default with
  * the value that was rejected, so the one reader can say so once, at read time, rather than each controller discovering it when the listener refuses to bind.

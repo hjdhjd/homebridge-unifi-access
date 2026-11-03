@@ -325,7 +325,8 @@ test("makeControllerDouble with no options answers the members the plugin reads 
    * answering one fixed thing could not coincide with, and the loop spawner check asserts the default's no-op behavior.
    */
   assert.equal(controller.signal.aborted, false, "the controller's own lifetime is live");
-  assert.equal(controller.client.connection.isHealthy, true, "its client reports a healthy connection, which is half of what a device composes availability from");
+  assert.equal(controller.client.connection.isLost, false, "its client reports a connection it has not lost");
+  assert.equal(controller.isAvailable, true, "which is the half of a device's availability its controller answers for");
   assert.equal(controller.client.doorStates.size, 0, "and it knows no door state until an arm seeds one");
   assert.equal(controller.platform.webhookPort, ACCESS_WEBHOOK_PORT, "the platform underneath is a default double of the plugin's own shape");
   assert.deepEqual(controller.config, { address: "1.2.3.4" }, "and the configuration a device composes its own requests from carries the default address");
