@@ -357,14 +357,21 @@ export class AccessHub extends AccessDevice {
    * side arm gated on the user's side-door preference. It answers the doors whose identity this resolution moved, so the caller can seed exactly those, and a
    * topology the client has not learned yet leaves the last resolution standing rather than withdrawing every door behind it.
    *
+   * The policy is handed the roles this resolution last landed on, on every pass past adoption and never on adoption itself. It keeps them through a record carrying no
+   * relay data, and such a record binding no known door moves nothing and fills nothing. The instance holds them and nothing persists them, so a restart adopts and
+   * guesses afresh. A first pass that finds no doors returns before reaching the policy, so a later pass finding doors on a record saying nothing leaves the roles vacant
+   * until a record binds a known door or carries relay data...that is the cost of a silent record never choosing a door, and a role such a record leaves empty refuses
+   * rather than guesses.
+   *
    * A role whose occupant changed - a door moved into it, or the role withdrawn outright - takes the relock window opened for the door that left with it. A window
    * of ours belongs to the door it was opened for, and one left standing would relock whichever door now holds the role, or services standing at their last
    * reading. The registry's clear does nothing to an unarmed key, so the construction pass retires nothing.
    *
    * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction announces no door: its previous enumeration is the empty
    * seed, so every door it resolves counts as moved, and an adoption is not a transition anyone observed. A pass that moved a role, adoption included, also says
-   * what the bindings were and what they resolved to, so a field report carries its own evidence. Roles the bindings named are said at debug level. Roles that
-   * were guessed are said as a warning, because a guessed door can be the wrong one and only the user can tell.
+   * what the bindings were and what they resolved to, so a field report carries its own evidence. An adoption that resolved no role says the same, because it moved
+   * nothing and would otherwise leave the gate silent until its first refused command. Roles the bindings named are said at debug level. Roles that were guessed
+   * are said as a warning, because a guessed door can be the wrong one and only the user can tell.
    *
    * @param options - The pass this discovery is running as.
    *
@@ -384,7 +391,9 @@ export class AccessHub extends AccessDevice {
       return [];
     }
 
-    const discovered = discoverDoorLocations({ device: this.uda, doors: doors, sideDoorEligible: this.hints.hasSideDoor });
+    const discovered = discoverDoorLocations({ device: this.uda, doors: doors,
+      held: initialized ? { mainDoorLocationId: this.#gateDoor(false), sideDoorLocationId: this.#gateDoor(true) } : undefined,
+      sideDoorEligible: this.hints.hasSideDoor });
     const previous = this.#gateDoors;
     const next: DrivenDoor[] = [];
 
@@ -432,16 +441,16 @@ export class AccessHub extends AccessDevice {
 
       if(initialized) {
 
-        // A published binding can name a door ahead of the topology, so a door the snapshot carries nothing for is announced by the identity it was named under.
+        // Every role names a door the topology carries, so the find always answers here and the identity beside it exists only for the type.
         this.log.info("The gate's " + role + " is now " + (doors.find(door => door.unique_id === arriving.locationId)?.name ?? arriving.locationId) + ".");
       }
     }
 
     /* The bindings are read here rather than handed back by the policy, which answers with the door identities and what decided them, and only on a pass that
-     * moved a role. Each binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or port said as such, and each
-     * line below carries that one rendering.
+     * moved a role or an adoption that resolved none. Each binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or
+     * port said as such, and each line below carries that one rendering.
      */
-    if(changed) {
+    if(changed || (!initialized && !next.length)) {
 
       const bindings = portBindings(this.uda).map(binding => (binding.name ?? "unnamed") + " on " + (binding.port ?? "an unnamed port") + " bound to " + binding.doorId);
       const renderedBindings = bindings.length ? bindings.join(", ") : "none";
@@ -516,7 +525,8 @@ export class AccessHub extends AccessDevice {
   }
 
   /* Every evidence-gated and capability-gated service this hub offers, configured from the record as it stands. It runs once at construction and again on every
-   * device update, so a capability appearing or disappearing, a port rebound in Access, and a wiring change all reach HomeKit without a restart.
+   * device update, so a capability appearing or disappearing, a port rebound in Access whose record carries its relay data, and a wiring change all reach HomeKit
+   * without a restart.
    *
    * A UA Gate re-resolves its doors first, so every service below reads the current enumeration, and the doors that moved are seeded last, once their services
    * exist. The order within is the construction order the position sensor's dependency fixes: the terminal inputs before the lock, so the position sensor exists
@@ -1454,17 +1464,25 @@ export class AccessHub extends AccessDevice {
 
       /* Halting a gate is a command of its own, and the library scopes it to the hardware that has one. A client holding no path to carry it says so at debug and
        * the machine proceeds identically: the gate stands where its travel left it either way, and there is no second verb to reach for.
+       *
+       * A gate with no main door says the same and sends nothing, because the library answers a stop naming no door with whichever door its first binding names, and
+       * a role left vacant is a door we refused to guess.
        */
       if(halting && isUaGate) {
+
+        const mainDoor = this.#gateDoor(false);
 
         if(!this.hubProjection) {
 
           this.log.debug("Unable to halt the gate. This device has no door control surface.");
+        } else if(!mainDoor) {
+
+          this.log.debug("Unable to halt the gate. The controller reports no door for it.");
         } else {
 
           try {
 
-            await this.hubProjection.stop({ doorId: this.#gateDoor(false) });
+            await this.hubProjection.stop({ doorId: mainDoor });
           } catch(error) {
 
             this.log.debug("Unable to halt the gate: %s.", formatErrorMessage(error));
@@ -3190,9 +3208,9 @@ export class AccessHub extends AccessDevice {
     const tamperMoved = this.projectTamperState();
 
     /* Re-gate every service this record can move, from the evidence this update brought with it. Running the whole pass unconditionally is what lets a capability
-     * arriving or going, a rebound port, and a wiring change reach HomeKit mid-run on any hub family rather than only on the one that happened to be checked for
-     * it, and the pass is cheap and silent on repeat by construction. It dresses a service it creates and nothing else, because every service already standing was
-     * dressed at adoption.
+     * arriving or going, a rebound port whose record carries its relay data, and a wiring change reach HomeKit mid-run on any hub family rather than only on the one
+     * that happened to be checked for it, and the pass is cheap and silent on repeat by construction. It dresses a service it creates and nothing else, because every
+     * service already standing was dressed at adoption.
      */
     this.#configureServices({ initialized: true });
 

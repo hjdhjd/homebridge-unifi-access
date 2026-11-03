@@ -14,7 +14,7 @@ import { AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootst
 import type { AccessCapabilities, AccessControllerConfig, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice,
   StateStore } from "unifi-access";
 import { AccessStatusFeed, classifyStatusError, composeStatusRows, narrowStatusContextRequest } from "./webui-status.ts";
-import { ROOT_ID, configRows, doorsTopology, hubRecord, readerRecord } from "./testing.helpers.ts";
+import { GATE_DOOR_LOCK_RELAY, ROOT_ID, configRows, doorsTopology, gatePort, gatePorts, hubRecord, readerRecord } from "./testing.helpers.ts";
 import type { StatusContextController, StatusContextRequest, StatusFeedClient, StatusFeedHubHandle } from "./webui-status.ts";
 import type { StatusEvent, StatusRow } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
@@ -1368,7 +1368,7 @@ test("a UA Gate view drives the shared discovery through the live client and ass
 
     device_type: "UGT",
     door: { unique_id: "door1" },
-    extensions: [{ extension_name: "port_setting", target_name: "oper2", target_value: "door2" }]
+    extensions: gatePorts({ deviceId: "device1", main: { name: "Door door1", unique_id: "door1" }, side: { name: "Door door2", unique_id: "door2" } })
   });
 
   store.applyRefreshDocuments({ controller: null, topology: doorsTopology([ { devices: [gate], id: "door1" }, { devices: [], id: "door2" } ]) });
@@ -1400,4 +1400,30 @@ test("a UA Gate view drives the shared discovery through the live client and ass
 
   assert.deepEqual(sideFrames.map((frame) => frame.kind), ["row"]);
   assert.deepEqual(frameOf(sideFrames, 0, "row").row, { id: "sidedoor", value: "Open" });
+});
+
+test("a UA Gate view whose record binds port 2 alone renders the main rows as placeholders and the side rows from that port's door", async () => {
+
+  const store = createStateStore({});
+  const gate = bareHub("device1", MAC_ONE, { device_type: "UGT",
+    extensions: [gatePort({ deviceId: "device1", doorId: "door2", name: "Door door2", port: "port2", relayKey: GATE_DOOR_LOCK_RELAY })] });
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([ { devices: [gate], id: "door1" }, { devices: [], id: "door2" } ]) });
+
+  // Each door carries a reading of its own, so a main row borrowing one is a red test rather than an invisible pass.
+  store.dispatch(doorEvent("door1", { dps: "open", dps_connected: true, lock: "unlocked" }));
+  store.dispatch(doorEvent("door2", { dps: "close", dps_connected: true, lock: "locked" }));
+
+  const { client } = makeClient(store);
+  const frames: StatusEvent[] = [];
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
+
+  feed.context(contextRequest([SERIAL_ONE]));
+  await feed.view(SERIAL_ONE);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  const answer = forSerial(frames, SERIAL_ONE);
+
+  assert.deepEqual(answer.map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+  assert.deepEqual(idValues(frameOf(answer, 1, "snapshot").rows), [ [ "lock", "" ], [ "door", "" ], [ "sidelock", "Locked" ], [ "sidedoor", "Closed" ] ]);
 });

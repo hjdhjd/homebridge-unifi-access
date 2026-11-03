@@ -2,7 +2,7 @@
  *
  * testing.helpers.ts: The fixture builders more than one suite reads - the Homebridge runtime and the builder of every Homebridge API double, the accessories
  * built on that runtime and the readers of what HAP recorded on them, the line a name watch logs as it restores a name, the topology documents, the configuration
- * rows, the managed device records, and the platform and controller doubles every suite stands its devices up over.
+ * rows, a UA Gate's port bindings, the managed device records, and the platform and controller doubles every suite stands its devices up over.
  *
  * Every accessory, service and characteristic a suite touches is the real thing. This file loads the Homebridge runtime once, through homebridge-plugin-utils'
  * Homebridge double, and makeTestApi builds every API double a suite uses over it, so an accessory is Homebridge's own PlatformAccessory over the hap-nodejs copy
@@ -252,6 +252,44 @@ export function configRows({ deviceId = "device1", entries, tag = "input_state" 
   tag?: string; }): AccessDeviceEntryConfig[] {
 
   return Object.entries(entries).map(([ key, value ]) => ({ device_id: deviceId, key, tag, value }));
+}
+
+// The relay keys a captured UA Gate's ports name, written as literals so a suite proves the policy's spelling rather than agreeing with whatever the policy answers.
+export const GATE_DOOR_LOCK_RELAY = "output_door_lock_relay";
+export const GATE_OPERATOR_RELAY = "output_oper1_relay";
+
+/**
+ * Build one of a UA Gate's port-to-door bindings in the shape a captured gate record carries it: the port as the extension's source, the door it serves as its target,
+ * and the port's relay as a configuration row. A delivery that carried no relay data has no configuration rows at all, so an arm leaving the relay key off reads as one.
+ *
+ * @param options - deviceId: the device the binding is addressed to, defaulting to the identity the shared hub record carries; doorId: the door the port is bound to;
+ *                  name: what the controller wrote beside the binding; port: the port it belongs to; relayKey: the key of the port's relay. An arm leaving the name or
+ *                  the port off gets a binding carrying none.
+ *
+ * @returns The extension.
+ */
+export function gatePort({ deviceId = "device1", doorId, name, port, relayKey }: { deviceId?: string; doorId: string; name?: string; port?: string;
+  relayKey?: string; }): Record<string, unknown> {
+
+  return { device_id: deviceId, extension_name: "port_setting", ...((port !== undefined) && { source_id: port }),
+    ...((relayKey !== undefined) && { target_config: [{ config_key: "relay_key", config_tag: "device_info", config_value: relayKey }] }),
+    ...((name !== undefined) && { target_name: name }), target_type: "door", target_value: doorId, unique_id: "ext-" + (port ?? doorId) };
+}
+
+/**
+ * Build both of a UA Gate's port bindings as a captured gate record carries them, each under the name of the door it serves: port 1 on its operator relay and port 2 on
+ * its door-lock relay. Every identity is the calling arm's stand-in.
+ *
+ * @param options - deviceId: the device the bindings are addressed to, defaulting to the identity the shared hub record carries; main: the door port 1 serves; side: the
+ *                  door port 2 serves.
+ *
+ * @returns The extensions, port 1's first, as the capture delivers them.
+ */
+export function gatePorts({ deviceId, main, side }: { deviceId?: string; main: { name: string; unique_id: string }; side: { name: string; unique_id: string };
+}): Record<string, unknown>[] {
+
+  return [ gatePort({ deviceId, doorId: main.unique_id, name: main.name, port: "port1", relayKey: GATE_OPERATOR_RELAY }),
+    gatePort({ deviceId, doorId: side.unique_id, name: side.name, port: "port2", relayKey: GATE_DOOR_LOCK_RELAY }) ];
 }
 
 /**

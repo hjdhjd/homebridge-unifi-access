@@ -14,11 +14,11 @@ import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, ServiceEventTypes,
   setServiceName } from "homebridge-plugin-utils";
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../controller/events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
-import { AccessAbortedError, AccessApiError, AccessCapabilityError, AccessDeclinedError } from "unifi-access";
-import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessHub as AccessHubProjection,
+import { AccessAbortedError, AccessApiError, AccessCapabilityError, AccessClient, AccessDeclinedError, createStateStore } from "unifi-access";
+import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection,
   AccessStateDevice } from "unifi-access";
-import { Characteristic, RESTORED_LINE, Service, configRows, eventsFrom, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory,
-  makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
+import { Characteristic, GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, RESTORED_LINE, Service, configRows, doorsTopology, eventsFrom, gatePort, gatePorts, hap, hubRecord,
+  makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
 import { EventEmitter, getEventListeners, on } from "node:events";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
@@ -42,13 +42,21 @@ const HUB_MAC = "aabbccddee01";
 const HUB_SERIAL = "AABBCCDDEE01";
 const MAIN_DOOR = "740785e0-ef1d-4a2b-a720-3c8804feea9c";
 const SIDE_DOOR = "8f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
-// The doors a rebind moves a gate's ports onto. The topology the harness stands up knows neither of them, so an announcement naming one names it by its identity,
-// which is what tells a door read from the record apart from a name read from the topology.
+// The doors a rebind moves a gate's ports onto. The topology the harness stands up knows neither of them until an arm adds them.
 const NEW_MAIN = "b21c4d5e-6f70-4a2b-8193-c4d5e6f70819";
 const NEW_SIDE = "c32d5e6f-7081-4b3c-9204-d5e6f7081920";
 // Another hub's door in the controller's topology, which no binding of a gate's record names, so a gate handing it a role would drive a door it does not own.
 const OTHER_DOOR = "d43e6f70-8192-4c4d-a315-e6f708192a31";
 const READER_ID = "d8b3706bb73b";
+
+// What a binding the harness builds carries beside its port, unless an arm is about the name itself.
+const BINDING_NAME = "Test Door";
+
+// The doors the captured pair below serves, port 1's named like a side door and port 2's like a main gate, so names agreeing with the ports can never pass for them.
+const PEDESTRIAN_GATE = { name: "Pedestrian Gate", unique_id: MAIN_DOOR };
+const VEHICLE_GATE = { name: "Vehicle Gate", unique_id: SIDE_DOOR };
+const CAPTURE_DOORS = [ PEDESTRIAN_GATE, VEHICLE_GATE ];
+const CAPTURE_PORTS = gatePorts({ deviceId: HUB_ID, main: PEDESTRIAN_GATE, side: VEHICLE_GATE });
 
 // The identity every unlock this plugin sends names itself by, written as a literal so the assertions prove the spelling rather than agreeing with whatever the constant
 // behind them answers.
@@ -154,6 +162,8 @@ interface HubHarness {
   commands: RecordedCommand[];
   debugs: string[];
   deliver: (event: string, delivery: unknown) => void;
+  // The topology's doors, the map the client double's snapshot answers from, so an arm can teach a running gate a door or lose one under it.
+  doors: Map<string, { name: string; unique_id: string }>;
   emit: (event: string, packet: unknown) => void;
   errors: string[];
   fetches: string[];
@@ -505,6 +515,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
         handler(delivery);
       }
     },
+    doors,
     emit: (event: string, packet: unknown): void => {
 
       const registered = handlers.get(event) ?? [];
@@ -559,18 +570,50 @@ function makeHub(options: HubOptions = {}): HubHarness {
   };
 }
 
-/* The extension a controller publishes one of a gate's port-to-door bindings through, in the shape the wire sends it. The port's own name is what tells the side
- * door's binding from the main door's, and the target is the door that port serves.
+/* The extension a controller publishes one of a gate's port-to-door bindings through, in the shape the wire sends it. The port is what names the role, whatever the
+ * controller writes beside the binding, and the target is the door that port serves. A relay key left off stands for a delivery that carried no relay data.
  *
- * @param name   - The port name the controller writes beside the binding.
- * @param doorId - The door the port is bound to.
+ * @param port     - The port the binding belongs to, or undefined for a binding naming none.
+ * @param doorId   - The door the port is bound to.
+ * @param relayKey - The key of the port's relay.
+ * @param name     - What the controller writes beside the binding.
  *
  * @returns The extension.
  */
-function portBinding(name: string, doorId: string): Record<string, unknown> {
+function portBinding(port: string | undefined, doorId: string, relayKey?: string, name = BINDING_NAME): Record<string, unknown> {
 
-  return { device_id: HUB_ID, extension_name: "port_setting", target_config: [], target_name: name, target_type: "door", target_value: doorId,
-    unique_id: "ext-" + name };
+  return gatePort({ deviceId: HUB_ID, doorId, name, port, relayKey });
+}
+
+// Port 1 on its operator relay, half of the pair a gate trusts.
+function mainPort(doorId: string): Record<string, unknown> {
+
+  return portBinding("port1", doorId, GATE_OPERATOR_RELAY);
+}
+
+// Port 2 on its door-lock relay, the other half of that pair.
+function sidePort(doorId: string): Record<string, unknown> {
+
+  return portBinding("port2", doorId, GATE_DOOR_LOCK_RELAY);
+}
+
+// Teach a running gate's topology the doors a rebind moves its ports onto, because a door the topology lacks takes no role.
+function addReboundDoors(harness: HubHarness): void {
+
+  harness.doors.set(NEW_MAIN, { name: "New Main Gate", unique_id: NEW_MAIN });
+  harness.doors.set(NEW_SIDE, { name: "New Side Gate", unique_id: NEW_SIDE });
+}
+
+/* The sentence a gate over the captured pair writes at debug level on adoption, whichever door its side role landed on.
+ *
+ * @param sideDoor - The door the side role landed on, or none.
+ *
+ * @returns The line as the debug sink carries it.
+ */
+function resolutionOfCapture(sideDoor: string): string {
+
+  return LOG_PREFIX + "Gate doors resolved from the port bindings (Pedestrian Gate on port1 bound to " + MAIN_DOOR + ", Vehicle Gate on port2 bound to " + SIDE_DOOR +
+    ") to main door " + MAIN_DOOR + " and side door " + sideDoor + ".";
 }
 
 // A UA Gate with both of its doors discovered and a credentialed client behind it, so an arm can count the requests a door command composes through the transport
@@ -3067,10 +3110,12 @@ test("a gate whose record rebinds its ports mid-run follows the rebind", () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
 
+  addReboundDoors(gate);
+
   // What the controller has established about the door the main port is about to be bound to, which is what the seed of a moved identity reads.
   gate.setDoorState({ dps: "open", location_id: NEW_MAIN, lock: "unlock" });
 
-  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+  restateRecord(gate, { extensions: [ sidePort(NEW_SIDE), mainPort(NEW_MAIN) ] });
 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
     "the door the main port now names is seeded from the map");
@@ -3097,9 +3142,9 @@ test("a gate whose record rebinds its ports mid-run follows the rebind", () => {
 
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and the one it left behind owns nothing");
 
-  // The topology carries neither door, so each announcement names the identity the binding gave it.
-  assert.equal(lineCount(gate, "The gate's main door is now " + NEW_MAIN + "."), 1);
-  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1);
+  // Each announcement names the door the binding gave the role by the name the topology carries for it.
+  assert.equal(lineCount(gate, "The gate's main door is now New Main Gate."), 1);
+  assert.equal(lineCount(gate, "The gate's side door is now New Side Gate."), 1);
 });
 
 test("a gate announces each door whose identity moved by its topology name, and a record whose bindings did not move is silent", () => {
@@ -3107,13 +3152,13 @@ test("a gate announces each door whose identity moved by its topology name, and 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
 
   // The two roles swapped over the doors the topology knows, so each announcement can be read for the name it renders rather than for the identity behind it.
-  restateRecord(gate, { extensions: [ portBinding("oper1", SIDE_DOOR), portBinding("oper2", MAIN_DOOR) ] });
+  restateRecord(gate, { extensions: [ mainPort(SIDE_DOOR), sidePort(MAIN_DOOR) ] });
 
   assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 1, "a moved identity is announced under the name the topology carries for it");
   assert.equal(lineCount(gate, "The gate's side door is now Main Gate."), 1);
   assert.equal(gate.lines.length, 2, "and nothing else is said for the pass that moved them");
 
-  restateRecord(gate, { extensions: [ portBinding("oper1", SIDE_DOOR), portBinding("oper2", MAIN_DOOR) ] });
+  restateRecord(gate, { extensions: [ mainPort(SIDE_DOOR), sidePort(MAIN_DOOR) ] });
 
   assert.equal(gate.lines.length, 2, "a record whose bindings did not move moves no identity, so it says nothing");
   assert.deepEqual(lockPayloads(gate), [], "and no seed of either pass reaches the topic");
@@ -3121,14 +3166,15 @@ test("a gate announces each door whose identity moved by its topology name, and 
 
 test("a gate whose side door binding is withdrawn says so once and keeps the side door's services at their last reading", () => {
 
-  // A topology of one door, so the side arm's name and two-door fallbacks answer nothing and the side door is the binding's to name or to withhold.
+  // A topology of one door at adoption, so the side role is the binding's to name or to withhold.
   const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], options: ["Enable.Hub.Door.Service=Lock"] });
 
-  restateRecord(gate, { extensions: [ portBinding("oper1", MAIN_DOOR), portBinding("oper2", NEW_SIDE) ] });
+  addReboundDoors(gate);
+  restateRecord(gate, { extensions: [ mainPort(MAIN_DOOR), sidePort(NEW_SIDE) ] });
 
-  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1, "the binding names a side door the topology never resolved");
+  assert.equal(lineCount(gate, "The gate's side door is now New Side Gate."), 1, "the binding names a side door the topology never resolved");
 
-  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+  restateRecord(gate, { extensions: [mainPort(MAIN_DOOR)] });
 
   assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1,
     "and the binding going is warned, because a role nothing occupies is not a role the gate can drive");
@@ -3138,7 +3184,7 @@ test("a gate whose side door binding is withdrawn says so once and keeps the sid
 
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [], "and nothing delivered under the withdrawn identity moves it");
 
-  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+  restateRecord(gate, { extensions: [mainPort(MAIN_DOOR)] });
 
   assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1,
     "a role that was already vacant did not move, so the warning is not repeated");
@@ -3148,13 +3194,15 @@ test("a rebind retires the relock window opened for the door that left the role"
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
 
+  addReboundDoors(gate);
+
   gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
 
   assert.deepEqual(lockPayloads(gate), ["false"], "the unlock opens the window");
   assert.equal(lineCount(gate, "Gate unlocked."), 1);
 
   gate.setDoorState({ dps: "open", location_id: NEW_MAIN, lock: "unlock" });
-  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+  restateRecord(gate, { extensions: [ sidePort(NEW_SIDE), mainPort(NEW_MAIN) ] });
 
   assert.deepEqual(lockPayloads(gate), ["false"], "the seed of the door that took the role agrees with what the gate already reads, so it is silent");
 
@@ -3169,19 +3217,21 @@ test("a rebind retires the relock window opened for the door that left the role"
   assert.equal(lineCount(gate, "Gate locked."), 1);
 });
 
-test("a gate whose bindings name no side door keeps each door in its role, whichever order the controller delivers the bindings in", () => {
+test("a gate whose bindings sit on neither of its ports keeps each door in its role, whichever order the controller delivers the bindings in", () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
 
-  /* Neither binding names the side door's port, so neither identifies a role: the main door stays the one the record's location names and the side door the one
-   * the topology names like a side door, in both delivery orders. A rule taking the main door from the first binding delivered would announce NEW_MAIN on the
-   * first restatement and NEW_SIDE on the second.
+  /* Neither binding is on a port that names a role, so the main door stays the one the record's location names and the side door the one the topology names like a side
+   * door, in both delivery orders. Each carries relay data, so the arms decide this rather than the hold. A rule taking the main door from the first binding delivered
+   * would announce the side door on the first restatement and the main door's return on the second.
    */
-  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper3", NEW_SIDE) ] });
+  const extensions = [ portBinding("port3", SIDE_DOOR, "output_aux_relay"), portBinding("port4", MAIN_DOOR, "output_aux_relay") ];
+
+  restateRecord(gate, { extensions });
 
   assert.equal(gate.lines.length, 0, "bindings that identify no role move no door");
 
-  restateRecord(gate, { extensions: [ portBinding("oper3", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+  restateRecord(gate, { extensions: [...extensions].reverse() });
 
   assert.equal(gate.lines.length, 0, "and the same bindings delivered in the other order move none either");
 
@@ -3196,28 +3246,32 @@ test("a gate whose bindings name no side door keeps each door in its role, which
     "the main door never left the door the location names");
 });
 
-test("a gate carrying a third binding beside its side door's takes the side door from its port and leaves the main door where it stood", () => {
+test("a gate carrying a third binding beside port 1 and port 2 takes its roles from those ports", () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
 
-  /* The side door's port names its binding, so the side door moves to it. The main door's binding is trusted only as the one other binding beside the side door's,
-   * so with two others there the main door stays the one the location names. A rule trusting any binding beside the side door's would move the main door to
-   * NEW_MAIN and announce it as well.
-   */
-  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper2", NEW_SIDE), portBinding("oper3", SIDE_DOOR) ] });
+  addReboundDoors(gate);
 
-  assert.equal(lineCount(gate, "The gate's side door is now " + NEW_SIDE + "."), 1, "the side door follows the port that names it");
-  assert.equal(gate.lines.length, 1, "and the main door stays where it stood, silently");
+  /* Each port names its own role, whatever else the record binds. The third binding is delivered first and names the door the side role is leaving, so a rule trusting
+   * the first binding delivered, or counting the bindings beside the side door's, would land somewhere else or read the pair as a guess.
+   */
+  restateRecord(gate, { extensions: [ portBinding("port3", SIDE_DOOR, "output_aux_relay"), mainPort(NEW_MAIN), sidePort(NEW_SIDE) ] });
+
+  assert.equal(lineCount(gate, "The gate's main door is now New Main Gate."), 1, "the main door follows its port");
+  assert.equal(lineCount(gate, "The gate's side door is now New Side Gate."), 1, "the side door follows its port");
+  assert.equal(gate.lines.length, 2, "and nothing else moves");
+  assert.deepEqual(guessLines(gate), [], "and the pair is trusted, third binding or not");
 });
 
 test("a gate whose record binds two of the controller's doors takes its roles from them, so another hub's door its location names takes neither", () => {
 
   /* The topology lists another hub's door first, under a name the main arm matches, and the record's location names it. The bindings carry the names of the doors
-   * they serve, so neither identifies a role, and the arms below them choose among the gate's two bound doors alone.
+   * they serve and no port, so neither identifies a role, and the arms below the ports choose among the gate's two bound doors alone.
    */
   const gate = makeGate({ doors: [ { name: "Front Door", unique_id: OTHER_DOOR }, { name: "Main Gate", unique_id: MAIN_DOOR },
     { name: "Pedestrian Gate", unique_id: SIDE_DOOR } ], options: ["Enable.Hub.Door.Service=Lock"], record: testHub({ device_type: "UGT",
-    extensions: [ portBinding("Main Gate", MAIN_DOOR), portBinding("Pedestrian Gate", SIDE_DOOR) ], location_id: OTHER_DOOR }) });
+    extensions: [ gatePort({ deviceId: HUB_ID, doorId: MAIN_DOOR, name: "Main Gate" }), gatePort({ deviceId: HUB_ID, doorId: SIDE_DOOR, name: "Pedestrian Gate" }) ],
+    location_id: OTHER_DOOR }) });
 
   gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: OTHER_DOOR });
 
@@ -3231,22 +3285,22 @@ test("a gate whose record binds two of the controller's doors takes its roles fr
   assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and its own side door the side role");
 });
 
-/* A gate's port bindings as each of its resolution sentences renders them. The bindings the harness builds carry a name and no port, so each one's port reads
- * as unnamed.
+/* A gate's port bindings as each of its resolution sentences renders them. The bindings the harness builds all carry one name, and a binding naming no port reads as
+ * unnamed.
  *
- * @param bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ * @param bindings - Each binding as its port and the door it is bound to, in delivered order.
  *
  * @returns The rendered bindings, or none.
  */
-function renderedBindings(bindings: [ string, string ][]): string {
+function renderedBindings(bindings: [ string | undefined, string ][]): string {
 
-  return bindings.length ? bindings.map(([ name, doorId ]) => name + " on an unnamed port bound to " + doorId).join(", ") : "none";
+  return bindings.length ? bindings.map(([ port, doorId ]) => BINDING_NAME + " on " + (port ?? "an unnamed port") + " bound to " + doorId).join(", ") : "none";
 }
 
 /* The sentence a gate writes at debug level for one resolution of its doors that its bindings named, as the debug sink carries it: the bindings it resolved from
  * and the door each role landed on.
  *
- * @param bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ * @param bindings - Each binding as its port and the door it is bound to, in delivered order.
  * @param mainDoor - The door the main role landed on, or none.
  * @param sideDoor - The door the side role landed on, or none.
  *
@@ -3261,7 +3315,7 @@ function resolution(bindings: [ string, string ][], mainDoor: string, sideDoor: 
  * them. Each door is spelled as the gate renders it, by its topology name with its identity beside it, by its identity alone, or as no door.
  *
  * @param options          - The resolution to render.
- * @param options.bindings - Each binding as the name the controller wrote beside it and the door it is bound to, in delivered order.
+ * @param options.bindings - Each binding as its port and the door it is bound to, in delivered order.
  * @param options.device   - The record's embedded door, as rendered.
  * @param options.location - The record's location, as rendered.
  * @param options.main     - The door the main role landed on, as rendered.
@@ -3269,7 +3323,7 @@ function resolution(bindings: [ string, string ][], mainDoor: string, sideDoor: 
  *
  * @returns The sentence, without the logger's own prefix.
  */
-function guessWarning(options: { bindings: [ string, string ][]; device: string; location: string; main: string; side: string }): string {
+function guessWarning(options: { bindings: [ string | undefined, string ][]; device: string; location: string; main: string; side: string }): string {
 
   return "Unable to tell this gate's doors apart from its port bindings, so its main door was matched to " + options.main + " and its side door to " +
     options.side + ". If both are right, there is nothing to do. The port bindings are " + renderedBindings(options.bindings) + ", the device's door is " +
@@ -3301,8 +3355,9 @@ function resolutionLines(harness: HubHarness): string[] {
 test("a gate whose roles were guessed warns once, whatever the log level, naming each door chosen and the record inputs behind it", () => {
 
   const gate = makeGate({ keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"] });
-  const adoption = guessWarning({ bindings: [], device: "no door", location: "Main Gate (" + MAIN_DOOR + ")", main: "Main Gate (" + MAIN_DOOR + ")",
-    side: "Pedestrian Gate (" + SIDE_DOOR + ")" });
+  const mainGate = "Main Gate (" + MAIN_DOOR + ")";
+  const pedestrianGate = "Pedestrian Gate (" + SIDE_DOOR + ")";
+  const adoption = guessWarning({ bindings: [], device: "no door", location: mainGate, main: mainGate, side: pedestrianGate });
 
   // The record binds nothing, so adoption takes the main door from the location and the side door from its name, and the user is told without debug logging.
   assert.equal(warnCount(gate, adoption), 1, "adoption warns the guess once");
@@ -3311,19 +3366,27 @@ test("a gate whose roles were guessed warns once, whatever the log level, naming
 
   assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "a pass that moved no role warns nothing");
 
-  // The side door's port and the one binding beside it name both roles, so the rebind moves them without a guess.
-  restateRecord(gate, { extensions: [ portBinding("oper1", NEW_MAIN), portBinding("oper2", NEW_SIDE) ] });
+  // Port 1 on its operator relay and port 2 on its door-lock relay name both roles, so the rebind moves them without a guess.
+  addReboundDoors(gate);
+  restateRecord(gate, { extensions: [ mainPort(NEW_MAIN), sidePort(NEW_SIDE) ] });
 
-  assert.equal(lineCount(gate, "The gate's main door is now " + NEW_MAIN + "."), 1, "the rebind moves the main role");
+  assert.equal(lineCount(gate, "The gate's main door is now New Main Gate."), 1, "the rebind moves the main role");
   assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and warns nothing");
 
-  /* The bindings go while the record's embedded door names the main door the topology has not learned, so the main role stays and the side role falls to the
-   * side door's name. A pass that moved only the side role still guessed, and the door the topology lacks is named by its identity alone.
+  /* The bindings go while the side door leaves the topology, so the main role stays where it is held and the side role goes with its door, because a record saying
+   * nothing fills nothing. A pass that moved only the side role still guessed, and the record's embedded door, which the topology lacks, is named by its identity alone.
    */
-  restateRecord(gate, { door: { unique_id: NEW_MAIN }, extensions: [] });
+  gate.doors.delete(NEW_SIDE);
+  restateRecord(gate, { door: { unique_id: NEW_SIDE }, extensions: [] });
 
-  assert.equal(warnCount(gate, guessWarning({ bindings: [], device: NEW_MAIN, location: "Main Gate (" + MAIN_DOOR + ")", main: NEW_MAIN,
-    side: "Pedestrian Gate (" + SIDE_DOOR + ")" })), 1, "the guess names each door as the topology knows it");
+  assert.equal(warnCount(gate, guessWarning({ bindings: [], device: NEW_SIDE, location: mainGate, main: "New Main Gate (" + NEW_MAIN + ")", side: "no door" })), 1,
+    "the guess names each door as the topology knows it");
+
+  // A binding naming no port identifies nothing, and it says so in the line, while the door it binds is all the arms can choose among.
+  restateRecord(gate, { door: { unique_id: NEW_SIDE }, extensions: [portBinding(undefined, MAIN_DOOR)] });
+
+  assert.equal(warnCount(gate, guessWarning({ bindings: [[ undefined, MAIN_DOOR ]], device: NEW_SIDE, location: mainGate, main: mainGate, side: "no door" })), 1,
+    "the port a binding does not name is said as such");
 });
 
 test("a gate says what its bindings resolved to on every pass that moved a role, adoption included, as a warning when it guessed a role and at debug level " +
@@ -3345,23 +3408,24 @@ test("a gate says what its bindings resolved to on every pass that moved a role,
   assert.deepEqual(resolutionLines(gate), [], "a pass that moved no role adds no line");
   assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and repeats no warning");
 
-  const rebind = resolution([ [ "oper2", NEW_SIDE ], [ "oper1", NEW_MAIN ] ], NEW_MAIN, NEW_SIDE);
+  const rebind = resolution([ [ "port2", NEW_SIDE ], [ "port1", NEW_MAIN ] ], NEW_MAIN, NEW_SIDE);
 
-  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", NEW_MAIN) ] });
+  addReboundDoors(gate);
+  restateRecord(gate, { extensions: [ sidePort(NEW_SIDE), mainPort(NEW_MAIN) ] });
 
   assert.deepEqual(resolutionLines(gate), [rebind], "a rebind that moved both roles says what each binding named and where each role landed");
 
   // The main door alone moves back while the side door stays, so a pass counts as moved when any role moved rather than when the last role it read did.
-  restateRecord(gate, { extensions: [ portBinding("oper2", NEW_SIDE), portBinding("oper1", MAIN_DOOR) ] });
+  restateRecord(gate, { extensions: [ sidePort(NEW_SIDE), mainPort(MAIN_DOOR) ] });
 
-  assert.deepEqual(resolutionLines(gate), [ rebind, resolution([ [ "oper2", NEW_SIDE ], [ "oper1", MAIN_DOOR ] ], MAIN_DOOR, NEW_SIDE) ],
+  assert.deepEqual(resolutionLines(gate), [ rebind, resolution([ [ "port2", NEW_SIDE ], [ "port1", MAIN_DOOR ] ], MAIN_DOOR, NEW_SIDE) ],
     "a pass that moved one role says so as well");
   assert.deepEqual(guessLines(gate), [LOG_PREFIX + adoption], "and passes whose bindings named both roles warn nothing");
 });
 
 test("a gate says what its bindings resolved to when a role is withdrawn, which moves no door into it", () => {
 
-  // A topology of one door, so the side arm's name and two-door fallbacks answer nothing and the side door is the binding's to name or to withhold.
+  // A topology of one door at adoption, so the side role is the binding's to name or to withhold.
   const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], keepAdoptionLines: true,
     options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
   const mainGate = "Main Gate (" + MAIN_DOOR + ")";
@@ -3370,21 +3434,576 @@ test("a gate says what its bindings resolved to when a role is withdrawn, which 
   assert.equal(warnCount(gate, guessWarning({ bindings: [], device: "no door", location: mainGate, main: mainGate, side: "no door" })), 1,
     "adoption says the side role holds no door");
 
-  const arrival = resolution([ [ "oper1", MAIN_DOOR ], [ "oper2", NEW_SIDE ] ], MAIN_DOOR, NEW_SIDE);
+  const arrival = resolution([ [ "port1", MAIN_DOOR ], [ "port2", NEW_SIDE ] ], MAIN_DOOR, NEW_SIDE);
 
-  restateRecord(gate, { extensions: [ portBinding("oper1", MAIN_DOOR), portBinding("oper2", NEW_SIDE) ] });
+  addReboundDoors(gate);
+  restateRecord(gate, { extensions: [ mainPort(MAIN_DOOR), sidePort(NEW_SIDE) ] });
 
   assert.deepEqual(resolutionLines(gate), [arrival], "the side door alone arrives");
 
   /* The side door's binding goes while the main door stays, so no door moves into any role. The withdrawal still changed a role, which is what earns the line...a
-   * line keyed to the doors that moved in would stay silent here. The lone binding left names no side door's port, so the main door is the location's guess
-   * again and the line is the warning.
+   * line keyed to the doors that moved in would stay silent here. Port 1 alone identifies neither door, so the roles are a guess again and the line is the warning.
    */
-  restateRecord(gate, { extensions: [portBinding("oper1", MAIN_DOOR)] });
+  restateRecord(gate, { extensions: [mainPort(MAIN_DOOR)] });
 
-  assert.equal(warnCount(gate, guessWarning({ bindings: [[ "oper1", MAIN_DOOR ]], device: "no door", location: mainGate, main: mainGate, side: "no door" })), 1,
+  assert.equal(warnCount(gate, guessWarning({ bindings: [[ "port1", MAIN_DOOR ]], device: "no door", location: mainGate, main: mainGate, side: "no door" })), 1,
     "and its withdrawal is said as well");
   assert.deepEqual(resolutionLines(gate), [arrival], "as the warning alone");
+});
+
+test("a gate whose side door preference is off still trusts a good pair, and its main door stays on port 1", () => {
+
+  // The names point the other way, and the preference leaves the basis and the main role where the pair puts them.
+  const gate = makeGate({ doors: CAPTURE_DOORS, keepAdoptionLines: true, options: [ "Disable.Hub.SideDoor", "Enable.Log.Debug" ],
+    record: testHub({ device_type: "UGT", extensions: CAPTURE_PORTS }) });
+
+  assert.deepEqual(guessLines(gate), [], "the pair is trusted whichever roles are in scope");
+  assert.deepEqual(resolutionLines(gate), [resolutionOfCapture("none")]);
+});
+
+test("a gate whose side role stands vacant fills it from a door a later record with no relay data binds, which warns once, and from nothing else", () => {
+
+  const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], keepAdoptionLines: true,
+    options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ] });
+
+  assert.equal(guessLines(gate).length, 1, "adoption finds no door for the side role");
+
+  // The topology learned a door, and a record saying nothing still fills nothing with it.
+  gate.doors.set(SIDE_DOOR, { name: "Beta", unique_id: SIDE_DOOR });
+  restateRecord(gate, { extensions: [] });
+
+  assert.equal(lineCount(gate, "The gate's side door is now Beta."), 0);
+  assert.equal(guessLines(gate).length, 1, "a pass that moved nothing says nothing");
+
+  // Main holds and no door holds the side role, and a vacant role is not a held one, so the door the record binds fills it through the two-door arm.
+  const bareBindings = [ portBinding("port3", MAIN_DOOR), portBinding("port4", SIDE_DOOR) ];
+
+  restateRecord(gate, { extensions: bareBindings });
+
+  assert.equal(lineCount(gate, "The gate's side door is now Beta."), 1);
+  assert.equal(guessLines(gate).length, 2, "and the guess that filled it warns");
+
+  restateRecord(gate, { extensions: bareBindings });
+
+  assert.equal(guessLines(gate).length, 2, "while the next pass moves nothing and says nothing");
+});
+
+/* A gate stood up on the record a real state store holds. The harness's restatement spreads over the record it holds, which can neither leave a member standing the way
+ * the library's merge does nor remove one the way a refresh does, so a delivery these arms make goes through the library's own classifier and reducer, and only a record
+ * the reducer moved reaches the hub, which is how the device's record loop behaves.
+ *
+ * Port 1 sits on the door named like a side door and port 2 on the door named like a main gate, because names agreeing with the ports would let a gate that lost its held
+ * roles land on the same answer.
+ *
+ * @param doors - The topology's doors, the capture's two by default.
+ *
+ * @returns The gate and the store behind it.
+ */
+function storedGate(doors = CAPTURE_DOORS): { gate: HubHarness; store: ReturnType<typeof createStateStore> } {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: gateDocument(testHub({ device_type: "UGT", extensions: CAPTURE_PORTS, location_id: "building" }), doors) });
+
+  const gate = makeGate({ doors, keepAdoptionLines: true, options: [ "Enable.Hub.Door.Service=Lock", "Enable.Log.Debug" ],
+    record: store.snapshot().devices.get(HUB_ID) as AccessStateDevice & { mac: string } });
+
+  return { gate, store };
+}
+
+// The topology document a refresh hands the store, with the gate's record under the first of the doors.
+function gateDocument(record: Record<string, unknown>, doors: { name: string; unique_id: string }[]): ReturnType<typeof doorsTopology> {
+
+  return doorsTopology(doors.map((door, index) => ({ devices: (index === 0) ? [record] : [], id: door.unique_id, name: door.name })));
+}
+
+/* Hand the store one captured-shape device update through the library's own classifier, for its reducer to merge. The packet goes through unknown because the captured
+ * payload is typed wider than the packet's JSON-value data, and classifyPacket narrows whatever it is handed at runtime.
+ *
+ * @param store - The store to deliver to.
+ * @param data  - The members the delivery carries.
+ */
+function deliverDeviceUpdate(store: ReturnType<typeof createStateStore>, data: Record<string, unknown>): void {
+
+  const packet = { data: { unique_id: HUB_ID, ...data }, event: "access.data.device.update", event_object_id: HUB_ID, receiver_id: "",
+    save_to_history: false } as unknown as AccessEventPacket;
+
+  const event = AccessClient.classifyPacket(packet);
+
+  assert.ok(event, "the captured shape must classify as something the library models");
+
+  store.dispatch(event);
+}
+
+/* Hand the hub what its record loop would: the store's record and the device update behind it, only when the store's reference moved.
+ *
+ * @param gate  - The gate to hand it to.
+ * @param store - The store behind that gate.
+ *
+ * @returns Whether a pass ran.
+ */
+function followStore(gate: HubHarness, store: ReturnType<typeof createStateStore>): boolean {
+
+  const record = store.snapshot().devices.get(HUB_ID);
+
+  if(!record || Object.is(record, gate.hub.uda)) {
+
+    return false;
+  }
+
+  gate.hub.uda = record;
+  gate.emit(HUB_ID, { event: ACCESS_DEVICE_UPDATE_EVENT });
+
+  return true;
+}
+
+// Every announcement that a door moved into a role, which is what a held role never makes.
+function roleArrivals(gate: HubHarness): string[] {
+
+  return gate.lines.filter(line => line.includes(" is now "));
+}
+
+/* How an arm reads a role: whether an unlock of that door reaches that role's topic, which only the door holding the role does.
+ *
+ * @param gate - The gate to read.
+ * @param door - The door to unlock.
+ * @param tail - The topic of the role asked about.
+ *
+ * @returns Whether the role answered.
+ */
+function roleAnswersUnlock(gate: HubHarness, door: string, tail: string): boolean {
+
+  const before = lockPayloads(gate, tail).length;
+
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: door });
+
+  return lockPayloads(gate, tail).length > before;
+}
+
+test("a gate trusting its pair at adoption says so at debug level and warns nothing, through the real store", () => {
+
+  const { gate } = storedGate();
+
+  assert.deepEqual(guessLines(gate), []);
+  assert.deepEqual(resolutionLines(gate), [resolutionOfCapture(SIDE_DOOR)]);
+});
+
+test("a delivery carrying no extensions beside a changed member leaves the relay data standing, so a gate moves nothing", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { is_online: false });
+
+  assert.equal(followStore(gate, store), true, "the changed member runs a pass");
+  assert.equal(gate.hub.uda.extensions?.length, CAPTURE_PORTS.length, "over bindings the merge never touched");
+  assert.deepEqual(roleArrivals(gate), []);
+  assert.deepEqual(guessLines(gate), []);
+});
+
+test("a delivery whose rows carry no relay data moves no role, though it trades the ports", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { extensions: [ portBinding("port1", SIDE_DOOR, undefined, "Vehicle Gate"),
+    portBinding("port2", MAIN_DOOR, undefined, "Pedestrian Gate") ] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.deepEqual(roleArrivals(gate), [], "the record names no relay, so it has nothing to identify a door with");
+  assert.deepEqual(guessLines(gate), []);
+  assert.equal(roleAnswersUnlock(gate, MAIN_DOOR, "lock"), true, "and the main door is where port 1 stood when it last carried relay data");
+});
+
+test("a delivery emptying the extensions moves no role", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { extensions: [] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.deepEqual(roleArrivals(gate), []);
+  assert.deepEqual(guessLines(gate), []);
+});
+
+test("a refresh whose record carries no extensions moves no role", () => {
+
+  const { gate, store } = storedGate();
+
+  store.applyRefreshDocuments({ controller: null, topology: gateDocument(testHub({ device_type: "UGT", location_id: "building" }), CAPTURE_DOORS) });
+
+  assert.equal(followStore(gate, store), true);
+  assert.equal(gate.hub.uda.extensions, undefined, "the refresh takes the record whole, so the bindings are gone from it");
+  assert.deepEqual(roleArrivals(gate), []);
+  assert.deepEqual(guessLines(gate), []);
+});
+
+test("a delivery restating what the store holds moves no record, so a gate runs no pass", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { extensions: CAPTURE_PORTS });
+
+  assert.equal(followStore(gate, store), false);
+});
+
+test("a delivery with no relay data holds both roles over three doors, where two would let the two-door arm land on a held side door by coincidence", () => {
+
+  const { gate, store } = storedGate([ { name: "Alpha", unique_id: OTHER_DOOR }, { name: "Beta", unique_id: MAIN_DOOR }, { name: "Gamma", unique_id: SIDE_DOOR } ]);
+
+  deliverDeviceUpdate(store, { extensions: [] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.deepEqual(roleArrivals(gate), [], "either role moving says so");
+  assert.equal(roleAnswersUnlock(gate, MAIN_DOOR, "lock"), true, "the held main door stays the main door");
+  assert.equal(roleAnswersUnlock(gate, SIDE_DOOR, "sidedoor/lock"), true, "the held side door stays the side door");
+});
+
+test("a delivery with relay data that disagrees moves the roles a gate holds", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { extensions: gatePorts({ deviceId: HUB_ID, main: VEHICLE_GATE, side: PEDESTRIAN_GATE }) });
+
+  assert.equal(followStore(gate, store), true);
+  assert.deepEqual(roleArrivals(gate), [ LOG_PREFIX + "The gate's main door is now Vehicle Gate.", LOG_PREFIX + "The gate's side door is now Pedestrian Gate." ]);
+  assert.deepEqual(guessLines(gate), [], "because the record says so through its relays");
+});
+
+test("a bare delivery naming one known door withdraws a held role outside it, under the warning", () => {
+
+  const { gate, store } = storedGate();
+
+  deliverDeviceUpdate(store, { extensions: [portBinding("port1", MAIN_DOOR, undefined, "Pedestrian Gate")] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1);
+  assert.equal(guessLines(gate).length, 1, "and the pass that moved it was a guess");
+  assert.equal(roleAnswersUnlock(gate, SIDE_DOOR, "sidedoor/lock"), false, "so the door that left owns nothing");
+  assert.equal(roleAnswersUnlock(gate, MAIN_DOOR, "lock"), true, "while the door the record named stays the main door");
+});
+
+// A gate with port 2 alone on its side door, whose location names that door too, so every arm that could reach for it has to pass it over.
+function vacantGate(options: string[] = ["Enable.Hub.Door.Service=Lock"]): HubHarness {
+
+  return makeGate({ doors: CAPTURE_DOORS, keepAdoptionLines: true, options: [ ...options, "Enable.Log.Debug" ],
+    record: testHub({ device_type: "UGT", extensions: [sidePort(SIDE_DOOR)], location_id: SIDE_DOOR }) });
+}
+
+test("a gate binding port 2 alone adopts with no main door, and says so", () => {
+
+  const vehicleGate = "Vehicle Gate (" + SIDE_DOOR + ")";
+
+  assert.deepEqual(guessLines(vacantGate()), [LOG_PREFIX + guessWarning({ bindings: [[ "port2", SIDE_DOOR ]], device: "no door", location: vehicleGate, main: "no door",
+    side: vehicleGate })]);
+});
+
+test("a gate with no main door refuses both lock commands and sends the library nothing", async () => {
+
+  const gate = vacantGate();
+
+  gate.errors.length = 0;
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+  await gate.mqttSet("lock", "true");
+  await settle();
+
+  assert.deepEqual(gate.commands, []);
+  assert.deepEqual(gate.requests, []);
+  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it.",
+    LOG_PREFIX + "Unable to close the gate. The controller reports no door for it." ]);
+});
+
+test("a gate with no main door refuses an opener write and puts the characteristic back", async () => {
+
+  const gate = vacantGate(["Enable.Hub.Door.Service=GarageDoorOpener"]);
+
+  await writeTarget(gate, Characteristic.TargetDoorState.OPEN);
+
+  assert.deepEqual(gate.commands, []);
+  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+
+  gate.clock.advance(REVERT_DELAY_MS);
+  await settle();
+
+  assert.equal(openerService(gate).getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED);
+  assert.equal(openerService(gate).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+});
+
+/* Close a gate, take its main door away mid-travel and write again, which halts a travel with no door for a stop to name.
+ *
+ * @param options - The feature options the gate runs under.
+ *
+ * @returns The gate, having taken that second write.
+ */
+async function haltWithNoMainDoor(options: string[]): Promise<HubHarness> {
+
+  const gate = makeGate({ keepAdoptionLines: true, options });
+
+  await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
+
+  assert.deepEqual(gate.commands.map(command => command.verb), ["close"]);
+
+  // The main door leaves the topology and a bare port 2 is all the record binds, so nothing is left to hold the main role.
+  gate.doors.delete(MAIN_DOOR);
+  restateRecord(gate, { extensions: [portBinding("port2", SIDE_DOOR)], location_id: SIDE_DOOR });
+
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's main door; its accessories keep the last state they showed."), 1);
+
+  await writeTarget(gate, Characteristic.TargetDoorState.OPEN);
+
+  assert.deepEqual(gate.commands.map(command => command.verb), ["close"], "the library's own door would otherwise answer a stop naming none");
+
+  return gate;
+}
+
+test("a gate whose main door goes mid-travel sends no stop, says why at debug level, and lets the travel run out", async () => {
+
+  const gate = await haltWithNoMainDoor(["Enable.Log.Debug"]);
+  const current = openerService(gate).getCharacteristic(Characteristic.CurrentDoorState);
+
+  assert.equal(warnCount(gate, "Unable to halt the gate. The controller reports no door for it."), 1);
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED, "the write renders the halt");
+
+  // A read answers from the machine rather than the characteristic, which the write rendered ahead of the halt, so only a machine that entered the halt answers stopped.
+  assert.equal(await triggerGet(current), Characteristic.CurrentDoorState.STOPPED, "the machine proceeds regardless");
+
+  gate.clock.advance(GATE_TRAVEL_MS);
+  await settle();
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED, "and the travel's expiry still ends it");
+});
+
+test("a gate whose main door goes mid-travel says nothing about the halt without debug logging", async () => {
+
+  const gate = await haltWithNoMainDoor([]);
+
+  // The log double takes debug output and warnings in one sink, so only a run with debug logging off tells them apart, and this line is debug output.
+  assert.equal(warnCount(gate, "Unable to halt the gate. The controller reports no door for it."), 0);
+});
+
+test("a gate with no main door still sends its side door's commands, naming that door", async () => {
+
+  const gate = vacantGate();
+
+  await gate.mqttSet("sidedoor/lock", "false");
+  await settle();
+  await gate.mqttSet("sidedoor/lock", "true");
+  await settle();
+
+  assert.deepEqual(gate.commands, [ { options: { actor: UNLOCK_ACTOR, doorId: SIDE_DOOR }, verb: "unlock" }, { options: { doorId: SIDE_DOOR }, verb: "close" } ]);
+});
+
+/* Stand a gate up with no main door and hand it a later record, from which that role fills: the line says so, the side role stays where it was, and a lock command names
+ * the door that arrived.
+ *
+ * @param extensions - The bindings the later record carries.
+ */
+async function assertMainDoorArrives(extensions: Record<string, unknown>[]): Promise<void> {
+
+  const gate = vacantGate();
+
+  restateRecord(gate, { extensions });
+
+  assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 1);
+  assert.equal(lineCount(gate, "The gate's side door is now Vehicle Gate."), 0);
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.commands, [{ options: { actor: UNLOCK_ACTOR, doorId: MAIN_DOOR }, verb: "unlock" }]);
+}
+
+test("a gate with no main door takes the door port 1 arrives on, says so, and sends that door's commands", async () => {
+
+  await assertMainDoorArrives(CAPTURE_PORTS);
+});
+
+test("a gate with no main door takes the door a record with no relay data binds, says so, and sends that door's commands", async () => {
+
+  // Such a record keeps the held side door, and the other door it binds is free for the vacant role.
+  await assertMainDoorArrives([ portBinding("port3", MAIN_DOOR), portBinding("port4", SIDE_DOOR) ]);
+});
+
+test("a gate with no main door stays without one through a record binding nothing, and its lock still refuses", async () => {
+
+  const gate = vacantGate();
+
+  gate.errors.length = 0;
+  restateRecord(gate, { extensions: [] });
+
+  assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 0);
+  assert.equal(guessLines(gate).length, 1, "a pass that moved nothing says nothing");
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.commands, []);
+  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+});
+
+// Another hub's door, listed first and named as the arm of the role under test would prefer it, beside the capture's doors.
+const OTHER_HUB_MAIN = { name: "Other Hub Main Gate", unique_id: OTHER_DOOR };
+const OTHER_HUB_SIDE = { name: "Other Hub Side Door", unique_id: OTHER_DOOR };
+
+test("a gate whose port 1 lost its door stays without a main door through a refresh with no bindings, though another hub's door reads as a main gate", async () => {
+
+  const doors = [ OTHER_HUB_MAIN, PEDESTRIAN_GATE, VEHICLE_GATE ];
+  const { gate, store } = storedGate(doors);
+
+  gate.errors.length = 0;
+  deliverDeviceUpdate(store, { extensions: [ portBinding("port1", "lost-door", GATE_OPERATOR_RELAY, "Pedestrian Gate"),
+    portBinding("port2", SIDE_DOOR, GATE_DOOR_LOCK_RELAY, "Vehicle Gate") ] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's main door; its accessories keep the last state they showed."), 1);
+
+  store.applyRefreshDocuments({ controller: null, topology: gateDocument(testHub({ device_type: "UGT", location_id: "building" }), doors) });
+
+  assert.equal(followStore(gate, store), true);
+  assert.equal(gate.hub.uda.extensions, undefined, "the refresh takes the record whole, so the bindings are gone from it");
+  assert.deepEqual(roleArrivals(gate), [], "a record saying nothing fills nothing");
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.commands, [], "and the lock refuses rather than reaching the other hub's door");
+  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+});
+
+test("a gate whose port 2 lost its door stays without a side door through a refresh with no bindings, though another hub's door reads as a side door", async () => {
+
+  const doors = [ OTHER_HUB_SIDE, PEDESTRIAN_GATE, VEHICLE_GATE ];
+  const { gate, store } = storedGate(doors);
+
+  deliverDeviceUpdate(store, { extensions: [ portBinding("port1", MAIN_DOOR, GATE_OPERATOR_RELAY, "Pedestrian Gate"),
+    portBinding("port2", "lost-door", GATE_DOOR_LOCK_RELAY, "Vehicle Gate") ] });
+
+  assert.equal(followStore(gate, store), true);
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1);
+
+  store.applyRefreshDocuments({ controller: null, topology: gateDocument(testHub({ device_type: "UGT", location_id: "building" }), doors) });
+
+  assert.equal(followStore(gate, store), true);
+  assert.deepEqual(roleArrivals(gate), [], "a record saying nothing fills nothing");
+
+  await gate.mqttSet("sidedoor/lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.commands, [], "and the side lock refuses rather than reaching the other hub's door");
+});
+
+test("a gate that adopted with no doors stays without a role through a record saying nothing, says nothing, refuses, and takes the doors a record names", async () => {
+
+  const gate = makeGate({ doors: [], keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"],
+    record: testHub({ device_type: "UGT", location_id: MAIN_DOOR }) });
+
+  gate.errors.length = 0;
+  gate.doors.set(MAIN_DOOR, PEDESTRIAN_GATE);
+  gate.doors.set(SIDE_DOOR, VEHICLE_GATE);
+  restateRecord(gate, { extensions: [] });
+
+  assert.deepEqual(roleArrivals(gate), [], "a record saying nothing fills nothing, though the topology learned its doors");
+  assert.deepEqual(guessLines(gate), [], "and a pass that moved nothing says nothing");
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.deepEqual(gate.commands, []);
+  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+
+  restateRecord(gate, { extensions: CAPTURE_PORTS });
+
+  assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 1);
+  assert.equal(lineCount(gate, "The gate's side door is now Vehicle Gate."), 1);
+});
+
+test("a gate adopting a record with no bindings still guesses its doors across the controller", () => {
+
+  const gate = makeGate({ doors: [ OTHER_HUB_MAIN, PEDESTRIAN_GATE, VEHICLE_GATE ], keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"],
+    record: testHub({ device_type: "UGT", location_id: "building" }) });
+
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + guessWarning({ bindings: [], device: "no door", location: "building", main: "Other Hub Main Gate (" + OTHER_DOOR + ")",
+    side: "Pedestrian Gate (" + MAIN_DOOR + ")" })]);
+});
+
+test("a working gate whose port 1 comes to name an unknown door gives up the main role mid-window, keeps its side door, and seeds the door that arrives", async () => {
+
+  const gate = makeGate({ doors: [ PEDESTRIAN_GATE, VEHICLE_GATE, { name: "Lobby", unique_id: OTHER_DOOR } ], options: ["Enable.Hub.Door.Service=Lock"],
+    record: testHub({ device_type: "UGT", extensions: CAPTURE_PORTS }) });
+  const mainLock = lockService(gate).getCharacteristic(Characteristic.LockCurrentState);
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  restateRecord(gate, { extensions: [ portBinding("port1", "lost-door", GATE_OPERATOR_RELAY), portBinding("port2", SIDE_DOOR, GATE_DOOR_LOCK_RELAY),
+    portBinding("port3", OTHER_DOOR, "output_aux_relay") ] });
+
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's main door; its accessories keep the last state they showed."), 1);
+  assert.equal(mainLock.value, Characteristic.LockCurrentState.UNSECURED);
+
+  gate.clock.advance(RELOCK_DELAY_MS);
+  await settle();
+
+  assert.equal(mainLock.value, Characteristic.LockCurrentState.UNSECURED, "the window left with its door");
+  assert.deepEqual(lockPayloads(gate), ["false"]);
+
+  await gate.mqttSet("sidedoor/lock", "false");
+  await settle();
+
+  assert.equal((gate.commands.at(-1)?.options as { doorId?: string }).doorId, SIDE_DOOR);
+
+  gate.setDoorState({ dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+  restateRecord(gate, { extensions: CAPTURE_PORTS });
+
+  assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 1);
+  assert.equal(mainLock.value, Characteristic.LockCurrentState.SECURED, "the door that arrived seeds the lock");
+});
+
+test("a working gate whose port 2 comes to name an unknown door gives up the side role mid-window, keeps its main door, and seeds the door that arrives", async () => {
+
+  const gate = makeGate({ doors: [ PEDESTRIAN_GATE, VEHICLE_GATE, { name: "Lobby", unique_id: OTHER_DOOR } ], options: ["Enable.Hub.Door.Service=Lock"],
+    record: testHub({ device_type: "UGT", extensions: CAPTURE_PORTS }) });
+  const sideLock = lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE).getCharacteristic(Characteristic.LockCurrentState);
+
+  await gate.mqttSet("sidedoor/lock", "false");
+  await settle();
+
+  restateRecord(gate, { extensions: [ portBinding("port1", MAIN_DOOR, GATE_OPERATOR_RELAY), portBinding("port2", "lost-door", GATE_DOOR_LOCK_RELAY),
+    portBinding("port3", OTHER_DOOR, "output_aux_relay") ] });
+
+  assert.equal(warnCount(gate, "The controller no longer reports a door for the gate's side door; its accessories keep the last state they showed."), 1);
+  assert.equal(sideLock.value, Characteristic.LockCurrentState.UNSECURED);
+
+  gate.clock.advance(RELOCK_DELAY_MS);
+  await settle();
+
+  assert.equal(sideLock.value, Characteristic.LockCurrentState.UNSECURED, "the window left with its door");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"]);
+
+  await gate.mqttSet("lock", "false");
+  await settle();
+
+  assert.equal((gate.commands.at(-1)?.options as { doorId?: string }).doorId, MAIN_DOOR);
+
+  gate.setDoorState({ dps: "close", location_id: SIDE_DOOR, lock: "lock" });
+  restateRecord(gate, { extensions: CAPTURE_PORTS });
+
+  assert.equal(lineCount(gate, "The gate's side door is now Vehicle Gate."), 1);
+  assert.equal(sideLock.value, Characteristic.LockCurrentState.SECURED, "the door that arrived seeds the lock");
+});
+
+test("a gate adopting with no role at all warns once, and the next pass is silent", () => {
+
+  const gate = vacantGate([ "Enable.Hub.Door.Service=Lock", "Disable.Hub.SideDoor" ]);
+  const vehicleGate = "Vehicle Gate (" + SIDE_DOOR + ")";
+
+  // Nothing moved off the empty seed, so only the adoption itself can earn the line, and a gate left with no role would otherwise say nothing until a command refused.
+  assert.deepEqual(guessLines(gate), [LOG_PREFIX + guessWarning({ bindings: [[ "port2", SIDE_DOOR ]], device: "no door", location: vehicleGate, main: "no door",
+    side: "no door" })]);
+
+  restateRecord(gate, {});
+
+  assert.equal(guessLines(gate).length, 1, "a pass that moved nothing says nothing");
 });
 
 test("a gate the controller reports locked retires the relock our own unlock armed", async () => {

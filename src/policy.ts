@@ -830,17 +830,21 @@ export function hasDpsEvidence(entry: AccessDoorStateEntry | undefined): boolean
   return (position !== undefined) && (position !== "none");
 }
 
-/* The name the controller writes beside a UA Gate's side door binding, from the one field report of a gate's port names. The library passes a binding's name
- * through uninterpreted, because which port serves a side door is policy rather than protocol, so that is stated here and nowhere else.
+/* The ports a UA Gate serves its doors from and the relays behind those ports, as a captured gate record names them: port 1 serves the main door through its operator
+ * relay, and port 2 serves the side door through its door-lock relay. The library passes a binding's port and relay key through uninterpreted, because which port
+ * serves which door is policy rather than protocol, so that is stated here and nowhere else.
  */
-const SIDE_DOOR_PORT = "oper2";
+const GATE_MAIN_PORT = "port1";
+const GATE_SIDE_PORT = "port2";
+const GATE_OPERATOR_RELAY = "output_oper1_relay";
+const GATE_DOOR_LOCK_RELAY = "output_door_lock_relay";
 
 /**
  * The doors a UA Gate's discovery landed on, and what decided them.
  */
 export interface GateDoorLocations {
 
-  /** `binding` when the side door's port binding and the one binding beside it named the roles, and `guess` when any role was left to a fallback arm. */
+  /** `binding` when port 1 on its operator relay and port 2 on its door-lock relay name two different topology doors, and `guess` otherwise. */
   readonly basis: "binding" | "guess";
 
   /** The main door's location identifier, absent where no main door was discovered. */
@@ -851,8 +855,8 @@ export interface GateDoorLocations {
 }
 
 /**
- * The main and side door locations a UA Gate resolves to, from its device record and the topology's doors collection - the one statement of the gate's
- * door-discovery heuristic.
+ * The main and side door locations a UA Gate resolves to, from its device record, the topology's doors collection and the roles it already holds - the one statement
+ * of the gate's door-discovery heuristic.
  *
  * This serves the UA Gate alone: that hardware drives two doors through one device record, and the library derives no per-door topology facts for a device it
  * cannot tell the doors of apart, so the resolution is a heuristic over the record's own bindings and the doors' names. A single-door hub's door is the library's
@@ -861,91 +865,127 @@ export interface GateDoorLocations {
  * The side arm runs only when the caller says a side door is in scope, because what makes one eligible differs by consumer: the hub gates it on the user's
  * side-door preference, while an evidence-only consumer asks on the hardware class alone.
  *
- * The port binding the controller publishes for a port outranks everything else here, because it is the same binding the library's own single-door resolution
- * reads. The side door's port is the one the controller names `oper2`, and the main door is the one other binding beside it when exactly one stands there...so a
- * record carrying no binding named `oper2`, a lone `oper2` binding, or three or more bindings leaves the main door to the arms below. The
- * embedded door member and the location the record names fall behind the bindings as topology snapshots - the first of which the official surface never carries -
- * while both still outrank a name that merely looks like a main gate.
+ * The held arm stands above the port binding the controller publishes for a port, and only for a record carrying no relay data. That binding outranks every other arm,
+ * because it is the same binding the library's own single-door resolution reads. Port 1 names the main door and port 2 names the side door, whatever the controller wrote
+ * beside them, whatever order they arrived in and whatever other binding stands beside them. A door the topology lacks takes no role on any arm, so a port bound to one
+ * answers nothing.
  *
- * Whenever the record binds two or more of the topology's doors, every arm below the bindings chooses among those doors alone, because the topology is every door
- * on the controller and a door of another hub must never take either role. They keep topology order, so the order the controller delivered the bindings in decides
- * nothing, and they are counted as doors rather than as bindings: a record whose bindings name fewer than two of the topology's doors, as two bindings to one door
- * or a binding to a door the topology has not learned can, leaves every arm reading the whole topology. Among those doors, the embedded door member and the location
- * decide only when they name one of them.
+ * Whenever the record binds any of the topology's doors, every arm below the ports chooses among those doors alone, because the topology is every door on the
+ * controller and a door of another hub must never take either role. They keep topology order, so the order the controller delivered the bindings in decides nothing,
+ * and only a record binding none of the topology's doors reads the whole topology. Wherever the record binds one of them and no hold answers, port 1 bound to a door the
+ * topology lacks leaves the main door vacant and port 2 bound to one leaves the side door vacant, whichever other door the record binds, so a command refuses rather than
+ * reaching a door its port never named.
  *
- * The answer also says what decided the roles: the bindings, when the side door's binding and the one beside it named them, or a guess, when any role was left to
- * the arms below them. Only the first identifies the doors, so a caller can tell a resolution it can trust from one a user may need to check.
+ * The main door's arms below the ports read one pool: those doors without port 2's door, which the side role owns whether or not a side door is in scope, and without
+ * the held side door, or no doors at all where port 1 leaves the role vacant. An empty pool leaves the main door vacant. The embedded door member and the location the
+ * record names fall behind the ports as topology snapshots - the first of which the official surface never carries - while both still outrank a name that merely looks
+ * like a main gate.
+ *
+ * A record carrying no relay key on any binding has nothing that identifies a door, and delivered bindings can lose their relay keys without anything having moved, so
+ * such a record keeps the roles the caller holds rather than guessing them afresh. A held door holds only while it is among the doors the record binds, or the whole
+ * topology where it binds none, which is what lets a lost door, or one outside the doors a bare binding names, give up its role. A role held by no door is simply absent,
+ * so such a pass can still fill it from a door the record binds, and only from one: a caller passing what it holds is past adoption, so a record with no relay data
+ * binding no known door moves nothing and fills nothing, and a role it finds empty stays empty until a record binds a known door or carries relay data.
+ *
+ * The answer also says what decided the roles: the bindings, when port 1 on its operator relay and port 2 on its door-lock relay name two different topology doors, or a
+ * guess otherwise. Only the first identifies the doors, whichever roles the caller put in scope, so a caller can tell a resolution it can trust from one a user may need
+ * to check.
  *
  * An options object because a positional boolean beside two structural arguments would read as noise at the call site.
  *
- * @param options - The device record, the topology's doors, and whether the side arm should run.
+ * @param options - The device record, the topology's doors, the roles the caller holds on any pass past adoption, and whether the side arm should run.
  *
  * @returns The discovered door location identifiers, each member absent where its door went undiscovered, and whether the bindings named the roles.
  */
 export function discoverDoorLocations(options: { device: AccessStateDevice; doors: readonly AccessStateDoor[];
-  sideDoorEligible: boolean; }): GateDoorLocations {
+  held?: Pick<GateDoorLocations, "mainDoorLocationId" | "sideDoorLocationId">; sideDoorEligible: boolean; }): GateDoorLocations {
 
-  const { device, doors, sideDoorEligible } = options;
+  const { device, doors, held, sideDoorEligible } = options;
 
-  // The doors this record's own ports are bound to. The side door's binding names its own port, and the main door's is trusted only as the one other binding
-  // beside it, so delivery order never decides a role.
+  // The door each of the record's own ports names, counted only where the topology carries it. The port is what names the role, so delivery order never decides one.
   const bindings = portBindings(device);
-  const sideBinding = bindings.find(binding => binding.name === SIDE_DOOR_PORT);
-  const mainBinding = (sideBinding && (bindings.length === 2)) ? bindings.find(binding => binding !== sideBinding) : undefined;
+  const mainBinding = bindings.find(binding => binding.port === GATE_MAIN_PORT);
+  const sideBinding = bindings.find(binding => binding.port === GATE_SIDE_PORT);
+  const knownDoor = (doorId: string | undefined): string | undefined => doors.some(door => door.unique_id === doorId) ? doorId : undefined;
+  const mainPortDoor = knownDoor(mainBinding?.doorId);
+  const sidePortDoor = knownDoor(sideBinding?.doorId);
 
-  // The topology's doors this record binds, in topology order, which the arms below the bindings choose among once there are two of them.
+  // The topology's doors this record binds, in topology order, which every arm below the ports chooses among whenever there are any.
   const bound = doors.filter(door => bindings.some(binding => binding.doorId === door.unique_id));
-  const scoped = bound.length >= 2;
-  const candidates = scoped ? bound : doors;
+  const candidates = bound.length ? bound : doors;
 
+  // A relay key on any binding at all is relay data, so a record carrying one takes its roles from what it says and only a record carrying none keeps what is held.
+  const noRelayData = !bindings.some(binding => binding.relayKey !== undefined);
+  const holding = (doorId: string | undefined): string | undefined => (noRelayData && candidates.some(door => door.unique_id === doorId)) ? doorId : undefined;
+  const heldMainDoor = holding(held?.mainDoorLocationId);
+  const heldSideDoor = holding(held?.sideDoorLocationId);
+
+  /* What each role's arms below the ports choose among. The main door's list leaves the side role's doors out whether or not a side door is in scope, so the preference
+   * never moves the main door. A port naming a door the topology lacks empties its role's list wherever the record binds a known door, because that port already said
+   * which door the role belongs to and any other door the record binds would be a guess past it...a record binding none has no door of its own to stay among, so it keeps
+   * the guess at adoption and wherever it carries relay data. A caller passing what it holds is past adoption, and there a record saying nothing moves nothing and fills
+   * nothing, so each list is empty.
+   */
+  const silent = held && noRelayData && !bound.length;
+  const pool = (silent || (bound.length && mainBinding && !mainPortDoor)) ? [] :
+    candidates.filter(door => (door.unique_id !== sidePortDoor) && (door.unique_id !== heldSideDoor));
+  const sideCandidates = (silent || (bound.length && sideBinding && !sidePortDoor)) ? [] : candidates;
   const primaryDoorId = device.door?.unique_id;
+  const trusted = mainPortDoor && sidePortDoor && (mainPortDoor !== sidePortDoor) && (mainBinding?.relayKey === GATE_OPERATOR_RELAY) &&
+    (sideBinding?.relayKey === GATE_DOOR_LOCK_RELAY);
 
-  // The main door's binding stands beside the side door's alone, so a record carrying it names the side door through its own binding wherever one is in scope.
-  const discovered: GateDoorLocations = { basis: mainBinding ? "binding" : "guess" };
+  const discovered: GateDoorLocations = { basis: trusted ? "binding" : "guess" };
 
-  // Strategy 1: Use the door the record's own port binding names as the main door.
-  if(mainBinding) {
+  // Strategy 1: Keep the main door the caller holds, where it still holds.
+  if(heldMainDoor) {
 
-    discovered.mainDoorLocationId = mainBinding.doorId;
-  } else if(primaryDoorId && (!scoped || candidates.some(door => door.unique_id === primaryDoorId))) {
+    discovered.mainDoorLocationId = heldMainDoor;
+  } else if(mainPortDoor) {
 
-    // Strategy 2: Use the device's bound door as the main door. A record binding fewer than two doors takes it whether or not the topology carries it, because it
-    // can name a door the topology has not learned yet.
+    // Strategy 2: Use the door port 1 is bound to.
+    discovered.mainDoorLocationId = mainPortDoor;
+  } else if(primaryDoorId && pool.some(door => door.unique_id === primaryDoorId)) {
+
+    // Strategy 3: Use the device's bound door as the main door.
     discovered.mainDoorLocationId = primaryDoorId;
-  } else if(candidates.some(door => door.unique_id === device.location_id)) {
+  } else if(pool.some(door => door.unique_id === device.location_id)) {
 
-    // Strategy 3: Use the location the controller binds this device to, where it names one of the doors the arms choose among.
+    // Strategy 4: Use the location the controller binds this device to.
     discovered.mainDoorLocationId = device.location_id;
-  } else if(candidates.length >= 1) {
+  } else if(pool.length >= 1) {
 
-    // Strategy 4: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
-    const mainDoor = candidates.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) &&
+    // Strategy 5: Look for a door named like "main", "gate", "portail" (but not side/pedestrian).
+    const mainDoor = pool.find(door => /portail|main|gate|principal|entry|front/i.test(door.name) &&
       !/portillon|side|pedestrian|pieton|wicket|back/i.test(door.name));
 
-    // Strategy 5: Use the first door as the main door.
-    discovered.mainDoorLocationId = mainDoor?.unique_id ?? candidates[0]?.unique_id;
+    // Strategy 6: Use the first door as the main door.
+    discovered.mainDoorLocationId = mainDoor?.unique_id ?? pool[0]?.unique_id;
   }
 
-  // Find the side door, where one is in scope.
+  // Find the side door, where one is in scope. No arm here answers the main door, the held one included, so the side role never names the main door.
   if(sideDoorEligible) {
 
-    // Strategy 1: Use the door the side door's own port binding names.
-    if(sideBinding) {
+    // Strategy 1: Keep the side door the caller holds, where it still holds.
+    if(heldSideDoor && (heldSideDoor !== discovered.mainDoorLocationId)) {
 
-      discovered.sideDoorLocationId = sideBinding.doorId;
+      discovered.sideDoorLocationId = heldSideDoor;
+    } else if(sidePortDoor && (sidePortDoor !== discovered.mainDoorLocationId)) {
+
+      // Strategy 2: Use the door port 2 is bound to.
+      discovered.sideDoorLocationId = sidePortDoor;
     } else {
 
-      // Strategy 2: Look for a door named like "side", "portillon", "pedestrian".
-      const sideDoor = candidates.find(door => (door.unique_id !== discovered.mainDoorLocationId) &&
+      // Strategy 3: Look for a door named like "side", "portillon", "pedestrian".
+      const sideDoor = sideCandidates.find(door => (door.unique_id !== discovered.mainDoorLocationId) &&
         /portillon|side|pedestrian|pieton|wicket|back|secondary/i.test(door.name));
 
       if(sideDoor) {
 
         discovered.sideDoorLocationId = sideDoor.unique_id;
-      } else if(candidates.length === 2) {
+      } else if(discovered.mainDoorLocationId && (sideCandidates.length === 2)) {
 
-        // Strategy 3: If we have exactly two doors, the other one is the side door.
-        const otherDoor = candidates.find(door => door.unique_id !== discovered.mainDoorLocationId);
+        // Strategy 4: If we have exactly two doors and one of them is the main door, the other one is the side door.
+        const otherDoor = sideCandidates.find(door => door.unique_id !== discovered.mainDoorLocationId);
 
         discovered.sideDoorLocationId = otherDoor?.unique_id;
       }
