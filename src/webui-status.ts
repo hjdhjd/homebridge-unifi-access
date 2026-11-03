@@ -22,7 +22,7 @@ import { AccessApiError, AccessBootstrapError, AccessCertificateError, AccessCli
   tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible, membershipRecords,
-  serialForm } from "./policy.ts";
+  recordAvailable, serialForm } from "./policy.ts";
 import { formatErrorMessage, formatSeconds, sameEntries } from "homebridge-plugin-utils";
 import type { DecoratedSerial } from "./policy.ts";
 
@@ -822,9 +822,9 @@ export class AccessStatusFeed {
     // The last row list this view pushed, shared by the loops and the connection handlers so every diff and every re-push reads one truth.
     let lastRows = this.#composeViewRows(client, subject);
 
-    /* The viewed device's liveness, as the feed can honestly state it. A record in state answers its own is_online. The controller-as-device and a view with no
-     * record - a token-only client derives none, and a removal window has dropped one - answer through the one fact in hand: the serving connection is live at
-     * establishment by construction, and the connection wiring below reports its loss.
+    /* The viewed device's liveness, as the feed can honestly state it. A record in state answers by the rule HomeKit refuses on and MQTT states, so the label and the
+     * accessory read one record one way. The controller-as-device and a view with no record - a token-only client derives none, and a removal window has dropped one -
+     * answer through the one fact in hand: the serving connection is live at establishment by construction, and the connection wiring below reports its loss.
      */
     const currentOnline = (): boolean => {
 
@@ -833,7 +833,7 @@ export class AccessStatusFeed {
         return true;
       }
 
-      return deviceRecord(subject.deviceId, client.state.snapshot())?.is_online === true;
+      return recordAvailable(deviceRecord(subject.deviceId, client.state.snapshot()));
     };
 
     let lastOnline = currentOnline();
@@ -944,7 +944,7 @@ export class AccessStatusFeed {
 
           for await (const record of client.state.observe((state) => deviceRecord(deviceId, state), { signal })) {
 
-            const online = record?.is_online === true;
+            const online = recordAvailable(record);
 
             if(online !== lastOnline) {
 

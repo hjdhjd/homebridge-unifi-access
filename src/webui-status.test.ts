@@ -46,6 +46,8 @@ function wiredHub(uniqueId: string, mac: string, overrides: Record<string, unkno
     capabilities: [ "is_hub", "dps_alarm" ],
     configs: configRows({ deviceId: uniqueId, entries: { "input_state_dps": "on", "input_state_rly-lock_dry": "off", "wiring_state_dps-neg": "on",
       "wiring_state_dps-pos": "on" } }),
+    is_adopted: true,
+    is_connected: true,
     is_online: true,
     mac,
     name: "Hub " + uniqueId,
@@ -57,13 +59,13 @@ function wiredHub(uniqueId: string, mac: string, overrides: Record<string, unkno
 // A managed, online hub carrying no wiring facts at all, so what its door establishes comes only from dispatched door-state events.
 function bareHub(uniqueId: string, mac: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
-  return hubRecord({ configs: [], is_online: true, mac, name: "Hub " + uniqueId, unique_id: uniqueId, ...overrides });
+  return hubRecord({ configs: [], is_adopted: true, is_connected: true, is_online: true, mac, name: "Hub " + uniqueId, unique_id: uniqueId, ...overrides });
 }
 
 // A managed, online reader carrying whatever capabilities and configuration rows an arm hands it - the hardware whose access methods the methods row reports.
 function reader(uniqueId: string, mac: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
 
-  return readerRecord({ configs: [], is_online: true, mac, name: "Reader " + uniqueId, unique_id: uniqueId, ...overrides });
+  return readerRecord({ configs: [], is_adopted: true, is_connected: true, is_online: true, mac, name: "Reader " + uniqueId, unique_id: uniqueId, ...overrides });
 }
 
 // Classify one captured-shape door-state notification for dispatch, so an entry moves through the real reducer exactly as a live controller would move it. The
@@ -936,6 +938,54 @@ test("the truth frame reports both liveness polarities the moment the snapshot l
 
   assert.equal(onlineTruth.online, true);
   assert.equal(onlineTruth.encrypted, true);
+});
+
+test("the label reads the record rule HomeKit refuses on: a flag past is_online takes it offline, at establishment and on a flip", async () => {
+
+  for(const flag of [ "is_adopted", "is_connected" ]) {
+
+    const reading = createStateStore({});
+
+    reading.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE, { [flag]: false })], id: "door1" }]) });
+
+    const readingRig = makeClient(reading, [{ doorId: "door1", record: reading.snapshot().devices.get("device1") }]);
+    const readingFrames: StatusEvent[] = [];
+    const readingFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => readingRig.client, log: noopLog,
+      push: (event): void => void readingFrames.push(event) });
+
+    readingFeed.context(contextRequest([SERIAL_ONE]));
+    // eslint-disable-next-line no-await-in-loop
+    await readingFeed.view(SERIAL_ONE);
+
+    assert.equal(frameOf(forSerial(readingFrames, SERIAL_ONE), 2, "availability").online, false, flag + " false reads offline at establishment");
+
+    const flipping = createStateStore({});
+
+    flipping.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE)], id: "door1" }]) });
+
+    const flippingRig = makeClient(flipping, [{ doorId: "door1", record: flipping.snapshot().devices.get("device1") }]);
+    const flippingFrames: StatusEvent[] = [];
+    const flippingFeed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => flippingRig.client, log: noopLog,
+      push: (event): void => void flippingFrames.push(event) });
+
+    flippingFeed.context(contextRequest([SERIAL_ONE]));
+    // eslint-disable-next-line no-await-in-loop
+    await flippingFeed.view(SERIAL_ONE);
+    // eslint-disable-next-line no-await-in-loop
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    assert.equal(frameOf(forSerial(flippingFrames, SERIAL_ONE), 2, "availability").online, true, "the whole record establishes online");
+
+    flippingFrames.length = 0;
+    flipping.applyRefreshDocuments({ controller: null, topology: doorsTopology([{ devices: [wiredHub("device1", MAC_ONE, { [flag]: false })], id: "door1" }]) });
+    // eslint-disable-next-line no-await-in-loop
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    const flip = forSerial(flippingFrames, SERIAL_ONE).filter((frame) => frame.kind === "availability");
+
+    assert.equal(flip.length, 1, flag + " going false pushes one availability frame");
+    assert.equal(frameOf(flip, 0, "availability").online, false, "and it reads offline");
+  }
 });
 
 test("a superseded establish emits nothing for its session and releases the client it made", async () => {
