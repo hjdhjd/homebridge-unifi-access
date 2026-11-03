@@ -12,7 +12,7 @@ import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoi
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
-  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, prefixedLog, repeatDemotedLog, resolveNameOverride, retry,
+  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, parseJson, prefixedLog, repeatDemotedLog, resolveNameOverride, retry,
   superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
   deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, isUnsupportedSetup, orphanedWebhookRegistrations, projectedRecords,
@@ -753,10 +753,10 @@ export class AccessController {
 
     try {
 
-      parsed = JSON.parse(request.body.toString("utf8"));
+      parsed = parseJson({ subject: "A webhook delivery's body", text: request.body.toString("utf8") });
     } catch(error) {
 
-      this.log.debug("A webhook delivery carried a body that is not JSON: %s.", formatErrorMessage(error));
+      this.log.debug("%s.", formatErrorMessage(error));
 
       return false;
     }

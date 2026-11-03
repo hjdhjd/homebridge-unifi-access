@@ -2771,6 +2771,22 @@ test("teardown retires the registration before the client goes away, and does no
   assert.deepEqual(empty.calls, [ "fetch", "dispose" ]);
 });
 
+test("a signed body that is not JSON answers 401, and its debug line says so without carrying any of the body", async (t) => {
+
+  const harness = makeWebhookController({ options: ["Enable.Log.Debug"] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  const body = "secret-body";
+
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body),
+    headers: { signature: signWebhookDelivery({ body, secret: "minted-secret", timestamp: Math.floor(harness.clock.now() / 1000) }) } }).status, 401);
+  assert.deepEqual(harness.lines.filter((line) => line.includes(body)), [], "no line at any level carries the body");
+  assert.ok(harness.lines.some((line) => line.includes("A webhook delivery's body is not valid JSON.")), "and the debug line names what failed");
+});
+
 test("the route admits a genuine delivery once and refuses everything else about it", async (t) => {
 
   const harness = makeWebhookController();
