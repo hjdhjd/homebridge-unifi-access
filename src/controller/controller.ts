@@ -4,18 +4,20 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ConnectFailure, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial,
-  MembershipClaims } from "../policy.ts";
+import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ConnectFailure, ConnectFailureType, ControllerIdentity, ControllerOwnershipKeys,
+  DecoratedSerial, MembershipClaims } from "../policy.ts";
 import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, maskAddressCredentials, selectDoorStates,
   verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
-  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, prefixedLog, resolveNameOverride, retry, superviseLoop } from "homebridge-plugin-utils";
+  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, prefixedLog, repeatDemotedLog, resolveNameOverride, retry,
+  superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
-  deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, orphanedWebhookRegistrations, projectedRecords, recordByMac,
-  serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "../policy.ts";
+  deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, isUnsupportedSetup, orphanedWebhookRegistrations, projectedRecords,
+  recordByMac, serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations,
+  webhookSignatureHeader } from "../policy.ts";
 import type { AccessControllerOptions } from "../options.ts";
 import { AccessDeliveryLedger } from "../webhooks.ts";
 import type { AccessDevice } from "../devices/device.ts";
@@ -328,38 +330,46 @@ export class AccessController {
    * privilege or the rate of our requests, and its recovery schedule for every other fault. The retry runs until the controller accepts us or we shut down, so a
    * password or role corrected on the controller is picked up by a later attempt rather than by a restart, as the library's recovery loop picks it up mid-session.
    *
-   * The one exception is an address no URL can carry. The library refuses it before anything is sent, and refuses it the same way on every attempt, so the policy
-   * vetoes it, the retry ends on the first attempt, and we say once that the address needs correcting. Nothing on the controller can change that answer.
+   * The exception is a fault no attempt can change: an address no URL can carry, which unifi-access refuses before anything is sent, and a controller that does not
+   * offer its API to a token alone. The policy vetoes it, the retry ends on that attempt, and we say once what needs correcting, because asking the controller again
+   * can only repeat the same answer.
    *
    * The backoff between attempts waits on the platform's clock rather than on the platform's timers, so a suite walks the whole ladder on virtual time instead of
    * serving it out in real seconds.
    *
-   * The policy tells us why a retried attempt failed when a run of failures begins and whenever what failed changes, and we say so: an unbounded retry that reports
-   * nothing leaves a user with no way to tell a controller that is slow to appear from one that fails the same way on every attempt. A rate limit is said at warn
-   * level, once per run of rate limits whichever spelling its 429 arrives in, because it is the controller asking to be asked less often and the retry already waits
-   * it out on the slower refusal schedule, so no person needs to act; every other failure is said at error level with its reason, again whenever that reason
-   * changes. A connect that succeeds ends the run and announces itself below, and an attempt torn down by our own shutdown is an orderly teardown rather than a
-   * reason to report.
+   * The policy tells us why every retried attempt failed, and we say so at the level the policy read: an unbounded retry that reports nothing leaves a user with no way
+   * to tell a controller that is slow to appear from one that fails the same way on every attempt. Each report runs through one repeat-demoting log, so a type of failure
+   * is said in full the first time and again whenever the type changes, and an unchanged type goes to debug. A rate limit is said by its type alone, whichever spelling
+   * its 429 arrives in, because it is the controller asking to be asked less often and the retry already waits it out on the slower refusal schedule. The attempt wraps
+   * the report rather than the failing call, because a rejection inside an attempt releases its lines at full level and remembers nothing. A connect that succeeds ends
+   * the run and announces itself below, and an attempt torn down by our own shutdown is an orderly teardown rather than a reason to report, which is why the shutdown is
+   * read ahead of the attempt...inside it, a teardown would write a line at its level for a new type and a debug line for a repeat.
    */
   async #connect(): Promise<boolean> {
 
+    const failures = repeatDemotedLog<ConnectFailureType>(this.log);
     const { backoff, shouldRetry } = createConnectRetryPolicy({
 
-      onFailure: ({ rateLimited, reason }: ConnectFailure): void => {
+      onFailure: ({ level, reason, type }: ConnectFailure): void => {
 
         if(this.#isShuttingDown()) {
 
           return;
         }
 
-        if(rateLimited) {
+        failures.attempt((log: HomebridgePluginLogging): void => {
 
-          this.log.warn("Unable to connect to the UniFi Access controller because it is rate limiting requests, and will keep trying on the slower refusal schedule.");
+          const severity = (level === "error") ? "error" : "warn";
 
-          return;
-        }
+          if(type === "rate-limit") {
 
-        this.log.error("Unable to connect to the UniFi Access controller, and will keep trying: %s.", reason);
+            log[severity]("Unable to connect to the UniFi Access controller because it is rate limiting requests, and will keep trying on the slower refusal schedule.");
+
+            return;
+          }
+
+          log[severity]("Unable to connect to the UniFi Access controller, and will keep trying: %s.", reason);
+        }, (): ConnectFailureType => type);
       }
     });
 
@@ -369,15 +379,17 @@ export class AccessController {
         verifyTls: this.config.verifyTls === true, ...this.#identity }), { attempts: Infinity, backoff, clock: this.platform.clock, shouldRetry, signal: this.signal });
     } catch(error) {
 
-      /* The attempts are unbounded, so the retry rejects only on our own shutdown, which is an orderly teardown rather than a failure to report, or on the policy's
-       * veto of an address no URL can carry. The shutdown is read first, so a refused address meeting a shutdown in progress stays as quiet as every other attempt a
-       * shutdown ends. The veto is said here and nowhere else, because the policy reports nothing for it, and the library's message names the address with any
-       * credentials it held masked.
+      /* The attempts are unbounded, so the retry rejects only on our own shutdown, which is an orderly teardown rather than a failure to report, or on one of the
+       * policy's vetoes. The shutdown is read first, so a veto meeting a shutdown in progress stays as quiet as every other attempt a shutdown ends. A veto is said here
+       * and nowhere else, because the policy reports nothing for it, and unifi-access's message names an address with any credentials it held masked.
        */
       if(!this.#isShuttingDown()) {
 
-        this.log.error("Unable to connect to the UniFi Access controller, and will not keep trying until its address is corrected in the plugin settings: %s.",
-          formatErrorMessage(error));
+        this.log.error(isUnsupportedSetup(error) ?
+          "Unable to connect to the UniFi Access controller, and will not keep trying until a username and password are added in the plugin settings and Homebridge is " +
+            "restarted, because this controller does not offer its API to a token alone: %s." :
+          "Unable to connect to the UniFi Access controller, and will not keep trying until its address is corrected in the plugin settings: %s.",
+        formatErrorMessage(error));
       }
 
       return false;

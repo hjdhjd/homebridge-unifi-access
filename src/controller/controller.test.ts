@@ -5,7 +5,7 @@
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HAPStatus, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
-  AccessNetworkError, AccessRequestError, createStateStore, selectAccessPoints } from "unifi-access";
+  AccessNetworkError, AccessRequestError, AccessTimeoutError, createStateStore, selectAccessPoints } from "unifi-access";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
@@ -1735,19 +1735,21 @@ test("a controller with no name that never connects prefixes its lines with its 
   assert.equal(lines.filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
 });
 
-test("a connect that keeps failing says why once per reason, and a shutdown landing mid-attempt says nothing", async (t) => {
+test("a connect that keeps failing says why once per type, and a shutdown landing mid-attempt says nothing", async (t) => {
 
   const clock = new TestClock();
   const errors: string[] = [];
   const shutdown = new AbortController();
+  const warnings: string[] = [];
 
   let attempts = 0;
 
   const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
+    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
+  signal: shutdown.signal });
 
-  /* A controller that answers every attempt with a fault: the same reducer fault thrown afresh on each early attempt, then a timeout on the ones after, then a
-   * shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a reason no attempt before it gave, so a controller that
+  /* A controller that answers every attempt with a fault: the same reducer fault thrown afresh on each early attempt, then a deadline on the ones after, then a
+   * shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a type no attempt before it gave, so a controller that
    * reported it would add a line here...the token in the identity is what registers this controller's teardown against the plugin's lifetime, so the abort below
    * reaches it.
    */
@@ -1762,12 +1764,12 @@ test("a connect that keeps failing says why once per reason, and a shutdown land
 
     if(attempts <= 5) {
 
-      throw new Error("Request timed out.");
+      throw new AccessTimeoutError("The controller did not respond before the request deadline elapsed.", { elapsedMs: 3500 });
     }
 
     shutdown.abort();
 
-    throw new Error("The connection was torn down.");
+    throw new AccessNetworkError("The connection was torn down.", { code: "ECONNRESET" });
   });
 
   t.after(() => shutdown.abort());
@@ -1779,10 +1781,10 @@ test("a connect that keeps failing says why once per reason, and a shutdown land
 
   assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
   assert.equal(attempts, 6, "every attempt the fixture scripts is made, so the silence below is not an attempt that never ran");
-  assert.deepEqual(errors, [
-    "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors').",
-    "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Request timed out."
-  ], "each run of one reason is reported once, a changed reason again, and neither the interrupted attempt nor the ended retry adds a line");
+  assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors')."],
+    "the fault a person must act on is said once at error");
+  assert.deepEqual(warnings, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: The controller did not respond before the request " +
+    "deadline elapsed."], "the one that should fix itself is said once at warn, and neither the interrupted attempt nor the ended retry adds a line");
 });
 
 // The line a connect the controller rate limits is said with, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
@@ -1795,15 +1797,17 @@ const RATE_LIMIT = new AccessRequestError("The UniFi Access controller answered 
 const WRAPPED_RATE_LIMIT = new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause: RATE_LIMIT, stage: "fetch" });
 
 /* Log a controller in against a connect port that answers its attempts with the failures given, in turn and from the first again once they run out, the third
- * attempt shutting the plugin down as it fails, and answer the lines the run said at error and at warn level, rendered as the user reads them. The waits between
- * attempts are armed on the platform's clock, so the drain walks whichever schedule the policy chose on virtual time, and a line said once across the run is said
- * once across repeated attempts.
+ * attempt shutting the plugin down as it fails unless the arm counts its own, and answer the lines the run said at error and at warn level, rendered as the user reads
+ * them. The waits between attempts are armed on the platform's clock, so the drain walks whichever schedule the policy chose on virtual time, and a line said once across
+ * the run is said once across repeated attempts. With the debug gate on, a debug line arrives on the warn channel, which is how an arm reads a demoted repeat.
  *
  * @param failures - The failures the attempts answer with, attempt n answering the one at position (n - 1) modulo their number.
+ * @param options  - The attempt that shuts the plugin down, and the feature option entries the arm runs under.
  *
  * @returns The lines said at error level and the lines said at warn level, each in the order they were said.
  */
-async function loginFailing(failures: readonly Error[]): Promise<{ errors: string[]; warnings: string[] }> {
+async function loginFailing(failures: readonly Error[], { attemptCount = 3, entries = [] }: { attemptCount?: number; entries?: string[] } = {}):
+Promise<{ errors: string[]; warnings: string[] }> {
 
   const clock = new TestClock();
   const errors: string[] = [];
@@ -1812,16 +1816,19 @@ async function loginFailing(failures: readonly Error[]): Promise<{ errors: strin
 
   let attempts = 0;
 
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
-  signal: shutdown.signal });
+  const platform = makePlatformDouble({ clock, entries, log: {
+
+    error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined,
+    warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters))
+  }, signal: shutdown.signal });
 
   // The token in the identity is what registers this controller's teardown against the plugin's lifetime, so the scripted abort reaches it.
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
 
     attempts++;
 
-    if(attempts === 3) {
+    if(attempts === attemptCount) {
 
       shutdown.abort();
     }
@@ -1841,7 +1848,7 @@ async function loginFailing(failures: readonly Error[]): Promise<{ errors: strin
     await drainClock(clock);
 
     assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
-    assert.equal(attempts, 3, "every attempt the fixture scripts is made, so a line said once was said across repeated attempts");
+    assert.equal(attempts, attemptCount, "every attempt the fixture scripts is made, so a line said once was said across repeated attempts");
 
     return { errors, warnings };
   } finally {
@@ -1874,19 +1881,122 @@ test("a connect whose rate limit alternates between its bare and wrapped spellin
   assert.deepEqual(errors, [], "and nothing is said at error");
 });
 
-test("a connect refused its sign-in or unable to reach the controller is said once at error with its reason, and never as a rate limit", async () => {
+// A line a retried connect says with its reason, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
+const retrying = (reason: string): string => "1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: " + reason + ".";
 
-  for(const { failure, reason } of [ { failure: new AccessAuthError("Bad credentials."), reason: "Bad credentials" },
-    { failure: new Error("Network unreachable."), reason: "Network unreachable" } ]) {
+// A network fault, spelled as unifi-access raises it.
+const networkFault = (message: string, code: string): AccessNetworkError => new AccessNetworkError(message + ".", { code });
 
-    // Each failure logs a controller in of its own, one at a time, so a failure names the fault rather than a position in a list.
-    // eslint-disable-next-line no-await-in-loop
-    const { errors, warnings } = await loginFailing([failure]);
+test("a refused sign-in is said once at error with its reason, and a controller that cannot be reached once at warn", async () => {
 
-    assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: " + reason + "."],
-      failure.message + ": the failure is said once at error with its reason");
-    assert.deepEqual(warnings, [], failure.message + ": and nothing is said at warn");
-  }
+  const refused = await loginFailing([new AccessAuthError("Bad credentials.")]);
+
+  assert.deepEqual(refused.errors, [retrying("Bad credentials")], "a person must act on a refused sign-in");
+  assert.deepEqual(refused.warnings, [], "and nothing is said at warn");
+
+  const unreachable = await loginFailing([networkFault("No route to the controller", "EHOSTUNREACH")]);
+
+  assert.deepEqual(unreachable.warnings, [retrying("No route to the controller")], "an unreachable controller should fix itself");
+  assert.deepEqual(unreachable.errors, [], "and nothing is said at error");
+});
+
+test("reasons of one type are one report, and a turn between types is said in full, a return to an earlier type included", async () => {
+
+  const alternating = await loginFailing([ networkFault("No route to the controller", "EHOSTUNREACH"), networkFault("The host is down", "EHOSTDOWN") ],
+    { attemptCount: 5 });
+
+  assert.deepEqual(alternating.warnings, [retrying("No route to the controller")], "a sleeping host alternating its errnos is one type");
+
+  const turning = await loginFailing([ networkFault("The controller refused the connection", "ECONNREFUSED"), networkFault("The connection dropped", "ECONNRESET") ],
+    { attemptCount: 4 });
+
+  assert.deepEqual(turning.warnings, [ retrying("The controller refused the connection"), retrying("The connection dropped"),
+    retrying("The controller refused the connection") ], "and each turn is said again");
+});
+
+test("a change of level is a change of type, so a host name that stops resolving is said at error after a struggling resolver", async () => {
+
+  const { errors, warnings } = await loginFailing([ networkFault("The resolver failed", "EAI_AGAIN"), networkFault("The host does not exist", "ENOTFOUND") ]);
+
+  assert.deepEqual(warnings, [retrying("The resolver failed")], "the resolver heals itself");
+  assert.deepEqual(errors, [retrying("The host does not exist")], "and the name a person must fix is never demoted");
+});
+
+test("a refused identity giving way to a refused privilege is said at error, because each asks a person for a different fix", async () => {
+
+  const { errors } = await loginFailing([ new AccessAuthError("Bad credentials."), new AccessAuthorizationError("Not an administrator.") ]);
+
+  assert.deepEqual(errors, [ retrying("Bad credentials"), retrying("Not an administrator") ]);
+});
+
+test("a status giving way to a realtime refusal is said again, and a run of statuses is one report", async () => {
+
+  const status = (code: number): AccessRequestError => new AccessRequestError("The UniFi Access controller answered the request with HTTP status " + String(code) + ".",
+    { statusCode: code });
+  const { warnings } = await loginFailing([ status(503), status(404), new AccessNetworkError("The realtime connection failed.") ], { attemptCount: 4 });
+
+  assert.deepEqual(warnings, [ retrying("The UniFi Access controller answered the request with HTTP status 503"), retrying("The realtime connection failed") ]);
+});
+
+test("with the debug gate on every attempt's repeat reads through, and a shutdown landing mid-attempt on that same type still says nothing", async () => {
+
+  const refused = networkFault("The controller refused the connection", "ECONNREFUSED");
+  const { warnings } = await loginFailing([refused], { attemptCount: 4, entries: ["Enable.Log.Debug"] });
+
+  assert.equal(warnings.filter((line) => (line === retrying("The controller refused the connection"))).length, 3,
+    "the first in full and each repeat at debug, the interrupted attempt writing none");
+
+  // An entry scoped to a controller's hardware identity reads nothing until a first connect teaches the controller that identity, as every debug line there does.
+  const scoped = await loginFailing([refused], { entries: ["Enable.Log.Debug.AABBCC000001"] });
+
+  assert.deepEqual(scoped.warnings, [retrying("The controller refused the connection")], "and the first alone reaches the log under a scoped entry");
+});
+
+// The line a controller that does not offer its API to a token alone earns, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
+const NOT_OFFERED_LINE = "1.2.3.4: Unable to connect to the UniFi Access controller, and will not keep trying until a username and password are added in the plugin " +
+  "settings and Homebridge is restarted, because this controller does not offer its API to a token alone: This API is not supported.";
+
+test("a controller that does not offer its API to a token alone stops the connect after its first attempt, waits for nothing, and says so once at error", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+  const warnings: string[] = [];
+
+  let attempts = 0;
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
+  signal: shutdown.signal });
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    throw new AccessApiError("This API is not supported.", { code: "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" });
+  });
+
+  t.after(() => shutdown.abort());
+
+  // The login is started rather than awaited, so a retry that waited behind the stop would be stepped here rather than hang the arm.
+  const login = controller.login();
+  const steps = await drainClock(clock);
+
+  assert.equal(await login, "unavailable", "the run ends with this controller's identity unknown");
+  assert.equal(shutdown.signal.aborted, false, "and it ended without a shutdown");
+  assert.equal(attempts, 1, "no second attempt is made");
+  assert.deepEqual(clock.requested, [], "so no wait is armed behind the stop");
+  assert.equal(steps, 0, "and nothing comes due afterwards");
+  assert.deepEqual(errors, [NOT_OFFERED_LINE], "the person who must fix it reads why at error");
+  assert.deepEqual(warnings, [], "and nothing is said at warn");
+});
+
+test("a connect whose document read answers a status says that status at warning, reading through the wrapper that carries it", async () => {
+
+  const cause = new AccessRequestError("The UniFi Access controller answered the request with HTTP status 503.", { statusCode: 503 });
+  const { errors, warnings } = await loginFailing([new AccessBootstrapError("Unable to fetch the UniFi Access controller configuration.", { cause, stage: "fetch" })]);
+
+  assert.deepEqual(errors, [], "a controller that is not ready should fix itself");
+  assert.ok((warnings.length === 1) && warnings[0]?.includes("HTTP status 503"), "and its one line names the status the wrapper carries");
 });
 
 test("an accessory under the device identity that records none is adopted rather than retired, because membership is read before the record", async (t) => {

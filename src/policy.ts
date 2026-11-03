@@ -14,15 +14,15 @@
  * the library's own published vocabulary, which is read through rather than restated anywhere here.
  */
 import { ACCESS_AUTHENTICATION_TYPES, ACCESS_DOORBELL_REASON_CODES, ACCESS_RECOVERY_BACKOFF_MS, ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, ACCESS_RECOVERY_STEADY_INTERVAL_MS,
-  AccessConfigurationError, isControllerRefusal, isEnterpriseHubRecord, isHub, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings,
-  selectAccessPoints, terminalInput } from "unifi-access";
+  AccessApiError, AccessBootstrapError, AccessConfigurationError, AccessError, AccessProtocolError, AccessRequestError, isControllerRefusal, isEnterpriseHubRecord, isHub,
+  isPrivilegeRefusal, isReader, isSignInRefusal, normalizeActorType, normalizeMacAddress, portBindings, selectAccessPoints, terminalInput } from "unifi-access";
 import { ACCESS_WEBHOOK_PATH_PREFIX, ACCESS_WEBHOOK_PORT } from "./settings.ts";
-import type { AccessActorType, AccessDoorStateEntry, AccessLockRule, AccessMethod, AccessOfficialUser, AccessOfficialWebhookEndpoint,
+import type { AccessActorType, AccessApiCode, AccessDoorStateEntry, AccessLockRule, AccessMethod, AccessOfficialUser, AccessOfficialWebhookEndpoint,
   AccessOfficialWebhookEndpointWrite, AccessState, AccessStateDevice, AccessStateDoor, AccessWebhookDelivery, AccessWebhookDoorUnlockObject,
   ConnectIdentity } from "unifi-access";
 import type { AccessControllerTokens, AccessModelKey } from "./options.ts";
-import type { FeatureOptionChoice, Nullable, RetryBackoff } from "homebridge-plugin-utils";
-import { formatErrorMessage, sameEntries, sanitizeName, scopeSafeId } from "homebridge-plugin-utils";
+import type { FeatureOptionChoice, Nullable, RetryBackoff, TransportFailureKind } from "homebridge-plugin-utils";
+import { classifyTransportError, connectionFaultLevel, formatErrorMessage, sameEntries, sanitizeName, scopeSafeId } from "homebridge-plugin-utils";
 import type { ACCESS_WEBHOOK_EVENTS } from "./settings.ts";
 import { AccessReservedNames } from "./types.ts";
 import type { IncomingHttpHeaders } from "node:http";
@@ -124,17 +124,87 @@ export function canTransition(options: { from: AccessControllerPhase; to: Access
   return (from !== to) && (from !== "shuttingDown");
 }
 
+// The result code saying a controller has no official API at all, which is what an Identity Enterprise controller answers. unifi-access reads the code itself and
+// publishes no reading of it.
+export const OFFICIAL_API_ABSENT_CODE = "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" satisfies AccessApiCode;
+
 /**
- * A retried connect attempt's failure, as the connect retry policy reports it to the caller. The policy reports a run's first failure and then each turn between a
- * rate limit and any other fault, and, outside a rate limit, each change of reason, so a run of rate limits is one report whichever spelling its 429 arrives in.
+ * Why a retried connect attempt failed, the tag a caller's repeat-demoting log compares with the one it remembers: every kind the transport classifier names, and what
+ * a connect reads above that classifier. A host name that does not exist is told apart from a resolver that is struggling, because the two are logged at different
+ * levels, and a change of level is always a change of type. A refused identity and a refused privilege are told apart because each asks a person for a different fix.
+ */
+export type ConnectFailureType = "no-such-host" | "rate-limit" | "refused-identity" | "refused-privilege" | "status" | "unreadable" | TransportFailureKind;
+
+/**
+ * A retried connect attempt's failure, as the connect retry policy reports it to the caller on every attempt.
  */
 export interface ConnectFailure {
 
-  /** Whether the controller was rate limiting requests: a refusal that is no refused sign-in, as the library's connection classes read one. */
-  readonly rateLimited: boolean;
+  /** The level a user reads it at: error when a person must act, and warning when it should fix itself. */
+  readonly level: "error" | "warning";
 
   /** The reason the attempt failed, formatted as the text a user reads. */
   readonly reason: string;
+
+  /** The tag the reason falls under, which a caller's repeat-demoting log compares. */
+  readonly type: ConnectFailureType;
+}
+
+/**
+ * Read a retried connect failure for the person reading the Homebridge log, from what unifi-access exports and the homebridge-plugin-utils fault table. A refused
+ * sign-in, a response nothing here can understand, a certificate nothing trusts and a host name that does not exist are errors, because each needs a person. Everything
+ * else is a warning, because it should fix itself, a `quiet` answer included, since a retry that never ends always says why.
+ *
+ * What the table cannot see is read above it. Every error unifi-access raises is a transport failure to the classifier, so a sign-in, a status and a response it could
+ * not use all read as its codeless row. A value unifi-access did not type is an official listing that would not fold, which no bootstrap wrapper carries.
+ *
+ * @param error - The failure the attempt ended in.
+ *
+ * @returns The level and the type of the failure.
+ */
+export function connectFailureReading(error: unknown): Pick<ConnectFailure, "level" | "type"> {
+
+  const fault = (error instanceof AccessBootstrapError) ? error.cause : error;
+
+  if(isSignInRefusal(error)) {
+
+    return { level: "error", type: isPrivilegeRefusal(fault) ? "refused-privilege" : "refused-identity" };
+  }
+
+  if(isControllerRefusal(error)) {
+
+    return { level: "warning", type: "rate-limit" };
+  }
+
+  if(!(error instanceof AccessError) || (error instanceof AccessProtocolError) || ((error instanceof AccessBootstrapError) && (error.stage !== "fetch"))) {
+
+    return { level: "error", type: "unreadable" };
+  }
+
+  if(fault instanceof AccessRequestError) {
+
+    return { level: "warning", type: "status" };
+  }
+
+  const failure = classifyTransportError(error);
+  const level = (connectionFaultLevel(failure, { open: false }) === "error") ? "error" : "warning";
+
+  return { level, type: ((failure.kind === "dns") && (level === "error")) ? "no-such-host" : failure.kind };
+}
+
+/**
+ * Whether a connect failure is a setup no retry can change: a controller that does not offer its API to a token alone, which is what an Identity Enterprise controller
+ * answers. The code is read bare, because that is the one way it reaches a connect with a remedy to name. unifi-access documents the code for the official API and folds
+ * it for a client holding credentials, so only a token alone meets it bare...under a bootstrap wrapper it would be an undocumented answer with credentials already
+ * configured, where adding them is no remedy, so that shape reads as any other envelope code and is retried.
+ *
+ * @param error - The failure the attempt ended in.
+ *
+ * @returns `true` when no retry can change the answer until the setup changes.
+ */
+export function isUnsupportedSetup(error: unknown): boolean {
+
+  return (error instanceof AccessApiError) && (error.code === OFFICIAL_API_ABSENT_CODE);
 }
 
 // The library's recovery schedule, its staged delays and its steady floor composed into the shape its refusal schedule is published in, so the connect retry holds
@@ -159,30 +229,23 @@ const RECOVERY_SCHEDULE_MS = { backoff: ACCESS_RECOVERY_BACKOFF_MS, steady: ACCE
  * once. Each schedule settles onto a steady floor it holds for as long as the run lasts, so every fault a controller or a network can recover from is retried, and the
  * caller's shutdown is what ends a run that never connects.
  *
- * The one fault the decision refuses to retry is an address no URL can carry, which unifi-access refuses as an {@link AccessConfigurationError} before it sends
- * anything. The same address is refused the same way on every attempt, so asking again can only repeat the refusal, and the decision answers false for it. The
- * veto answers ahead of the report below and leaves the run's state alone, because the run ends on it and the caller says why in words of its own.
+ * The decision refuses to retry a fault no attempt can change, and answers false for it: an address no URL can carry, which unifi-access refuses as an
+ * {@link AccessConfigurationError} before it sends anything, and a setup no retry can change, {@link isUnsupportedSetup}. Asking again can only repeat the same answer.
+ * A veto answers ahead of the report below and leaves the run's state alone, because the run ends on it and the caller says why in words of its own.
  *
- * The run also reports itself, because a retry without end is otherwise silent for as long as it lasts. A retried attempt hands its failure to `onFailure` when the
- * run's first failure arrives and again whenever what failed changes, so a caller hears why the connect is failing and when that changes rather than hearing every
- * attempt. Each report says whether the failure is a rate limit, read as the library's connection classes read one: a refusal that is no refused sign-in,
- * {@link isSignInRefusal} being the narrower reading the library chooses its own announcement by, so a caller can tell the controller asking to be asked less often
- * from one that waits on a person to correct the credentials or the privilege. That reading is also what decides a change. A rate limit is the one failure a caller
- * says by its class rather than its reason, so a turn between a rate limit and any other fault is always reported, and a run of rate limits is one report however
- * its 429 is spelled, bare or as the cause a bootstrap error carries, which is the rule the library's own connection keeps when it announces a loss once per class
- * and again on a change of class. Every other fault is compared on its formatted reason, the text a user reads, so two faults that read identically are one reason
- * and a timeout giving way to a different fault is two.
+ * Every other failure is handed to `onFailure`, because a retry without end is otherwise silent for as long as it lasts, carrying what {@link connectFailureReading}
+ * reads. The policy keeps no memory of what it reported, because the caller's repeat-demoting log is that memory and a second would disagree with it, so which of those
+ * reports a user reads in full is that log's to decide.
  *
  * @param options - The callback that receives each failure the run reports, optional.
  *
- * @returns The `backoff` and `shouldRetry` pair for the retry options. They close over whether the last failure was a refusal, the run's rung on that class's
- * schedule, and the last failure reported.
+ * @returns The `backoff` and `shouldRetry` pair for the retry options. They close over whether the last failure was a refusal and the run's rung on that class's
+ * schedule.
  */
 export function createConnectRetryPolicy({ onFailure }: { onFailure?: (failure: ConnectFailure) => void } = {}): { backoff: RetryBackoff;
   shouldRetry: (error: unknown) => boolean; } {
 
   let refused = false;
-  let reported: ConnectFailure | undefined;
   let rung = 0;
 
   return {
@@ -200,8 +263,8 @@ export function createConnectRetryPolicy({ onFailure }: { onFailure?: (failure: 
 
     shouldRetry: (error: unknown): boolean => {
 
-      // An address no URL can carry ends the run before anything is counted or reported, so no retrying reason reaches the caller ahead of its own report.
-      if(error instanceof AccessConfigurationError) {
+      // A fault no attempt can change ends the run before anything is counted or reported, so no retrying reason reaches the caller ahead of its own report.
+      if((error instanceof AccessConfigurationError) || isUnsupportedSetup(error)) {
 
         return false;
       }
@@ -217,16 +280,7 @@ export function createConnectRetryPolicy({ onFailure }: { onFailure?: (failure: 
 
       rung++;
 
-      const rateLimited = refusal && !isSignInRefusal(error);
-      const reason = formatErrorMessage(error);
-
-      // A failure earns a report when its rate-limit reading differs from the last report's, which a run's first failure always does, having no report to match.
-      // Within a run of rate limits nothing more earns one, whatever its reason reads, while any other fault earns one whenever its reason differs from the last.
-      if((rateLimited !== reported?.rateLimited) || (!rateLimited && (reason !== reported.reason))) {
-
-        reported = { rateLimited, reason };
-        onFailure?.(reported);
-      }
+      onFailure?.({ ...connectFailureReading(error), reason: formatErrorMessage(error) });
 
       return true;
     }

@@ -5,6 +5,7 @@
 import type { API, Logging } from "homebridge";
 import { APIEvent, HAPStatus, onAbort } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
+import { AccessApiError, AccessNetworkError } from "unifi-access";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { Characteristic, Service, accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, platformInternals, savesOn } from "./testing.helpers.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
@@ -910,6 +911,52 @@ test("a controller whose first connect resolves inside the final words' grace bu
   release();
   await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the held word is said" });
 });
+
+/* A connect failing inside the final words' grace writes nothing at any level. The held word keeps the grace open, so the platform is stopping while its lifetime still
+ * holds, and a shutdown read taking the lifetime's signal alone would say the failure aloud. Each failure is a row of its own: an attempt the retry goes on from, and the
+ * stop that ends the run.
+ */
+for(const { failure, label } of [
+
+  { failure: new AccessNetworkError("The controller refused the connection.", { code: "ECONNREFUSED" }), label: "an attempt the retry goes on from" },
+  { failure: new AccessApiError("This API is not supported.", { code: "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" }), label: "a stop" }
+]) {
+
+  test(label + " inside the final words' grace writes nothing, because the shutdown has already begun", async (t) => {
+
+    const harness = makeHarness();
+    const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Enable.Log.Debug"], platform: "UniFi Access" });
+    const [holding] = configuredControllers(platform);
+
+    assert.ok(holding, "the entry describes a whole identity, so a real controller is constructed for it");
+
+    const release = clientWithWord(holding).holdPublishes();
+
+    t.after(release);
+
+    // A second controller whose connect is still outstanding when the shutdown event arrives, and fails once the shutdown has begun.
+    const connect = Promise.withResolvers<AccessClient>();
+    const late = new AccessController(platform, { address: "5.6.7.8", tokens: { access: "token" } }, async (): Promise<AccessClient> => connect.promise);
+
+    platformInternals(platform).controllers.push(late);
+
+    const login = late.login();
+
+    harness.api.emit(APIEvent.SHUTDOWN);
+    connect.reject(failure);
+    await settle();
+
+    assert.equal(platform.stopping, true, "the shutdown has begun");
+    assert.equal(platform.signal.aborted, false, "and the failure landed inside the grace, with the plugin's lifetime still holding");
+    assert.deepEqual(harness.lines.filter((line) => line.includes("Unable to connect")), [], "so the failure writes nothing at any level");
+
+    release();
+    await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the held word is said" });
+
+    assert.equal(await login, "unavailable", "and a connect that failed leaves this controller's identity unknown");
+    assert.deepEqual(harness.lines.filter((line) => line.includes("Unable to connect")), [], "the end of the run adding none");
+  });
+}
 
 test("a reclaim whose logins settle inside the final words' grace removes nothing, because the shutdown has already begun", async (t) => {
 

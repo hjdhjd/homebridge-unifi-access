@@ -21,8 +21,8 @@ import { AccessApiError, AccessBootstrapError, AccessCertificateError, AccessCli
   deviceAccessMethodStates, isHub, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates,
   tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
-import { accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible, membershipRecords,
-  recordAvailable, serialForm } from "./policy.ts";
+import { OFFICIAL_API_ABSENT_CODE, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible,
+  membershipRecords, recordAvailable, serialForm } from "./policy.ts";
 import { formatErrorMessage, formatSeconds, sameEntries } from "homebridge-plugin-utils";
 import type { DecoratedSerial } from "./policy.ts";
 
@@ -179,7 +179,7 @@ export function narrowStatusContextRequest(body: unknown): Nullable<StatusContex
  * controller answers, and a device below an endpoint's firmware floor. Membership is read with `some` rather than `includes`, whose argument is typed as the list's
  * own literals and so refuses the open code a caught error carries.
  */
-const UNSUPPORTED_CODES = [ "CODE_DEVICE_API_NOT_SUPPORTED", "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" ] as const satisfies readonly AccessApiCode[];
+const UNSUPPORTED_CODES = [ "CODE_DEVICE_API_NOT_SUPPORTED", OFFICIAL_API_ABSENT_CODE ] as const satisfies readonly AccessApiCode[];
 
 /**
  * Classify a connect failure into the wire contract's error vocabulary, from the library's exported classes and their own typed fields alone and never from a
