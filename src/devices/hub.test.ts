@@ -1103,9 +1103,95 @@ test("a UA Gate publishes its side door's unlocks under the side door's own topi
  */
 function securedGate(options: HubOptions = {}): HubHarness {
 
-  return makeGate({ ...options, record: testHub({ configs: [ { device_id: HUB_ID, key: "output_oper1_relay", tag: "relay", value: "off" },
-    { device_id: HUB_ID, key: "output_oper2_relay", tag: "relay", value: "off" } ], device_type: "UGT" }) });
+  return makeGate({ ...options, record: testHub({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "off", [GATE_OPERATOR_RELAY]: "off" }), device_type: "UGT",
+    extensions: [ mainPort(MAIN_DOOR), sidePort(SIDE_DOOR) ] }) });
 }
+
+// A gate's relay rows as a captured record carries them, under the tag the controller files them under.
+function relayRows(entries: Record<string, string>): AccessDeviceEntryConfig[] {
+
+  return configRows({ deviceId: HUB_ID, entries, tag: "hub_action" });
+}
+
+/* A gate with no doors to discover, so a relay reading is all either lock has: every door taking a role would otherwise be seeded from the door-state map over it. The
+ * main lock's reading proves the seed at construction, and the side lock's proves the seed where its service attaches.
+ *
+ * @param options            - What this arm varies.
+ * @param options.configs    - The record's relay rows.
+ * @param options.doors      - The topology's doors, none by default.
+ * @param options.extensions - The record's port bindings.
+ *
+ * @returns The gate.
+ */
+function seedGate(options: { configs: AccessDeviceEntryConfig[]; doors?: { name: string; unique_id: string }[]; extensions: Record<string, unknown>[] }): HubHarness {
+
+  return makeGate({ doors: options.doors ?? [], options: ["Enable.Hub.Door.Service=Lock"],
+    record: testHub({ configs: options.configs, device_type: "UGT", extensions: options.extensions }) });
+}
+
+// What a lock reads, the main door's unless the side door's subtype is named.
+function lockReading(harness: HubHarness, subtype?: string): unknown {
+
+  return lockService(harness, subtype).getCharacteristic(Characteristic.LockCurrentState).value;
+}
+
+test("a UA Gate seeds each lock from the relay its own port's binding names, whatever any other relay row says", () => {
+
+  const { SECURED, UNSECURED } = Characteristic.LockCurrentState;
+
+  // The operator and door-lock rows differ, and the row no port names disagrees with the door-lock row, so a side seed reading it reads the wrong way in each direction.
+  const secureMain = seedGate({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "on", [GATE_OPERATOR_RELAY]: "off", "output_oper2_relay": "off" }),
+    extensions: CAPTURE_PORTS });
+
+  assert.equal(lockReading(secureMain), SECURED);
+  assert.equal(lockReading(secureMain, AccessReservedNames.LOCK_DOOR_SIDE), UNSECURED);
+
+  const secureSide = seedGate({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "off", [GATE_OPERATOR_RELAY]: "on", "output_oper2_relay": "on" }),
+    extensions: CAPTURE_PORTS });
+
+  assert.equal(lockReading(secureSide), UNSECURED);
+  assert.equal(lockReading(secureSide, AccessReservedNames.LOCK_DOOR_SIDE), SECURED);
+
+  // The ports traded between the relays, so a seed holding a literal for the main door, which the captured pair happens to agree with, reads the wrong row.
+  const traded = seedGate({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "off", [GATE_OPERATOR_RELAY]: "on" }),
+    extensions: [ portBinding("port1", MAIN_DOOR, GATE_DOOR_LOCK_RELAY), portBinding("port2", SIDE_DOOR, GATE_OPERATOR_RELAY) ] });
+
+  assert.equal(lockReading(traded), SECURED);
+  assert.equal(lockReading(traded, AccessReservedNames.LOCK_DOOR_SIDE), UNSECURED);
+});
+
+test("a UA Gate lock whose port names no relay reads secured, and stays that way where no door ever takes its role", () => {
+
+  const { SECURED } = Characteristic.LockCurrentState;
+
+  /* One door on the controller and port 1 alone bound, so the side lock has no key, and every row a seed could reach for says otherwise. Nothing later corrects a wrong
+   * reading here, because the door-state rail walks only the doors that hold a role, which is why the delivery below proves more than the first read.
+   */
+  const gate = seedGate({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "on", [GATE_OPERATOR_RELAY]: "off", "output_oper2_relay": "on" }),
+    doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], extensions: [mainPort(MAIN_DOOR)] });
+
+  assert.equal(lockReading(gate, AccessReservedNames.LOCK_DOOR_SIDE), SECURED);
+
+  restateRecord(gate, { is_online: true });
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(lockReading(gate, AccessReservedNames.LOCK_DOOR_SIDE), SECURED);
+
+  // No bindings and no doors at all leave both locks with no key, whatever the rows say.
+  const bare = seedGate({ configs: relayRows({ [GATE_DOOR_LOCK_RELAY]: "on", [GATE_OPERATOR_RELAY]: "on" }), extensions: [] });
+
+  assert.equal(lockReading(bare), SECURED);
+  assert.equal(lockReading(bare, AccessReservedNames.LOCK_DOOR_SIDE), SECURED);
+});
+
+test("a UA Gate lock whose port names a relay with no matching row reads unsecured", () => {
+
+  const { UNSECURED } = Characteristic.LockCurrentState;
+  const gate = seedGate({ configs: relayRows({ "output_aux_relay": "off" }), extensions: CAPTURE_PORTS });
+
+  assert.equal(lockReading(gate), UNSECURED);
+  assert.equal(lockReading(gate, AccessReservedNames.LOCK_DOOR_SIDE), UNSECURED);
+});
 
 test("a UA Gate adopts its main door's lock from the door state map rather than leaving the record's reading in HomeKit", () => {
 

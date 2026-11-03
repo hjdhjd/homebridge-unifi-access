@@ -996,6 +996,21 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
 }
 
 /**
+ * The relay a UA Gate's record names for one of its doors, from the binding of the port that serves that door. It selects by port and reads no role, because a port
+ * names its relay whichever door it serves, and a lock's first reading comes before discovery has resolved any role.
+ *
+ * @param options - The device record, and whether the side door's port is the one asked about.
+ *
+ * @returns The key of the port's relay, or `undefined` where the record binds no such port or names no relay for it.
+ */
+export function gateDoorRelayKey(options: { device: AccessStateDevice; isSideDoor: boolean }): string | undefined {
+
+  const port = options.isSideDoor ? GATE_SIDE_PORT : GATE_MAIN_PORT;
+
+  return portBindings(options.device).find(binding => binding.port === port)?.relayKey;
+}
+
+/**
  * Whether a hub's door position sensor is eligible to be modeled, family by family - the one statement of the eligibility switch every consumer of that question
  * reads.
  *

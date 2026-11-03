@@ -12,7 +12,8 @@ import type { AcquireServiceResult, Nullable } from "homebridge-plugin-utils";
 import type { CharacteristicValue, Service } from "homebridge";
 import type { DoorServiceType, HubSensorName, LogEventName } from "../policy.ts";
 import { accessMethodChoices, accessMethods, describeUnlock, deviceHasCapability, discoverDoorLocations, doorbellOutcome, doorbellReaderId, doorbellRingAllowed,
-  doorbellTriggerAction, dpsSensorEligible, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService, unlockAttribution } from "../policy.ts";
+  doorbellTriggerAction, dpsSensorEligible, gateDoorRelayKey, hubSensorChoices, lockCommandRule, logEventChoices, resolveDoorService,
+  unlockAttribution } from "../policy.ts";
 import { capabilityGate, findService, formatErrorMessage, getServiceName, guardedDispatch, presenceChanged, updateServices,
   validCharacteristic } from "homebridge-plugin-utils";
 import type { AccessAccessory } from "../types.ts";
@@ -2975,35 +2976,45 @@ export class AccessHub extends AccessDevice {
     return this.#contactReading(this.#sideDoorFacts);
   }
 
-  /* Return the state of the main gate's lock relay on a UA Gate hub. Only that hardware answers from its record here: every other family's lock reading comes from
-   * the door-state model, and answering secured for them is the same safe reading an unrecognized lock value gets.
+  /* What a UA Gate's relay says about one of its locks. Only that hardware answers from its record here: every other family's lock reading comes from the door-state
+   * model, and answering secured for them is the same safe reading an unrecognized lock value gets.
+   *
+   * A lock's own port names its relay, and a lock whose port names none has nothing to read, so it takes that safe reading too. A relay reads off while the lock is
+   * engaged, so off is secured and anything else, an absent row included, is not.
+   *
+   * @param isSideDoor - Whether the side door's lock is the one being read.
+   *
+   * @returns The lock's reading.
    */
-  private get hubLockState(): CharacteristicValue {
+  #relayLockState(isSideDoor: boolean): CharacteristicValue {
 
     if(this.uda.device_type !== "UGT") {
 
       return this.hap.Characteristic.LockCurrentState.SECURED;
     }
 
-    // The gate's oper1 relay drives the main door (oper2 the side door); the relay reads off while the lock is engaged, so off is secured and anything else, an
-    // absent row included, is not.
-    const lockRelay = this.uda.configs?.find(entry => entry.key === "output_oper1_relay");
+    const relayKey = gateDoorRelayKey({ device: this.uda, isSideDoor });
+
+    if(relayKey === undefined) {
+
+      return this.hap.Characteristic.LockCurrentState.SECURED;
+    }
+
+    const lockRelay = this.uda.configs?.find(entry => entry.key === relayKey);
 
     return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
+  }
+
+  // Return the state of the main gate's lock relay on a UA Gate hub.
+  private get hubLockState(): CharacteristicValue {
+
+    return this.#relayLockState(false);
   }
 
   // Return the current state of the side door relay lock on the UA Gate hub.
   private get hubSideDoorLockState(): CharacteristicValue {
 
-    // Side door lock is only available on UA Gate.
-    if(this.uda.device_type !== "UGT") {
-
-      return this.hap.Characteristic.LockCurrentState.SECURED;
-    }
-
-    const lockRelay = this.uda.configs?.find(entry => entry.key === "output_oper2_relay");
-
-    return (lockRelay?.value === "off") ? this.hap.Characteristic.LockCurrentState.SECURED : this.hap.Characteristic.LockCurrentState.UNSECURED;
+    return this.#relayLockState(true);
   }
 
   /* What a terminal input reads: closed unless the terminal is in service and its reading says open. A terminal the hardware reports nothing about and one whose

@@ -17,7 +17,8 @@ import { GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, ROOT_ID, buildingTopology, c
 import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeConnectIdentity, createConnectRetryPolicy,
   createMembershipIdsSelector, describeUnlock, deviceDisplayName, deviceHasCapability, deviceModel, deviceName, deviceRecord, deviceSerial, discoverDoorLocations,
   doorGuardChoices, doorServiceChoices,
-  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, hasDpsEvidence, hubSensorChoices, hubSensorModels,
+  doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, gateDoorRelayKey, hasDpsEvidence, hubSensorChoices,
+  hubSensorModels,
   isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
   reclaimFenceOpen, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
@@ -1668,6 +1669,23 @@ test("discoverDoorLocations lets a held role go when its door is lost or falls o
     held: { mainDoorLocationId: "a" }, sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "a", sideDoorLocationId: "b" });
   assert.deepEqual(discoverDoorLocations({ device: gateDevice([ portOn("port3", "a"), portOn("port4", "b") ]), doors: [ stateDoor("a", "Alpha"), stateDoor("b", "Beta") ],
     held: { sideDoorLocationId: "b" }, sideDoorEligible: true }), { basis: "guess", mainDoorLocationId: "a", sideDoorLocationId: "b" });
+});
+
+test("gateDoorRelayKey reads the relay each door's port names, selecting by port", () => {
+
+  // The ports carry each other's relays and are delivered backwards, so neither a literal nor the delivered order can answer these.
+  const traded = gateDevice([ portOn("port2", "b", GATE_OPERATOR_RELAY), portOn("port1", "a", GATE_DOOR_LOCK_RELAY) ]);
+
+  assert.equal(gateDoorRelayKey({ device: traded, isSideDoor: false }), GATE_DOOR_LOCK_RELAY);
+  assert.equal(gateDoorRelayKey({ device: traded, isSideDoor: true }), GATE_OPERATOR_RELAY);
+
+  // A port the record does not bind, a port carrying no relay data, a record carrying no bindings and a third binding's relay each answer nothing for the port.
+  const portOneAlone = gateDevice([portOn("port1", "a", GATE_OPERATOR_RELAY)]);
+
+  assert.equal(gateDoorRelayKey({ device: portOneAlone, isSideDoor: true }), undefined);
+  assert.equal(gateDoorRelayKey({ device: gateDevice([ portOn("port1", "a"), portOn("port2", "b") ]), isSideDoor: false }), undefined);
+  assert.equal(gateDoorRelayKey({ device: {} as AccessStateDevice, isSideDoor: false }), undefined);
+  assert.equal(gateDoorRelayKey({ device: gateDevice([portOn("port3", "c", "output_aux_relay")]), isSideDoor: false }), undefined);
 });
 
 test("a record carrying only the members every census establishes degrades by absence rather than throwing", () => {
