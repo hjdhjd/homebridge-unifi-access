@@ -5,11 +5,12 @@
 /* eslint-disable camelcase */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
 import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
+import { makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessController } from "./controller.ts";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "../policy.ts";
-import { makeControllerDouble } from "../testing.helpers.ts";
+import { format } from "node:util";
 import test from "node:test";
 
 // The controller's own MAC in the normalized form an identity carries, which is the identity every telemetry topic here opens with.
@@ -130,6 +131,30 @@ test("telemetry for a controller with no hardware identity publishes under its a
 
   assert.equal(publishes.length, 1, "the frame must be mirrored exactly once");
   assert.equal(publishes[0]?.topic, "1-2-3-4/telemetry", "the topic must open with the address identity and never with an empty segment");
+});
+
+test("the telemetry line is said once at the level that set it, and a default says nothing", () => {
+
+  const OPTION = "Controller.Publish.Telemetry";
+  const levels = [
+
+    { entries: [], expected: [], level: "the default" },
+    { entries: ["Enable." + OPTION], expected: ["Access controller telemetry enabled."], level: "the plugin" },
+    { entries: ["Enable." + OPTION + ".1-2-3-4"], expected: ["Controller: Access controller telemetry enabled."], level: "the controller" },
+    { entries: [ "Enable." + OPTION, "Disable." + OPTION + ".1-2-3-4" ], expected: ["Controller: Access controller telemetry disabled."],
+      level: "a controller off beneath a global on" }
+  ];
+
+  for(const { entries, expected, level } of levels) {
+
+    const lines: string[] = [];
+    const taking = (prefix: string) => (message: string, ...parameters: unknown[]): void => void lines.push(prefix + format(message, ...parameters));
+    const platform = makePlatformDouble({ entries, log: { error: (): void => undefined, info: taking(""), warn: (): void => undefined } });
+
+    new AccessEvents(makeControllerDouble({ log: { info: taking("Controller: ") }, platform }));
+
+    assert.deepEqual(lines, expected, "the line reads as " + level + " wrote it");
+  }
 });
 
 test("telemetry publishes nothing while the feature option is off", () => {

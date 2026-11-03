@@ -3,9 +3,9 @@
  * events.ts: Events class for UniFi Access.
  */
 import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
-import type { HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
 import type { AccessController } from "./controller.ts";
 import { EventEmitter } from "node:events";
+import type { Nullable } from "homebridge-plugin-utils";
 import { mqttTopic } from "homebridge-plugin-utils";
 import { mqttTopics } from "../mqtt.ts";
 
@@ -39,7 +39,6 @@ export type AccessListener = Parameters<EventEmitter["on"]>[1];
 export class AccessEvents extends EventEmitter {
 
   private readonly controller: AccessController;
-  private readonly log: HomebridgePluginLogging;
   private readonly mqttPublishTelemetry: boolean;
   #subscription: Nullable<Disposable>;
 
@@ -49,15 +48,12 @@ export class AccessEvents extends EventEmitter {
     super();
 
     this.controller = controller;
-    this.log = controller.log;
     this.mqttPublishTelemetry = controller.hasFeature("Controller.Publish.Telemetry");
     this.#subscription = null;
 
-    // If we've enabled telemetry from the controller inform the user.
-    if(this.mqttPublishTelemetry) {
-
-      this.log.info("Access controller telemetry enabled.");
-    }
+    // If we've enabled telemetry from the controller inform the user, once at the level that set it.
+    controller.platform.featureOptions.logFeature({ controller: { id: controller.id, log: controller.log }, label: "Access controller telemetry",
+      log: controller.platform.log, option: "Controller.Publish.Telemetry" });
 
     this.#subscription = controller.client.on("rawPacket", (packet: AccessEventPacket) => this.handleRawPacket(packet));
   }

@@ -6,7 +6,7 @@ import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX } from "../cont
 import type { API, HAP, Service } from "homebridge";
 import type { AccessDeviceDisplayName, DecoratedSerial, LogEventName } from "../policy.ts";
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessHub as AccessHubProjection, AccessStateDevice, AccessWebhookEvent } from "unifi-access";
-import type { HomebridgePluginLogging, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
+import type { HomebridgePluginLogging, LogFeatureArgs, MqttAvailabilityPayload, MqttConnectHandler, MqttGetHandler, MqttPublishInit, MqttSetHandler, MqttTopicEntry,
   Nullable, ValidServiceOptions, ValidServiceResult } from "homebridge-plugin-utils";
 import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, composeSignals, debugGatedLog, mqttTopic, notResponding, ownedName, prefixedLog,
   presenceChanged, resolveNameOverride, setAccessoryName, setServiceName, validService, watchServiceName } from "homebridge-plugin-utils";
@@ -325,6 +325,23 @@ export abstract class AccessDevice extends AccessBase {
     return { data: this.uda, event: ACCESS_DEVICE_UPDATE_EVENT, event_object_id: this.uda.unique_id, receiver_id: "", save_to_history: false };
   }
 
+  /* Inform the user where an option on this device deviates from its default. homebridge-plugin-utils' logFeature resolves the option itself and speaks only on a
+   * deviation, so it needs no guard of its own...and the scopes handed to it are the ones every read on this device resolves at, which is what keeps what the
+   * user is told and what the plugin does answering one question. It writes through the logger of the level that set the option, so a global setting is said once
+   * rather than once per device, and it keeps each line once, so a caller runs this on every pass and a capability arriving mid-run is said when it arrives.
+   *
+   * A caller whose option turns a part on or off runs this ahead of that part's gate and under the hardware the part needs, so a device turned off beneath a global on
+   * still reaches it and hardware without the part says nothing. The label is a noun phrase because logFeature composes the sentence around it, and the kind label is
+   * what a line from a level above this device reads instead.
+   *
+   * @param feature - The option and the labels its line reads under.
+   */
+  protected announceFeature(feature: Pick<LogFeatureArgs, "kindLabel" | "label" | "option">): void {
+
+    this.platform.featureOptions.logFeature({ ...feature, controller: { id: this.controller.id, log: this.controller.log }, device: { id: this.id, log: this.log },
+      log: this.platform.log });
+  }
+
   // Configure device-specific settings.
   protected configureHints(): boolean {
 
@@ -337,13 +354,8 @@ export abstract class AccessDevice extends AccessBase {
     // Its fallback is the name the accessory carries, and a fallback never moves whether the rule answers null.
     this.hints.nameOwned = ownedName({ fallback: this.accessoryName, override: this.hints.nameOverride, sync: this.hints.syncName }) !== null;
 
-    /* Inform the user if we've opted for something other than the defaults. homebridge-plugin-utils' logFeature resolves the option itself and speaks only on a
-     * deviation, so it needs no guard of its own...and the scope pair handed to it is the pair every read on this device resolves at, which is what keeps what the
-     * user is told and what the plugin does answering one question. It writes through the logger of the level that set the option, so a global setting is said once
-     * rather than once per device. The label is a noun phrase because logFeature composes the sentence around it.
-     */
-    this.platform.featureOptions.logFeature({ controller: { id: this.controller.id, log: this.controller.log }, device: { id: this.id, log: this.log },
-      label: "Device name synchronization", log: this.platform.log, option: "Device.SyncName" });
+    // Inform the user if we've opted for something other than the defaults.
+    this.announceFeature({ label: "Device name synchronization", option: "Device.SyncName" });
 
     /* The custom name is announced as the name HomeKit carries, as HomeKit's naming rules clean it, rather than through logFeature, which would announce the value
      * as stored. A value HomeKit can carry nothing of is refused by the rule above, and a refusal the user would otherwise never see is said once, here.

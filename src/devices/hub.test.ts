@@ -71,6 +71,8 @@ const DOORBELL_RECONCILE_DELAY_MS = 5000;
 
 // What the shared logger puts in front of every line a hub writes, so an arm reads the sentence a user reads rather than the format string behind it.
 const LOG_PREFIX = "Test Hub [UA Hub]: ";
+// What opens a line the controller's own logger took, so an arm tells the controller's level apart from the plugin's and the device's.
+const CONTROLLER_PREFIX = "Controller: ";
 
 // The travel time the machine arms configure their doors with, and the window a UA Gate falls back to when nothing has been configured for it.
 const TRAVEL_SECONDS = 12;
@@ -486,6 +488,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
         handlers.set(event, registered);
       }
     },
+    log: { info: (message: string, ...parameters: unknown[]): void => void lines.push(CONTROLLER_PREFIX + format(message, ...parameters)) },
     mqtt,
     mqttPublish: (topic: string, payload: string, init?: MqttPublishInit): void => {
 
@@ -888,6 +891,12 @@ async function getAnswers(harness: HubHarness, restated: readonly string[]): Pro
 function lineCount(harness: HubHarness, sentence: string): number {
 
   return harness.lines.filter(line => line === (LOG_PREFIX + sentence)).length;
+}
+
+// Every line a feature option's level wrote, the sentence homebridge-plugin-utils composes around a label being the only one of the hub's lines that closes this way.
+function featureLines(harness: HubHarness): string[] {
+
+  return harness.lines.filter(line => [ " disabled.", " enabled." ].some(ending => line.endsWith(ending)));
 }
 
 /* The same reading of a warning, which the log double keeps in the debug sink beside the debug lines rather than in the info one.
@@ -5049,21 +5058,19 @@ test("the door service choice resolves end to end: an explicit service, the auto
 
 /* A UA Gate on its default opener presentation carries its side door's lock beside the opener, and every device update re-gates the gate's services. The pass
  * removes the presentation that is not selected, which is a lock with no subtype, so the side door's lock, which has one, has to come through it untouched: a pass
- * that removed it would re-create it, handing HomeKit a new service and the log a second announcement on every update.
+ * that removed it would re-create it, handing HomeKit a new service on every update.
  */
 test("a UA Gate presenting its door as an opener keeps its side door lock through a device update rather than removing and re-creating it", () => {
 
   const gate = makeGate({ keepAdoptionLines: true });
   const sideLock = lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE);
-  const announced = lineCount(gate, "Configuring side door lock.");
 
-  assert.equal(announced, 1, "adoption creates the side door lock and announces it once");
+  assert.deepEqual(featureLines(gate), [], "adoption creates the side door lock, and the default that does so says nothing");
 
   restateRecord(gate, {});
 
   assert.equal(lockService(gate, AccessReservedNames.LOCK_DOOR_SIDE), sideLock, "the device update finds the side door lock adoption created");
   assert.equal(gate.services.filter(service => service.UUID === Service.LockMechanism.UUID).length, 1, "and it stays the only lock the accessory carries");
-  assert.equal(lineCount(gate, "Configuring side door lock."), announced, "and nothing announces the side door lock a second time");
 });
 
 /* HAP refuses a service with no subtype beside any other service of its type. A UA Gate switched from the opener to the lock presentation arrives carrying the
@@ -5161,8 +5168,8 @@ test("a UA Gate presented as a lock writes its main door's state to the main doo
   assert.equal(sideLock.getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED, "which still reads secured");
 });
 
-/* The presentation line and the trigger lines each announce a creation, so a gate says each of them once at adoption, and a device update that finds every one
- * of those services standing says none of them again. Both presentations are stood up, because the presentation line names the one the door took.
+/* The presentation line announces a creation and each trigger's line the setting behind it, so a gate says each of them once at adoption, and a device update says
+ * none of them again. Each presentation is stood up, because the presentation line names the one the door took.
  */
 test("a UA Gate announces its door presentation and its lock triggers once at adoption and never again on a device update, under either presentation", () => {
 
@@ -5170,21 +5177,77 @@ test("a UA Gate announces its door presentation and its lock triggers once at ad
 
     const gate = makeGate({ keepAdoptionLines: true,
       options: [ "Enable.Hub.Door.Service=" + presentation, "Enable.Hub.Lock.Trigger", "Enable.Hub.SideDoor.Lock.Trigger" ] });
-    const announcements = [ "Presenting the door in HomeKit as a " + noun + ".", "Enabling the lock automation trigger.",
-      "Enabling the side door lock automation trigger." ];
+    const announcements = [ LOG_PREFIX + "Presenting the door in HomeKit as a " + noun + ".", "Lock automation triggers enabled.",
+      "Side door lock automation triggers enabled." ];
+    const said = (sentence: string): number => gate.lines.filter(line => line === sentence).length;
 
     for(const sentence of announcements) {
 
-      assert.equal(lineCount(gate, sentence), 1, "adoption announces this once: " + sentence);
+      assert.equal(said(sentence), 1, "adoption announces this once: " + sentence);
     }
 
     restateRecord(gate, {});
 
     for(const sentence of announcements) {
 
-      assert.equal(lineCount(gate, sentence), 1, "and a device update does not announce it again: " + sentence);
+      assert.equal(said(sentence), 1, "and a device update does not announce it again: " + sentence);
     }
   }
+});
+
+// The plain feature option lines: each option, the labels its line reads under, the catalog's default, and the hardware that can carry its part.
+const FEATURE_LINES = [
+
+  { defaultOn: true, kindLabel: "Doorbells", label: "Doorbell", option: "Hub.Doorbell", stand: makeHub },
+  { defaultOn: false, kindLabel: "Doorbell automation triggers", label: "Doorbell automation trigger", option: "Hub.Doorbell.Trigger", stand: makeHub },
+  { defaultOn: false, kindLabel: "Lock automation triggers", label: "Lock automation trigger", option: "Hub.Lock.Trigger", stand: makeHub },
+  { defaultOn: true, kindLabel: "Side door locks", label: "Side door lock", option: "Hub.SideDoor", stand: makeGate },
+  { defaultOn: false, kindLabel: "Side door lock automation triggers", label: "Side door lock automation trigger", option: "Hub.SideDoor.Lock.Trigger", stand: makeGate }
+];
+
+test("a plain feature option's line is said once at the level that set it, a default says nothing, and a later pass repeats nothing", () => {
+
+  for(const { defaultOn, kindLabel, label, option, stand } of FEATURE_LINES) {
+
+    const [ verb, word ] = defaultOn ? [ "Disable", " disabled." ] : [ "Enable", " enabled." ];
+    const levels = [
+
+      { entries: [], expected: [], level: "the default" },
+      { entries: [verb + "." + option], expected: [kindLabel + word], level: "the plugin" },
+      { entries: [verb + "." + option + ".1-2-3-4"], expected: [CONTROLLER_PREFIX + kindLabel + word], level: "the controller" },
+      { entries: [verb + "." + option + "." + HUB_SERIAL], expected: [LOG_PREFIX + label + word], level: "the device" },
+      // A device off beneath a global on has no part to gate, so its line has to sit ahead of that gate to be said at all.
+      { entries: [ "Enable." + option, "Disable." + option + "." + HUB_SERIAL ], expected: [LOG_PREFIX + label + " disabled."],
+        level: "a device off beneath a global on" }
+    ];
+
+    for(const { entries, expected, level } of levels) {
+
+      const harness = stand({ keepAdoptionLines: true, options: entries });
+
+      assert.deepEqual(featureLines(harness), expected, option + " reads as " + level + " wrote it");
+
+      restateRecord(harness, {});
+
+      assert.deepEqual(featureLines(harness), expected, "and a later pass over " + option + " repeats nothing");
+    }
+  }
+});
+
+test("hardware without a part says nothing of its option, and a capability arriving mid-run says its line once", () => {
+
+  const turned = [ "Disable.Hub.Doorbell", "Enable.Hub.Doorbell.Trigger", "Enable.Hub.Lock.Trigger", "Disable.Hub.SideDoor", "Enable.Hub.SideDoor.Lock.Trigger" ];
+  const reader = makeHub({ keepAdoptionLines: true, options: turned, record: testHub({ capabilities: ["is_reader"] }) });
+
+  assert.deepEqual(featureLines(reader), [], "a reader with no doorbell says nothing of any of them, each one turned from its default");
+
+  restateRecord(reader, { capabilities: [ "is_reader", "door_bell" ] });
+
+  assert.deepEqual(featureLines(reader), [ "Doorbells disabled.", "Doorbell automation triggers enabled." ], "the doorbell arriving says the settings that concern it");
+
+  restateRecord(reader, {});
+
+  assert.deepEqual(featureLines(reader), [ "Doorbells disabled.", "Doorbell automation triggers enabled." ], "once");
 });
 
 test("a reader with no access method selected creates no switch and retires one the accessory carried", () => {
@@ -6502,8 +6565,7 @@ test("a doorbell capability appearing mid-run creates the doorbell and its trigg
 
   assert.ok(hasDoorbell(harness), "the capability arriving creates the doorbell on that delivery rather than at the next restart");
   assert.equal(trigger.getCharacteristic(Characteristic.On).value, false, "and its trigger, seeded off");
-  assert.equal(lineCount(harness, "Enabling the doorbell."), 1, "each announcing itself once, as a creation does");
-  assert.equal(lineCount(harness, "Enabling the doorbell automation trigger."), 1);
+  assert.deepEqual(featureLines(harness), ["Doorbell automation triggers enabled."], "the trigger's setting is said as the capability arrives, the default silent");
   assert.equal(doorbellGets(), 1, "and the get topic is registered with the service it answers for");
   assert.equal(await harness.mqttGet("doorbell"), "false", "answering the quiet doorbell it was registered beside");
 

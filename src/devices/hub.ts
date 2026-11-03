@@ -532,7 +532,7 @@ export class AccessHub extends AccessDevice {
    * A UA Gate re-resolves its doors first, so every service below reads the current enumeration, and the doors that moved are seeded last, once their services
    * exist. The order within is the construction order the position sensor's dependency fixes: the terminal inputs before the lock, so the position sensor exists
    * when a garage door opener derives its state from it. Each path is silent on repeat by construction, so a pass over a record that did not change costs a
-   * handful of service lookups and writes nothing.
+   * handful of service lookups and feature option reads, and writes nothing.
    *
    * The topics a subscriber can ask or command follow the services last, once every control this pass could move stands where the pass left it.
    *
@@ -1103,6 +1103,11 @@ export class AccessHub extends AccessDevice {
    */
   private configureDoorbell({ initialized }: ConfigurePass): void {
 
+    if(this.hasCapability("door_bell")) {
+
+      this.announceFeature({ kindLabel: "Doorbells", label: "Doorbell", option: "Hub.Doorbell" });
+    }
+
     // Validate whether we should have this service enabled.
     const { service, transition } = this.validService({ serviceType: this.hap.Service.Doorbell,
       validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell") });
@@ -1110,11 +1115,6 @@ export class AccessHub extends AccessDevice {
     if(!service) {
 
       return;
-    }
-
-    if(transition === "attached") {
-
-      this.log.info("Enabling the doorbell.");
     }
 
     if(initialized && (transition !== "attached")) {
@@ -1527,6 +1527,11 @@ export class AccessHub extends AccessDevice {
   // ring's trigger on rather than pushing it back off underneath the ring.
   private configureDoorbellTrigger({ initialized }: ConfigurePass): void {
 
+    if(this.hasCapability("door_bell")) {
+
+      this.announceFeature({ kindLabel: "Doorbell automation triggers", label: "Doorbell automation trigger", option: "Hub.Doorbell.Trigger" });
+    }
+
     // Validate whether we should have this service enabled.
     const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_DOORBELL_TRIGGER,
       suffix: " Doorbell Trigger", validate: this.hasCapability("door_bell") && this.hasFeature("Hub.Doorbell.Trigger") });
@@ -1534,11 +1539,6 @@ export class AccessHub extends AccessDevice {
     if(!service) {
 
       return;
-    }
-
-    if(transition === "attached") {
-
-      this.log.info("Enabling the doorbell automation trigger.");
     }
 
     if(initialized && (transition !== "attached")) {
@@ -1622,6 +1622,11 @@ export class AccessHub extends AccessDevice {
    */
   private configureLockTrigger({ initialized }: ConfigurePass): void {
 
+    if(isHub(this.uda)) {
+
+      this.announceFeature({ kindLabel: "Lock automation triggers", label: "Lock automation trigger", option: "Hub.Lock.Trigger" });
+    }
+
     // Validate whether we should have this service enabled.
     const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_LOCK_TRIGGER,
       suffix: " Lock Trigger", validate: isHub(this.uda) && this.hasFeature("Hub.Lock.Trigger") });
@@ -1629,11 +1634,6 @@ export class AccessHub extends AccessDevice {
     if(!service) {
 
       return;
-    }
-
-    if(transition === "attached") {
-
-      this.log.info("Enabling the lock automation trigger.");
     }
 
     if(initialized && (transition !== "attached")) {
@@ -1663,6 +1663,11 @@ export class AccessHub extends AccessDevice {
   // is whatever the rails last put there.
   private configureSideDoorLock({ initialized }: ConfigurePass): void {
 
+    if(this.uda.device_type === "UGT") {
+
+      this.announceFeature({ kindLabel: "Side door locks", label: "Side door lock", option: "Hub.SideDoor" });
+    }
+
     // Validate whether we should have this service enabled.
     const { service, transition } = this.validService({ serviceType: this.hap.Service.LockMechanism, subtype: AccessReservedNames.LOCK_DOOR_SIDE,
       suffix: " Side Door", validate: this.hints.hasSideDoor });
@@ -1670,11 +1675,6 @@ export class AccessHub extends AccessDevice {
     if(!service) {
 
       return;
-    }
-
-    if(transition === "attached") {
-
-      this.log.info("Configuring side door lock.");
     }
 
     if(initialized && (transition !== "attached")) {
@@ -1696,6 +1696,11 @@ export class AccessHub extends AccessDevice {
    */
   private configureSideDoorLockTrigger({ initialized }: ConfigurePass): void {
 
+    if(this.hints.hasSideDoor) {
+
+      this.announceFeature({ kindLabel: "Side door lock automation triggers", label: "Side door lock automation trigger", option: "Hub.SideDoor.Lock.Trigger" });
+    }
+
     // Validate whether we should have this service enabled.
     const { service, transition } = this.validService({ serviceType: this.hap.Service.Switch, subtype: AccessReservedNames.SWITCH_LOCK_DOOR_SIDE_TRIGGER,
       suffix: " Side Door Lock Trigger", validate: this.hints.hasSideDoor && this.hasFeature("Hub.SideDoor.Lock.Trigger") });
@@ -1703,11 +1708,6 @@ export class AccessHub extends AccessDevice {
     if(!service) {
 
       return;
-    }
-
-    if(transition === "attached") {
-
-      this.log.info("Enabling the side door lock automation trigger.");
     }
 
     if(initialized && (transition !== "attached")) {
