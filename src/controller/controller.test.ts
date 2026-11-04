@@ -1764,7 +1764,8 @@ test("a connect that keeps failing says why once per type, and a shutdown landin
 
     if(attempts <= 5) {
 
-      throw new AccessTimeoutError("The controller did not respond before the request deadline elapsed.", { elapsedMs: 3500 });
+      throw new AccessTimeoutError("The controller did not respond before the request deadline elapsed.",
+        { cause: new DOMException("The operation timed out.", "TimeoutError"), elapsedMs: 3500 });
     }
 
     shutdown.abort();
@@ -1784,7 +1785,8 @@ test("a connect that keeps failing says why once per type, and a shutdown landin
   assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors')."],
     "the fault a person must act on is said once at error");
   assert.deepEqual(warnings, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: The controller did not respond before the request " +
-    "deadline elapsed."], "the one that should fix itself is said once at warn, and neither the interrupted attempt nor the ended retry adds a line");
+    "deadline elapsed: The operation timed out."], "the one that should fix itself is said once at warn, and neither the interrupted attempt nor the ended retry adds " +
+    "a line");
 });
 
 // The line a connect the controller rate limits is said with, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
@@ -1955,6 +1957,51 @@ test("with the debug gate on every attempt's repeat reads through, and a shutdow
 // The line a controller that does not offer its API to a token alone earns, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
 const NOT_OFFERED_LINE = "1.2.3.4: Unable to connect to the UniFi Access controller, and will not keep trying until a username and password are added in the plugin " +
   "settings and Homebridge is restarted, because this controller does not offer its API to a token alone: This API is not supported.";
+
+test("a rate limit returning after a turn to another fault is said again at warn, and the fault between it is said in full", async () => {
+
+  const notReady = new AccessRequestError("The UniFi Access controller answered the request with HTTP status 503.", { statusCode: 503 });
+  const { errors, warnings } = await loginFailing([ RATE_LIMIT, notReady, RATE_LIMIT ], { attemptCount: 4 });
+
+  assert.deepEqual(warnings, [ RATE_LIMITED_LINE, retrying("The UniFi Access controller answered the request with HTTP status 503"), RATE_LIMITED_LINE ]);
+  assert.deepEqual(errors, [], "and nothing is said at error");
+});
+
+test("a controller that refuses a connection and then offers no API to a token alone warns the retried fault and stops on the attempt that meets it", async (t) => {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const shutdown = new AbortController();
+  const warnings: string[] = [];
+
+  let attempts = 0;
+
+  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
+    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
+  signal: shutdown.signal });
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
+
+    attempts++;
+
+    if(attempts === 1) {
+
+      throw networkFault("The controller refused the connection", "ECONNREFUSED");
+    }
+
+    throw new AccessApiError("This API is not supported.", { code: "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" });
+  });
+
+  t.after(() => shutdown.abort());
+
+  const login = controller.login();
+
+  await drainClock(clock);
+
+  assert.equal(await login, "unavailable", "the run ends with this controller's identity unknown");
+  assert.equal(attempts, 2, "on the attempt past the retried fault");
+  assert.deepEqual(warnings, [retrying("The controller refused the connection")], "the retried fault is said at warn");
+  assert.deepEqual(errors, [NOT_OFFERED_LINE], "and the stop once at error");
+});
 
 test("a controller that does not offer its API to a token alone stops the connect after its first attempt, waits for nothing, and says so once at error", async (t) => {
 
@@ -2846,6 +2893,25 @@ test("the route admits a genuine delivery once and refuses everything else about
   // The same delivery again inside the window is a replay, and the ledger refuses it.
   assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: genuine } }).status, 401);
   assert.equal(harness.deliveries.length, 1);
+});
+
+test("a forged delivery after a genuine one does not warn again", async (t) => {
+
+  const harness = makeWebhookController();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.run();
+
+  const body = JSON.stringify({ data: { actor: null, device: null, location: { id: "door1", name: "Front Door" }, object: {} },
+    event: ACCESS_WEBHOOK_EVENTS.doorUnlock, event_object_id: "delivery1" });
+  const signed = (secret: string): string => signWebhookDelivery({ body, secret, timestamp: Math.floor(harness.clock.now() / 1000) });
+  const forge = (): number => harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: signed("the-wrong-secret") } }).status;
+
+  assert.equal(forge(), 401);
+  assert.equal(harness.listener.deliver(WEBHOOK_PATH, { body: Buffer.from(body), headers: { signature: signed("minted-secret") } }).status, 200);
+  assert.equal(forge(), 401);
+  assert.equal(harness.lines.filter(line => line.includes("failed signature verification")).length, 1, "a genuine delivery between them resets nothing");
 });
 
 test("a request the route does not claim is answered before the controller ever judges it", async (t) => {

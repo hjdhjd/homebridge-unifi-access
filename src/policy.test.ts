@@ -544,8 +544,8 @@ test("the connect retry policy stops at a controller that does not offer its API
   assert.equal(reports.length, 2, "each reported as the retried fault it is");
 });
 
-/* Every failure a connect can meet, spelled as unifi-access raises it, with what the person reading the Homebridge log reads. A row marked `table` has no arm of its own
- * and answers through the homebridge-plugin-utils fault table, so a kind moving there moves here on purpose.
+/* One spelling of each kind of failure a connect can meet, as unifi-access raises it, with what the person reading the Homebridge log reads. A row marked `table` has no
+ * arm of its own and answers through the homebridge-plugin-utils fault table, so a kind moving there moves here on purpose.
  */
 const CONNECT_READINGS: readonly (readonly [ string, unknown, ConnectFailure["level"], ConnectFailure["type"] ])[] = [
 
