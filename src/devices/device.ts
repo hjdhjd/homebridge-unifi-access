@@ -561,13 +561,24 @@ export abstract class AccessDevice extends AccessBase {
   /* Register a setter on one of this device's own topics, composed exactly as the getter above and bound to this device's lifetime, with the same optional
    * shorter lifetime for a registration that ends with what it commands.
    *
+   * A set reads the verdict a HomeKit write reads. The refusal lives here rather than in each topic's handler so no topic can drift from that rule, and it is thrown
+   * because the homebridge-plugin-utils client logs a failing set with its reason and does not report it as received.
+   *
    * @param entry    - The catalog entry naming the topic tail and the label.
    * @param setValue - The setter receiving the topic's incoming value.
    * @param lifetime - An optional lifetime shorter than the device's own, for a registration that ends with what it commands.
    */
   protected mqttSubscribeSet(entry: MqttTopicEntry, setValue: MqttSetHandler, lifetime?: AbortSignal): void {
 
-    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, setValue, { signal: composeSignals(this.signal, lifetime) });
+    this.controller.mqtt?.subscribeSet(mqttTopic(this.id, entry.topic), entry.label, (value: string, rawValue: string, signal: AbortSignal): Promise<void> | void => {
+
+      if(!this.isAvailable) {
+
+        throw new Error("The controller or device cannot be reached.");
+      }
+
+      return setValue(value, rawValue, signal);
+    }, { signal: composeSignals(this.signal, lifetime) });
   }
 
   /* Register a restatement the client runs each time it establishes a broker session, the first one included, bound to this device's lifetime exactly as the

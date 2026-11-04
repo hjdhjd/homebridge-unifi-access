@@ -1829,8 +1829,10 @@ test("a reader with nothing selected and a reader with a doorbell alone carry no
 });
 
 /* What a door command refuses on is what HomeKit refuses on. A first fault carries each surface, and each thing that takes the verdict away fails HomeKit's write with
- * the status and no line, its handler's wrapper standing ahead of the command, and refuses the set with the sentence, which is all an MQTT set has to answer with.
+ * the status and no line, its handler's wrapper standing ahead of the command, and throws from the set, which is what puts the reason on the client's one failure line.
  */
+const SET_REFUSED = /The controller or device cannot be reached/;
+
 test("HomeKit and MQTT door commands read one verdict: a blip carries them, and a lost, offline or vanished device fails the write and refuses the set", async () => {
 
   const blippedSet = makeHub();
@@ -1873,12 +1875,12 @@ test("HomeKit and MQTT door commands read one verdict: a blip carries them, and 
     assert.deepEqual(hub.errors, [], "and logs nothing under " + label);
 
     // eslint-disable-next-line no-await-in-loop -- As above.
-    await hub.mqttSet("lock", "false");
+    await assert.rejects(hub.mqttSet("lock", "false"), SET_REFUSED, "the set is refused under " + label);
     // eslint-disable-next-line no-await-in-loop -- As above.
     await settle();
 
     assert.deepEqual(hub.commands, [], "the set commands nothing under " + label);
-    assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to unlock the door. The device cannot be reached."], "and says so under " + label);
+    assert.deepEqual(hub.errors, [], "and leaves its one line to the client under " + label);
   }
 });
 
@@ -2017,23 +2019,22 @@ test("a UA Gate whose door was never discovered refuses its commands for the rec
   assert.deepEqual(gate.commands, []);
 });
 
-test("a door that cannot be reached is refused for that reason before its relock policy is consulted", async () => {
+test("a lock topic refuses a set whatever its value while the controller is lost, and a value nothing recognizes on a reachable gate is said as ever", async () => {
 
-  const hub = makeHub();
+  const gate = makeGate();
 
-  // A door the controller reports unlocked, so the set below is a genuine relock rather than a sync from an event, which is how the relock arm sets it up too. It goes
-  // over MQTT because a HomeKit write is refused by its handler's wrapper before any door command is reached.
-  hub.setDoorState({ dps: "none", location_id: MAIN_DOOR, lock: "unlock" });
-  hub.hub.refreshDoorState();
-  hub.connection.isLost = true;
+  await gate.mqttSet("lock", "maybe");
 
-  await hub.mqttSet("lock", "true");
+  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to process MQTT lock setting: maybe."], "a reachable gate reads the value");
+
+  gate.connection.isLost = true;
+
+  await assert.rejects(gate.mqttSet("sidedoor/lock", "false"), SET_REFUSED, "the side door's topic refuses");
+  await assert.rejects(gate.mqttSet("lock", "maybe"), SET_REFUSED, "and the value is never read");
   await settle();
 
-  assert.deepEqual(hub.commands, [], "an unreachable door dispatches nothing whatever its relay is configured for");
-
-  // Exactly one line, which is where the relock sentence's absence is asserted: an outage is what the user can act on.
-  assert.deepEqual(hub.errors, [LOG_PREFIX + "Unable to lock the door. The device cannot be reached."]);
+  assert.deepEqual(gate.commands, [], "so nothing is commanded");
+  assert.equal(gate.errors.length, 1, "and the gate adds no line of its own");
 });
 
 test("a door hub's failure lines name the door the command was addressed to", async () => {

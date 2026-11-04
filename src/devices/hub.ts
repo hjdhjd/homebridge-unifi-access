@@ -2465,18 +2465,6 @@ export class AccessHub extends AccessDevice {
     const { action, isSideDoor } = options;
     const doorName = this.#doorCommandName(isSideDoor);
 
-    /* A device we cannot vouch for has nothing to command, so we refuse here on the verdict HomeKit's own refusal reads, and a command works through a brief blip
-     * whichever surface sent it. A HomeKit write is refused ahead of this by the rule its handler is wrapped in, so what this speaks for is an MQTT set, which has no
-     * status to answer with and says so in the log. The refusal names reachability rather than the device's own state, because the verdict answers for the controller as
-     * well, and claiming a device is offline on the strength of a controller outage would assert knowledge we do not have.
-     */
-    if(!this.isAvailable) {
-
-      this.#refuseDoorCommand({ action, doorName, reason: "The device cannot be reached." });
-
-      return null;
-    }
-
     /* The commands are only reachable through the hub view of this device. An absent one cannot happen through the adoption path, which resolves the hub view first
      * and falls back to the plain device view only for hardware carrying no hub capability - the same capability this class's lock service is gated on - but the
      * handle is optional at construction, so this is the honest boundary rather than dead code.
@@ -2696,7 +2684,7 @@ export class AccessHub extends AccessDevice {
 
     /* A relock is only ours to make where the relay carries a rule to reset, so a door on the default settings is told so rather than left to wonder. A garage door
      * opener never arrives here at all, its writes being the momentary pulse...this is the lock accessory's own refusal. It follows the preamble, so a door that
-     * cannot be reached or carries no control surface is refused for the reason a user can act on rather than for its relay settings.
+     * carries no control surface is refused for the reason a user can act on rather than for its relay settings.
      */
     if(decision.kind === "refuse") {
 

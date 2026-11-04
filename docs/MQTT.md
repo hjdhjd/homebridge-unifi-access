@@ -137,8 +137,8 @@ The topics that `homebridge-unifi-access` subscribes to are:
 <!-- MQTT SUBSCRIBED:END -->
 
 A `set` message follows the same rule HomeKit does: while a device or its controller reads `offline` on its `availability` topic, `homebridge-unifi-access` refuses
-the message and logs an error rather than trying to carry it out. A brief interruption in the connection to the controller doesn't count, and messages are carried
-out as usual through one.
+the message rather than trying to carry it out, logging an error for the first refusal and at debug level when it repeats. A brief interruption in the connection to
+the controller doesn't count, and messages are carried out as usual through one.
 
 ### <A NAME="unlock-attribution"></A>Unlock Attribution
 
