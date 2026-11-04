@@ -27,6 +27,10 @@ export const ACCESS_GARAGE_TRANSITION_DURATION = 15;
 // Default MQTT topic root for published events. A published topic is this root, the device identity, and one of the tails the MQTT catalog declares.
 export const ACCESS_MQTT_TOPIC = "unifi/access";
 
+// Minimum duration, in milliseconds, that the controller must be continuously healthy before any device is removed. A fixed safety floor rather than an option: a
+// freshly-recovered or freshly-restarted controller triggers no removal while it may still be settling and listing its devices again.
+export const ACCESS_REMOVAL_STABILITY_WINDOW = 600000;
+
 // Who the controller's activity history names as the actor behind an unlock this plugin sent. An unlock naming no actor is recorded against whatever account the
 // client authenticated with, which reads as a person having opened the door rather than as the automation that actually did.
 export const ACCESS_UNLOCK_ACTOR = { id: "homebridge-unifi-access", name: "Homebridge" } as const satisfies AccessOfficialDoorUnlockActor;

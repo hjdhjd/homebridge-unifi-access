@@ -124,6 +124,24 @@ export function canTransition(options: { from: AccessControllerPhase; to: Access
   return (from !== to) && (from !== "shuttingDown");
 }
 
+// Compute the timestamp from which the controller's current continuous good-state period should be counted for the removal stability gate. On the first good-state entry
+// of the process we trust the controller's own uptime: one already up longer than the window is treated as immediately stable. Every later recovery starts at its own
+// instant, because a disruption we observed resets our trust regardless of how long the controller has been up.
+export function computeStableSince(options: { hasStabilizedBefore: boolean; nowMs: number; uptimeMs: number; windowMs: number }): number {
+
+  const { hasStabilizedBefore, nowMs, uptimeMs, windowMs } = options;
+
+  return hasStabilizedBefore ? nowMs : (nowMs - Math.min(uptimeMs, windowMs));
+}
+
+// Whether the controller has been continuously good for at least the stability window. Null means "not currently good".
+export function isStabilityWindowElapsed(options: { nowMs: number; stableSinceMs: Nullable<number>; windowMs: number }): boolean {
+
+  const { nowMs, stableSinceMs, windowMs } = options;
+
+  return (stableSinceMs !== null) && ((nowMs - stableSinceMs) >= windowMs);
+}
+
 // The result code saying a controller has no official API at all, which is what an Identity Enterprise controller answers. unifi-access reads the code itself and
 // publishes no reading of it.
 export const OFFICIAL_API_ABSENT_CODE = "CODE_OTHERS_UID_ADOPTED_NOT_SUPPORTED" satisfies AccessApiCode;

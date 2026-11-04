@@ -2,16 +2,16 @@
  *
  * controller.ts: Access controller device class for UniFi Access.
  */
-import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
+import { ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS } from "../settings.ts";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessAccessoryOwnership, AccessControllerPhase, AccessLoginOutcome, ConnectFailure, ConnectFailureType, ControllerIdentity, ControllerOwnershipKeys,
   DecoratedSerial, MembershipClaims } from "../policy.ts";
-import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, maskAddressCredentials, selectDoorStates,
+import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefusal, maskAddressCredentials, selectControllerUptime, selectDoorStates,
   verifyWebhookSignature } from "unifi-access";
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
-import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, TimerRegistry, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
   loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, parseJson, prefixedLog, repeatDemotedLog, resolveNameOverride, retry,
   superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
@@ -24,6 +24,7 @@ import type { AccessDevice } from "../devices/device.ts";
 import { AccessEvents } from "./events.ts";
 import { AccessHub } from "../devices/hub.ts";
 import type { AccessPlatform } from "../platform.ts";
+import { RemovalStabilityGate } from "./removal.ts";
 import { mqttTopics } from "../mqtt.ts";
 
 /**
@@ -97,6 +98,7 @@ export class AccessController {
   public readonly log: HomebridgePluginLogging;
   public mqtt: Nullable<MqttClient>;
   public readonly platform: AccessPlatform;
+  public readonly removals: RemovalStabilityGate;
   // The unifi-access client logger. It shares this controller's log destination but gates error output through logApiErrors, so teardown noise stays quiet.
   readonly #clientLog: AccessLogging;
   // How this controller reaches its Access controller. The real client answers it in every configuration the plugin builds.
@@ -111,10 +113,6 @@ export class AccessController {
   #name: string;
   // Lifecycle phase, mutated only through transition().
   #phase: AccessControllerPhase;
-  /* The delayed removals of devices that have left this controller's membership, keyed by accessory UUID. It arms on the platform's clock and drains on this
-   * controller's terminal signal, so no deferred removal can survive the controller it belonged to.
-   */
-  readonly #removals: TimerRegistry;
   // The terminal plugin-shutdown abort, fired exactly once in transition("shuttingDown") when the plugin's lifetime ends, after its final words. Every loop and every
   // per-device controller composes against it, so shutdown tears the whole tree down as one cascade.
   readonly #shutdownController: AbortController;
@@ -142,9 +140,6 @@ export class AccessController {
     this.#unsupportedDevices = {};
     this.#webhook = null;
 
-    // Built after the abort controller above, because the signal this registry drains on is that controller's and nothing else establishes it.
-    this.#removals = new TimerRegistry({ clock: platform.clock, signal: this.signal });
-
     /* Derive our logger from the platform's, prefixing every line with this controller's name so its output is attributable at a glance, and gating debug at this
      * controller's own scope so a controller-suffixed Log.Debug entry turns on this controller and everything it manages.
      *
@@ -153,6 +148,19 @@ export class AccessController {
      * reads the address form until that document arrives and the serial from then on, and a Log.Debug entry applies while it names the form then in force.
      */
     this.log = debugGatedLog(prefixedLog(this.platform.log, () => this.name), () => this.platform.featureOptions.test("Log.Debug", undefined, this.id));
+
+    /* The removal gate lives as long as this controller and is never rebuilt on a reconnect, because its first-stabilization latch is a fact about this process's whole
+     * life. It follows the log and the abort controller it is handed, and it reaches the accessory graph only through these acts: a removal re-enters the departure path
+     * with the delay bypassed, so the ownership guards still read at the fire, and the sweep runs here at the root.
+     */
+    this.removals = new RemovalStabilityGate({
+
+      actions: { removeDevice: (accessory: AccessAccessory): void => this.removeHomeKitDevice(accessory, true), runSweep: (): void => this.#sweepRemovableDevices() },
+      clock: platform.clock,
+      graceSeconds: (): number => this.getFeatureNumber("Controller.DelayDeviceRemoval") ?? 0,
+      log: this.log,
+      signal: this.signal
+    });
 
     /* The unifi-access client logger. The library logs complete sentences with structured context attached as trailing parameters, and rendering that context inline
      * would put raw object dumps in front of the user - so each non-debug level emits the sentence alone at its level and echoes the full line, context included, to
@@ -431,7 +439,7 @@ export class AccessController {
   }
 
   /* Tear this controller down. Called from the shutdown handler after the phase has already moved, so the abort cascade has fired and every loop is unwinding by the
-   * time we get here. The removal registry needs no explicit call, since it was constructed against our terminal signal and ends with it. Neither does the MQTT
+   * time we get here. The removal gate needs no explicit call, since its timers were armed against our terminal signal and end with it. Neither does the MQTT
    * client: the platform's shutdown ended it gracefully ahead of the abort that brought us here, and its own binding to our terminal signal ends it regardless.
    */
   async #disconnect(): Promise<void> {
@@ -782,8 +790,8 @@ export class AccessController {
   }
 
   /* Move this controller to a new lifecycle phase. The single chokepoint that keeps every derived effect aligned: it refuses an illegal change, updates the phase,
-   * and aborts the terminal shutdown signal on entry to shuttingDown - the one place the whole loop tree is torn down. The logApiErrors getter derives from the
-   * phase and needs no update here.
+   * aborts the terminal shutdown signal on entry to shuttingDown - the one place the whole loop tree is torn down - and pushes the removal gate the good state the new
+   * phase leaves. The logApiErrors getter derives from the phase and needs no update here.
    */
   private transition(next: AccessControllerPhase): void {
 
@@ -798,6 +806,23 @@ export class AccessController {
 
       this.#shutdownController.abort();
     }
+
+    // Unconditional and last, so entering shuttingDown drops the removal clock too. The phase term short-circuits there, so this reads no client on the way down.
+    this.#pushRemovalStability();
+  }
+
+  /* Recompute this controller's good state and push it into the removal gate. Good means running, healthy and enabled. The phase term reads first because the client is
+   * unset until the first connect resolves, and the good arm alone reads the uptime because the client's document exists only then.
+   *
+   * The health term reads isHealthy and never the isLost the availability verdict reads: isLost stays false through a restart whose first probe answers, which is when a
+   * first read could under-list. A throttle makes the connection unhealthy, so it resets the clock as a fault does. The option term keeps a controller the user disabled
+   * from arming a sweep, because it leaves login with its phase still running. Every trigger calls here, so the conjunction has one definition.
+   */
+  #pushRemovalStability(): void {
+
+    const good = (this.#phase === "running") && this.client.connection.isHealthy && this.hasFeature("Device");
+
+    this.removals.refresh(good ? { good, uptimeSeconds: selectControllerUptime(this.client.state.snapshot()) } : { good });
   }
 
   /* Whether this controller is shutting down: the plugin's shutdown has begun, or our own terminal signal has fired. The platform's stopping state is what answers
@@ -825,9 +850,9 @@ export class AccessController {
     void superviseLoop({ loop, onError: loopFaultReporter(this.log, title), signal: this.signal });
   }
 
-  /* Seed the device population and observe membership from there on. The seed read, the seed reconcile, the orphan sweep, and the loop statement are deliberately
-   * one unbroken synchronous chain: the store captures an observer's baseline inside the first next() call, so leaving no task boundary between the snapshot and
-   * the subscription means no dispatch can slip through unobserved. An await inserted anywhere in that chain reopens the missed-dispatch window.
+  /* Seed the device population and observe membership from there on. The seed read, the seed reconcile, and the loop statement are deliberately one unbroken
+   * synchronous chain: the store captures an observer's baseline inside the first next() call, so leaving no task boundary between the snapshot and the subscription
+   * means no dispatch can slip through unobserved. An await inserted anywhere in that chain reopens the missed-dispatch window.
    */
   #startMembershipObserver(): void {
 
@@ -836,7 +861,6 @@ export class AccessController {
       const state = this.client.state.snapshot();
 
       this.#reconcileMembership(state);
-      this.#sweepOrphans(state);
 
       for await (const ids of this.client.state.observe(this.#membershipSelector, { signal: this.signal })) {
 
@@ -894,7 +918,7 @@ export class AccessController {
   }
 
   /* Observe the controller's connection and keep the broker honest about it. This is the single consumer of the connection's state stream in this process, and it
-   * carries both of the controller-wide duties that stream drives on the one iterator.
+   * carries every controller-wide duty that stream drives on the one iterator.
    *
    * The controller's verdict is one fact with one reader. Rather than every device subscribing to a monitor that can only ever tell them all the same thing, this loop
    * states the controller's own availability and then has each configured device state its own, while each device's own record loop pulls the per-device half of that
@@ -911,6 +935,9 @@ export class AccessController {
       for await (const transition of this.client.connection.observe({ signal: this.signal })) {
 
         this.log.debug("Controller connection: %s -> %s.", transition.from, transition.to);
+
+        // Re-evaluate the removal clock first: this loop is what moves the reachability fact, so this is what closes the gate on a fault.
+        this.#pushRemovalStability();
 
         this.#publishAvailability();
 
@@ -965,7 +992,7 @@ export class AccessController {
    *
    * The per-device isolation is what keeps one device's fault from costing its siblings their place in HomeKit: without it, a single synchronous throw would unwind
    * the whole loop through superviseLoop's terminal catch and end additions and removals for every device on this controller. A device whose change failed is still
-   * on the wrong side of the delta, so the next membership change retries it.
+   * on the wrong side of the delta, so the next membership change or the next stability sweep retries it.
    */
   #reconcileMembership(state: AccessState, ids = this.#membershipSelector(state)): void {
 
@@ -987,6 +1014,13 @@ export class AccessController {
       }
     }
 
+    // Mark a configured device that has left for removal only while the controller is stable. During or right after a disruption we mark nothing, because the controller
+    // may merely be listing its devices again, and the stability sweep re-derives the departure once it settles.
+    if(!this.removals.removalStable) {
+
+      return;
+    }
+
     for(const id of toRemove) {
 
       const accessDevice = this.deviceLookup(id);
@@ -1004,6 +1038,31 @@ export class AccessController {
     }
   }
 
+  /* Re-assess the device inventory once the controller is stable: the one-shot the gate runs once per good period, at no delay for a first connect over a long-up
+   * controller and a whole window after any recovery. Each departure is re-derived from live state here, because the gate keeps no list of what it held back.
+   *
+   * This runs from the gate's timer, which the registry fires with no catch around it, so the catch takes the whole sweep: a throw the passes' own per-item catches do
+   * not hold, the membership walk or a catch's own line among them, would otherwise escape the timer and take Homebridge down rather than cost this sweep its work.
+   */
+  #sweepRemovableDevices(): void {
+
+    if(!this.removals.removalStable) {
+
+      return;
+    }
+
+    const state = this.client.state.snapshot();
+
+    try {
+
+      this.#reconcileMembership(state);
+      this.#sweepOrphans(state);
+    } catch(error) {
+
+      this.log.error("Unable to finish checking the UniFi Access controller's devices: %s.", formatErrorMessage(error));
+    }
+  }
+
   /* Reclaim cached accessories current membership cannot account for. Homebridge restores previously-registered accessories at startup, so a device unpaired
    * while we were down comes back as an accessory with nothing behind it, and so does an accessory created under an earlier form of a device's identity.
    * Anything belonging to this controller that we have not configured and that current membership cannot account for is reclaimed here, and the two cases part on
@@ -1012,9 +1071,8 @@ export class AccessController {
    * rather than through a delay that exists for a device that might come back. One that records the identity it was created under is a departure - its device may
    * return and be adopted under that same identity - and takes the same removal delay a membership departure honors.
    *
-   * The per-accessory isolation is what keeps one accessory's fault from costing the rest their reclaim and the device list its subscription: the sweep runs inside
-   * the device list's seed pass, so without it a single synchronous throw would unwind that pass through superviseLoop's terminal catch before the observe loop
-   * behind it ever subscribed.
+   * The per-accessory isolation is what keeps one accessory's fault from costing the rest their reclaim: this pass runs from the removal gate's sweep, so without it a
+   * single synchronous throw would unwind the pass to the sweep's own catch and leave every accessory behind this one for the next good period.
    */
   #sweepOrphans(state: AccessState): void {
 
@@ -1045,7 +1103,7 @@ export class AccessController {
   }
 
   /* The claims current membership makes on cached accessories. Accessory identity is UUID-shaped while membership identity is record-shaped, and this is the one
-   * bridge between the two vocabularies - consulted by the orphan sweep at startup, by the disabled-controller pass, and by each armed removal when its timer
+   * bridge between the two vocabularies - consulted by the orphan sweep, by the disabled-controller pass, and by each armed removal when its timer
    * fires, which are the same question asked at different moments. The UUIDs are what membership accounts for; the serials are the hardware it projects, which is
    * how an accessory stamped by a key this controller never answered by is still recognized as naming a device of its own. Both are read from one walk of the
    * projected membership, so a pass over every cached accessory costs one walk and then a set test per accessory.
@@ -1152,11 +1210,11 @@ export class AccessController {
       return false;
     }
 
-    // A device arriving here is being adopted, so cancel any pending removal armed against its accessory - the orphan-return path, where a startup sweep armed a
-    // grace and the device came back before it fired.
+    // A device arriving here is being adopted, so cancel any pending removal armed against its accessory - the orphan-return path, where the stability sweep armed a
+    // delay and the device came back before it fired.
     if(accessory) {
 
-      this.#removals.clear(accessory.UUID);
+      this.removals.cancelFor(accessory.UUID);
     }
 
     /* We've got a new device, let's add it to HomeKit. It is minted under the name its configure pass applies, the custom name the user set where HomeKit can carry
@@ -1186,12 +1244,13 @@ export class AccessController {
   }
 
   /**
-   * Remove an individual Access device from HomeKit: the departure path, which honors the configured removal delay. Whether the accessory is this controller's to
-   * act on is answered by `#isOurs`, and the mechanics of leaving HomeKit live in `#retire`, so a caller retiring an accessory for a reason of its own reaches the
-   * same two statements this one does.
+   * Remove an individual Access device from HomeKit. With no flag this is the departure path, which the removal gate decides: it holds the removal back while the
+   * controller is unstable and serves the configured removal delay. With the flag it is the direct path, which removes at once and asks no gate. Whether the accessory
+   * is this controller's to act on is answered by `#isOurs` on either path, and the mechanics of leaving HomeKit live in `#retire`, so a caller retiring an accessory
+   * for a reason of its own reaches the same two statements this one does.
    *
-   * @param device          - The accessory to remove.
-   * @param noRemovalDelay  - Whether to bypass the configured removal delay.
+   * @param accessory       - The accessory to remove.
+   * @param noRemovalDelay  - Whether to take the direct path, past the removal gate and the configured removal delay.
    */
   public removeHomeKitDevice(accessory: AccessAccessory, noRemovalDelay = false): void {
 
@@ -1207,47 +1266,15 @@ export class AccessController {
       return;
     }
 
-    const delayInterval = this.getFeatureNumber("Controller.DelayDeviceRemoval") ?? 0;
+    // The departure path, which the gate decides: it holds a removal back while the controller is unstable, serves the delay, and re-reads membership at the fire.
+    if(!noRemovalDelay) {
 
-    /* For certain use cases, we may want to defer removal of an Access device where Access may lose track of devices for a brief period of time. This prevents a
-     * potential back-and-forth where devices are removed momentarily only to be readded later.
-     */
-    if(!noRemovalDelay && delayInterval) {
-
-      /* An armed timer already owns this removal, so a reconcile raising the same departure again leaves it alone. Asking first is what keeps the delay the one
-       * already being served: a second registration under the same key would replace the first and start the whole wait over.
-       */
-      if(this.#removals.has(accessory.UUID)) {
-
-        return;
-      }
-
-      this.log.info(ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, accessory.displayName, delayInterval, delayInterval > 1 ? "s" : "");
-
-      /* The registry removes the entry before running the callback, so the membership re-check below is the whole of what decides: a device that came back during
-       * the delay keeps its accessory, its entry is already gone, and nothing arms in its place.
-       *
-       * The removal itself runs here, a whole delay after the pass that armed it, from a timer the registry fires with no catch around it. The callback carries the
-       * sweep's catch for that reason: without it, a fault on the way out of HomeKit would escape the timer as an uncaught exception rather than costing this one
-       * accessory its removal and saying so.
-       */
-      this.#removals.setTimeout(accessory.UUID, () => {
-
-        try {
-
-          if(!this.#membershipClaims(this.client.state.snapshot()).uuids.has(accessory.UUID)) {
-
-            this.removeHomeKitDevice(accessory, true);
-          }
-        } catch(error) {
-
-          this.log.error("Unable to remove %s from HomeKit: %s.", accessory.displayName, formatErrorMessage(error));
-        }
-      }, delayInterval * 1000);
+      this.removals.schedule({ accessory, stillGone: (): boolean => !this.#membershipClaims(this.client.state.snapshot()).uuids.has(accessory.UUID) });
 
       return;
     }
 
+    // The direct path removes at once and asks no gate: the gate's own removal arrives here, past its own decision.
     this.#retire(accessory);
   }
 
@@ -1271,7 +1298,7 @@ export class AccessController {
     }
 
     // Cleanup after ourselves.
-    this.#removals.clear(accessory.UUID);
+    this.removals.cancelFor(accessory.UUID);
 
     // Grab our instance of the Access device, if it exists.
     const accessDevice = this.configuredDevices.get(accessory.UUID);

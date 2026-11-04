@@ -6,10 +6,12 @@
 import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HAPStatus, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
   AccessNetworkError, AccessRequestError, AccessTimeoutError, createStateStore, selectAccessPoints } from "unifi-access";
-import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME, PLUGIN_NAME } from "../settings.ts";
+import { ACCESS_REMOVAL_STABILITY_WINDOW, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
+  PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
-import type { AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions, OfficialApi } from "unifi-access";
+import type { AccessControllerConfig, AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions,
+  OfficialApi } from "unifi-access";
 import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi, platformInternals,
   readerRecord, savesOn } from "../testing.helpers.ts";
 import { EventEmitter, on } from "node:events";
@@ -35,6 +37,9 @@ const CONTROLLER_MAC = "11:22:33:44:55:66";
 
 // The removal delay every departure below serves, in milliseconds: the Controller.DelayDeviceRemoval default of sixty seconds, which the user-facing sentence names.
 const DEVICE_REMOVAL_DELAY_MS = 60000;
+
+// The controller document a store holds for a host up as long as the stability window, so a first connect over it is trusted at once and its sweep comes due at no delay.
+const LONG_UP_CONTROLLER = { host: { mac: CONTROLLER_MAC, uptime: ACCESS_REMOVAL_STABILITY_WINDOW / 1000 } } as unknown as AccessControllerConfig;
 
 /* How many macrotask boundaries an arm crosses before reading what a dispatched chain did. The chains drained through it are the connection observer's walk
  * over one transition, the webhook configuration a login sets in motion, and the MQTT publish chokepoint. Each is fire-and-forget by design, so an arm waits on
@@ -165,7 +170,7 @@ function faultingHandle(record: Record<string, unknown>, fault: HandleFault): un
 
 /* The client double a controller is stood up over: the members the controller reads on a connected client, and the ones its login path touches - the event
  * bridge's subscription, the controller's name, the published API where an arm supplies one, and the disposal a disabled controller performs. What varies
- * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the orphan sweep
+ * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the removal gate
  * over the caller's own store.
  */
 function clientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; handles?: Map<string, unknown>; official?: OfficialApi | null;
@@ -284,6 +289,20 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
       return targets("unregister");
     }
   };
+}
+
+/* Stand a controller up with its removal gate open, for the arms that drive the departure path directly and never log in. The fact goes through the gate's own refresh,
+ * as a long-up first connect pushes it, and the sweep that push arms is spent here while the arm's store is still empty, because the sweep is real and would adopt what
+ * the arm is about. The arm seeds its store after this returns.
+ */
+function stableController(options: Parameters<typeof makeController>[0] = {}): ControllerHarness {
+
+  const harness = makeController(options);
+
+  harness.controller.removals.refresh({ good: true, uptimeSeconds: ACCESS_REMOVAL_STABILITY_WINDOW / 1000 });
+  harness.clock.advance(0);
+
+  return harness;
 }
 
 /* The connection monitor a controller observes, with the transitions an arm hands it. The generator ends on the caller's own abort, which is the lifetime the real
@@ -545,7 +564,7 @@ test("a device whose adoption throws costs its siblings nothing: the next device
     const late = namedHubRecord("Late Hub", "late", "aabbccddee06");
     const fault: HandleFault = { active: true, lifetimes: [] };
 
-    store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, departing ]) });
+    store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([ plain, departing ]) });
 
     // The removal delay is off, so the departure in the failing pass is decided in that pass rather than armed for later, and the accessory list reads its verdict.
     const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([ [ "faulty", faultingHandle(faulty, fault) ],
@@ -590,7 +609,7 @@ test("a device whose removal throws costs the departure behind it nothing, and s
   const plain = plainHubRecord();
   const departing = returnedHubRecord();
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([ plain, departing ]) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([ plain, departing ]) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } },
     handles: new Map([ [ "plain", deviceHandle(plain) ], [ "returned", deviceHandle(departing) ] ]), options: ["Disable.Controller.DelayDeviceRemoval"], store });
@@ -618,13 +637,13 @@ test("a device whose removal throws costs the departure behind it nothing, and s
     "and the fault is said once, through the failing device's own log");
 });
 
-test("an orphan whose removal throws costs the orphans behind it nothing, and the device list still subscribes", async (t) => {
+test("an orphan whose removal throws costs the orphans behind it nothing, and the device list still adds what arrives", async (t) => {
 
   const store = createStateStore({});
   const plain = plainHubRecord();
 
   // No device stands behind the seed pass, so the sweep has the cache to itself and a later membership change is what proves the subscription.
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([]) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([[ "plain", deviceHandle(plain) ]]), store });
 
@@ -649,6 +668,7 @@ test("an orphan whose removal throws costs the orphans behind it nothing, and th
   });
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:98")], "the orphan behind the fault is retired");
   assert.deepEqual(harness.errors, ["Test Controller: Unable to remove Stuck Hub from HomeKit: Homebridge refused the removal."],
@@ -658,17 +678,17 @@ test("an orphan whose removal throws costs the orphans behind it nothing, and th
 
   await settle(DISPATCH_SETTLE_TURNS);
 
-  assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE01")), "the device list subscribed behind the sweep and adds what arrives");
+  assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE01")), "the device list adds what arrives");
 });
 
 test("a delayed removal whose retirement throws costs the removal due beside it nothing, and says so through the controller's log", (t) => {
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
-
   // The removal delay is on, as it is by default, so each departure arms a timer and is removed only when it fires, outside the pass that raised it.
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   // Departures naming hardware the topology does not carry, armed together so they come due on one advance, the first of them refusing to leave.
   const stuck = accessory("AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" }, "Stuck Hub");
   const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
@@ -793,9 +813,9 @@ test("a departure with the delay on removes the accessory only once its whole de
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   // An accessory naming hardware the topology does not carry, so membership can never account for it and the delay is the only thing standing between it and removal.
   const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
@@ -819,9 +839,9 @@ test("a device that returns during its delay keeps its accessory and leaves noth
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   const returning = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
   harness.restore(returning);
@@ -843,9 +863,9 @@ test("a second departure raised during the delay neither restarts the wait nor r
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   const departed = accessory("AABBCCDDEE99", { controller: CONTROLLER_MAC, id: "AABBCCDDEE99", mac: "AABBCCDDEE99" });
 
   harness.restore(departed);
@@ -869,9 +889,9 @@ test("an adoption during the delay clears the removal armed against its accessor
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   const adopted = accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" });
 
   harness.restore(adopted);
@@ -897,9 +917,9 @@ test("the plugin's shutdown drains every pending removal without acting on any o
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   /* Two accessories, because the drain has to reach every entry rather than one: a teardown that dropped a single timer would pass with one pending and leave the
    * other to fire against a controller that is already gone.
    */
@@ -948,9 +968,9 @@ test("membership resolution keeps what it can project and reclaims what it canno
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ config: { mqttTopic: "unifi/access", password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ config: { mqttTopic: "unifi/access", password: "p", username: "u" }, controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
 
   /* Three cached accessories. The plain hub and the Enterprise port are both projectable, so current membership accounts for them; the record carrying no supported
    * capability is not, so nothing accounts for its accessory and it is reclaimed. An unfiltered membership set would answer the first two identically and keep the
@@ -1151,6 +1171,9 @@ test("a controller that has learned its MAC address still owns the accessories i
   const carried = accessory("carried", { controller: "1.2.3.4" });
 
   harness.restore(carried);
+
+  assert.equal(harness.controller.removals.removalStable, false, "the direct path below asks no gate, and this one is closed");
+
   harness.controller.removeHomeKitDevice(carried, true);
 
   assert.deepEqual(harness.unregistered, [accessoryUuid("carried")], "an accessory keyed by this controller's prior identity is still its own");
@@ -1236,9 +1259,9 @@ test("membership names a device by its identity alone, so a queued removal of an
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
   const earlier = accessory("aa:bb:cc:dd:ee:01", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:01" });
 
   harness.restore(earlier);
@@ -1350,7 +1373,7 @@ test("a device adopted to a constructed accessory is spared by the sweep and sta
   const store = createStateStore({});
   const record = plainHubRecord();
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([record]) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([record]) });
 
   /* The client answers a handle for this record, which is what carries the adoption past the projection lookup and on into a constructed device. Every other arm
    * leaves that handle unanswered, so this is the one place the seed reaches the accessory's own configuration.
@@ -1364,14 +1387,15 @@ test("a device adopted to a constructed accessory is spared by the sweep and sta
   t.after(() => harness.shutdown.abort());
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   const configured = harness.controller.configuredDevices.get(accessoryUuid("AABBCCDDEE01"));
 
   assert.ok(configured, "the adoption runs to a configured device rather than stopping at the accessory it registered");
   assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE01")], "and the accessory behind that device is the one HomeKit was told about");
 
-  /* The sweep runs in the same unbroken pass, immediately behind the seed that configured this device, and leaves it where it is. A device configured in this very
-   * pass is the case the sweep's own first test is there for.
+  /* The sweep runs a timer turn behind the seed that configured this device, and leaves it where it is. A device the seed configured is the case the sweep's own first
+   * test is there for.
    */
   assert.deepEqual(harness.unregistered, [], "an accessory the seed just configured is not an orphan");
   assert.deepEqual(harness.accessories.map(accessory => accessory.UUID), [accessoryUuid("AABBCCDDEE01")], "and it stays in HomeKit");
@@ -1417,7 +1441,7 @@ test("the first start after an identity change retires every accessory created u
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
@@ -1443,9 +1467,10 @@ test("the first start after an identity change retires every accessory created u
   harness.restore(staleOurs, staleStranded, stalePort, currentPort, unprojected1x, unprojectedForeign, departed1x, departedCurrent, stranger);
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   /* The seed adds the plain hub under its identity and adopts the port's current accessory, and the sweep that follows it retires the accessories that record
-   * no identity at once, saying why. The seed and the sweep run inside login() itself, so nothing here waits on a timer.
+   * no identity at once, saying why. The sweep runs on the timer turn the long-up first connect armed, which the advance above flushes, so nothing here serves a delay.
    */
   const reason = "It carries no record of the device identity this version keys accessories by.";
 
@@ -1475,7 +1500,7 @@ test("a disabled device's earlier accessory is retired at the first start with i
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, options: ["Disable.Device.AABBCCDDEE01"], store });
 
@@ -1488,6 +1513,7 @@ test("a disabled device's earlier accessory is retired at the first start with i
   harness.restore(earlier);
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE02-PORT1")], "the port is added; the disabled hub is not");
   assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:01")]);
@@ -1526,6 +1552,8 @@ test("a controller the user disabled takes every accessory it can claim out of H
   assert.deepEqual(harness.unregistered, [ accessoryUuid("AABBCCDDEE01"), accessoryUuid("stranded-02") ]);
   assert.deepEqual(harness.accessories, [stranger]);
   assert.equal(harness.logged.filter(line => line.includes("Delaying device removal")).length, 0, "the disabled pass never queues");
+  assert.equal(harness.controller.removals.removalStable, false, "a controller the user disabled never reaches good state");
+  assert.equal(harness.clock.nextDeadline, null, "so no sweep is armed for it");
 });
 
 test("login reports the identity outcome its exit took", async (t) => {
@@ -2050,7 +2078,7 @@ test("an accessory under the device identity that records none is adopted rather
 
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(enterpriseDevices()) });
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology(enterpriseDevices()) });
 
   const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
 
@@ -2065,6 +2093,7 @@ test("an accessory under the device identity that records none is adopted rather
   harness.restore(wiped);
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE02-PORT1")], "the hub's accessory is adopted, so only the port is added");
   assert.deepEqual(harness.unregistered, [], "an accessory membership accounts for is never the sweep's to retire");
@@ -2104,13 +2133,13 @@ test("a record whose hardware identity never arrived is admitted to nothing", ()
 
   const store = createStateStore({});
 
+  const harness = stableController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
   // The official API names a device by an identifier that is not always address-shaped, and the projection leaves the hardware identity absent when it is not.
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology([
 
     { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, name: "Unaddressed Hub", unique_id: "device1" }
   ]) });
-
-  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
   const record = store.snapshot().devices.get("device1");
 
   assert.ok(record, "the store should hold the record the topology carried");
@@ -3124,7 +3153,8 @@ function availabilityController(options: { connection?: unknown; controllerInfo?
   const record = hubRecord({ alias: "", is_adopted: true, is_connected: true, is_online: true, name: "Plain Hub", unique_id: "plain" });
   const store = createStateStore({});
 
-  store.applyRefreshDocuments({ controller: null, topology: buildingTopology(options.recordless ? [] : [record]) });
+  store.applyRefreshDocuments({ controller: (options.controllerInfo === null) ? null : LONG_UP_CONTROLLER,
+    topology: buildingTopology(options.recordless ? [] : [record]) });
 
   const harness = makeController({ connection: options.connection, controllerInfo: (options.controllerInfo === undefined) ? { host: { mac: CONTROLLER_MAC } } :
     options.controllerInfo, handles: new Map([[ "plain", deviceHandle(record) ]]), options: options.options, store });
@@ -3235,6 +3265,7 @@ for(const { label, recordless } of [ { label: "its adoption gate, its record sta
     harness.restore(restoredHub());
 
     await harness.controller.login();
+    harness.clock.advance(0);
 
     harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
@@ -3277,6 +3308,7 @@ test("an orphan's retirement states one retained offline, once its delay is serv
   harness.restore(restoredHub());
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
   assert.deepEqual(statements(), [], "serving the delay states nothing");
 
@@ -3299,8 +3331,9 @@ test("an accessory recording no identity retires with a broker client and states
   harness.restore(accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" }, "Restored Hub"));
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
-  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the accessory is retired at the login's sweep");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the accessory is retired at the gate's sweep");
   assert.deepEqual(statements(), [], "with nothing stated, because it records no identity to state it under");
 });
 
@@ -3314,11 +3347,374 @@ test("an orphan retired with no broker session states nothing, then or on the ne
   mqtt.connected = false;
 
   await harness.controller.login();
+  harness.clock.advance(0);
 
-  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the orphan is retired at the login's sweep");
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the orphan is retired at the gate's sweep");
   assert.deepEqual(mqtt.published, [], "with no session to take its statement");
 
   mqtt.connected = true;
 
   assert.deepEqual(statements().map(({ topic }) => topic), [ PLUGIN_TOPIC, CONTROLLER_TOPIC ], "and the session that follows says nothing of it");
+});
+
+// How many times this controller has said it is serving a removal's delay, which is the first thing a sweep that finds a departure does.
+function delayLines(harness: ControllerHarness): number {
+
+  return harness.logged.filter((line) => line.includes("Delaying device removal")).length;
+}
+
+/* A first connect over a host up past the window trusts it at once, and the sweep that push arms runs on the next timer turn rather than inside the login. The seed pass
+ * configures what the first list names ahead of it, and only then does anything read the cache as an orphan.
+ */
+test("a first connect over a long-up controller is stable at once, and its sweep runs behind the login's own pass", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(restoredHub());
+
+  await harness.controller.login();
+
+  assert.equal(harness.controller.removals.removalStable, true, "a host up as long as the window is trusted on its first connect");
+  assert.equal(harness.clock.nextDeadline, 0, "with its sweep armed at no delay");
+  assert.equal(delayLines(harness), 0, "and the login's own pass arms no removal, so a seed keeping the sweep reddens here");
+
+  harness.clock.advance(0);
+
+  assert.equal(delayLines(harness), 1, "the sweep arms the orphan's removal");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "which leaves once the delay is served");
+});
+
+/* The reboot this gate exists for: a host two minutes up answers a first list that omits everything it has. The accessories are one of each departure a sweep tells
+ * apart, and each is read a millisecond ahead of the window's remainder and at it, so a seed or a reconcile acting on the first list's word reddens the row ahead of the
+ * sweep. The returning device lands before the sweep does, which is what proves the sweep re-derives each departure rather than keeping a list.
+ */
+test("a start during a controller's reboot holds what the first list omits until the window's remainder, then re-derives each departure", async (t) => {
+
+  const store = createStateStore({});
+  const returning = plainHubRecord();
+  const uptimeSeconds = 120;
+
+  store.applyRefreshDocuments({ controller: { host: { mac: CONTROLLER_MAC, uptime: uptimeSeconds } } as unknown as AccessControllerConfig,
+    topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, handles: new Map([[ "plain", deviceHandle(returning) ]]), store });
+
+  t.after(() => harness.shutdown.abort());
+
+  const back = restoredHub();
+  const gone = accessory("AABBCCDDEE98", { controller: CONTROLLER_MAC, id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+  const earlier = accessory("aa:bb:cc:dd:ee:97", { controller: CONTROLLER_MAC, mac: "aa:bb:cc:dd:ee:97" });
+
+  harness.restore(back, gone, earlier);
+
+  await harness.controller.login();
+
+  const remainder = ACCESS_REMOVAL_STABILITY_WINDOW - (uptimeSeconds * 1000);
+
+  assert.equal(harness.clock.nextDeadline, remainder, "the sweep comes due when the window measured from the host's boot ends");
+  assert.deepEqual(harness.unregistered, [], "nothing leaves on the first list's word, the accessory recording no identity included");
+  assert.equal(delayLines(harness), 0, "and no delay starts on it");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([returning]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+  harness.clock.advance(remainder - 1);
+
+  assert.deepEqual(harness.unregistered, [], "one millisecond short of the remainder, nothing has left");
+
+  harness.clock.advance(1);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("aa:bb:cc:dd:ee:97")], "the sweep retires the accessory recording no identity at once");
+  assert.equal(delayLines(harness), 1, "and arms the one departure its re-read still finds gone");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [ accessoryUuid("aa:bb:cc:dd:ee:97"), accessoryUuid("AABBCCDDEE98") ], "which leaves one delay later");
+  assert.ok(harness.controller.configuredDevices.has(back.UUID), "and the device that came back is adopted");
+});
+
+// A client that read no controller document has no uptime to backdate from, so every start serves the whole window, where a host's uptime would have spared it.
+test("a controller reached with an API token alone serves a full window at every start", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: null, store });
+  const orphan = accessory("AABBCCDDEE98", { controller: "1.2.3.4", id: "AABBCCDDEE98", mac: "AABBCCDDEE98" });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(orphan);
+
+  await harness.controller.login();
+
+  assert.equal(harness.clock.nextDeadline, ACCESS_REMOVAL_STABILITY_WINDOW, "the sweep waits out the whole window");
+
+  harness.clock.advance(ACCESS_REMOVAL_STABILITY_WINDOW - 1);
+
+  assert.equal(delayLines(harness), 0, "one millisecond short of it, nothing has armed");
+
+  harness.clock.advance(1);
+
+  assert.equal(delayLines(harness), 1, "and the sweep arms the orphan's removal at it");
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [orphan.UUID], "which leaves one delay later");
+});
+
+/* A fault closes the gate whichever road the connection takes through it, and each road is a row of its own. The first holds isLost false the whole way, which is the
+ * input that tells isHealthy from isLost: a good state reading isLost keeps the removal armed through a socket drop that a restart can answer. A real hub stands behind
+ * every step, its restore included, so a hub read that assumes a record it no longer has reddens here rather than in the field.
+ */
+for(const { edges, isLost, label } of [
+
+  { edges: [ { from: "healthy", to: "degraded" }, { from: "degraded", to: "reconnecting" } ], isLost: false, label: "a socket drop with no state loss" },
+  { edges: [ { from: "healthy", to: "degraded" }, { from: "degraded", to: "lost" }, { from: "lost", to: "reconnecting" } ], isLost: true,
+    label: "a refused sign-in mid-session" }
+]) {
+
+  test(label + " drops an armed removal, which returns through the sweep a full window after the recovery", async (t) => {
+
+    const monitor = connectionDouble();
+    const { harness, store } = availabilityController({ connection: monitor.connection });
+
+    t.after(() => harness.shutdown.abort());
+
+    await harness.controller.login();
+
+    // The adopted hub's own save window shares the timeline, so it is spent first and the removal timers below are what is left on it.
+    harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+    store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    assert.equal(delayLines(harness), 1, "the departure arms its removal while the controller is stable");
+    assert.equal(harness.clock.nextDeadline, harness.clock.now() + DEVICE_REMOVAL_DELAY_MS, "and the timer stands on the timeline");
+
+    monitor.connection.isHealthy = false;
+    monitor.connection.isLost = isLost;
+
+    for(const { from, to } of edges) {
+
+      // eslint-disable-next-line no-await-in-loop
+      await monitor.drive(from, to);
+    }
+
+    assert.equal(harness.controller.removals.removalStable, false, "the fault closes the gate");
+    assert.equal(harness.clock.nextDeadline, null, "and the reset dropped the removal rather than leaving it for its fire to refuse");
+
+    harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+    assert.deepEqual(harness.unregistered, [], "so the outage removes nothing");
+
+    monitor.connection.isHealthy = true;
+    monitor.connection.isLost = false;
+    await monitor.drive("reconnecting", "healthy");
+
+    assert.equal(harness.clock.nextDeadline, harness.clock.now() + ACCESS_REMOVAL_STABILITY_WINDOW, "the recovery counts from now, whatever the host's uptime says");
+
+    harness.clock.advance(ACCESS_REMOVAL_STABILITY_WINDOW - 1);
+
+    assert.equal(delayLines(harness), 1, "one millisecond short of the window, the gate is still closed");
+
+    harness.clock.advance(1);
+
+    assert.equal(delayLines(harness), 2, "and the sweep re-derives the departure at it, saying the delay again");
+
+    harness.clock.advance(DEVICE_REMOVAL_DELAY_MS - 1);
+
+    assert.deepEqual(harness.unregistered, [], "one millisecond short of the new delay, the accessory stays");
+
+    harness.clock.advance(1);
+
+    assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "and it leaves a window plus a delay after the recovery");
+  });
+}
+
+// A recovery that exits to throttled has finished its stream work and still reads unhealthy, so nothing stamps until the throttle's own edge to healthy.
+test("a recovery ending throttled starts its window only when the throttle ends", async (t) => {
+
+  const monitor = connectionDouble();
+  const { harness } = availabilityController({ connection: monitor.connection });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  monitor.connection.isHealthy = false;
+  await monitor.drive("healthy", "degraded");
+  await monitor.drive("reconnecting", "throttled");
+
+  assert.equal(harness.clock.nextDeadline, null, "a throttled connection is not healthy, so nothing is stamped");
+
+  monitor.connection.isHealthy = true;
+  await monitor.drive("throttled", "healthy");
+
+  assert.equal(harness.clock.nextDeadline, harness.clock.now() + ACCESS_REMOVAL_STABILITY_WINDOW, "and the edge to healthy starts the window");
+});
+
+// Adds are never gated, because a device a closed gate kept out of HomeKit would cost the user a device the controller plainly has.
+test("a device added while the gate is closed is adopted at once", async (t) => {
+
+  const monitor = connectionDouble();
+  const { harness, store } = availabilityController({ connection: monitor.connection, recordless: true });
+  const late = plainHubRecord();
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  monitor.connection.isHealthy = false;
+  await monitor.drive("healthy", "degraded");
+
+  assert.equal(harness.controller.removals.removalStable, false, "the fault has closed the gate");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([late]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(harness.registered, [accessoryUuid("AABBCCDDEE01")], "and the device is added regardless");
+});
+
+// A configured device that returns sits in neither half of the delta, so nothing cancels its timer and the fire's own re-read of membership is all that spares it.
+test("a configured device that returns during its delay stays configured, and the fire no-ops", async (t) => {
+
+  const { harness, store } = availabilityController({});
+  const record = store.snapshot().devices.get("plain");
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  harness.clock.advance(0);
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.equal(delayLines(harness), 1, "the departure arms its removal");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([record as unknown as Record<string, unknown>]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.deepEqual(harness.unregistered, [], "the fire finds the device back and removes nothing");
+  assert.ok(harness.controller.configuredDevices.has(accessoryUuid("AABBCCDDEE01")), "so the device stays configured");
+  assert.equal(harness.clock.nextDeadline, null, "and nothing arms in its place");
+});
+
+/* The recovery's topology lands while the state is reconnecting, ahead of the stream relaunch, which is the list most likely to under-list. With the delay off, a removal
+ * that the gate did not hold would leave inside that pass, so the row reads no removal and no line until the sweep, where it leaves at once.
+ */
+test("a departure landing while the connection is recovering is held silently, and with the delay off leaves on the sweep itself", async (t) => {
+
+  const monitor = connectionDouble();
+  const { harness, store } = availabilityController({ connection: monitor.connection, options: [DELAY_OFF] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  harness.clock.advance(0);
+
+  monitor.connection.isHealthy = false;
+  await monitor.drive("healthy", "degraded");
+  await monitor.drive("degraded", "reconnecting");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(harness.unregistered, [], "a delay of zero removes nothing while the gate is closed");
+  assert.equal(harness.logged.filter((line) => line.includes("Removing")).length, 0, "and says nothing");
+
+  monitor.connection.isHealthy = true;
+  await monitor.drive("reconnecting", "healthy");
+  harness.clock.advance(ACCESS_REMOVAL_STABILITY_WINDOW - 1);
+
+  assert.deepEqual(harness.unregistered, [], "one millisecond short of the window, the accessory stays");
+
+  harness.clock.advance(1);
+
+  assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "and it leaves on the sweep itself, with no delay to serve");
+});
+
+/* The sweep runs from a timer the registry fires with no catch around it. A configured device whose record cannot be read throws from the membership delta, ahead of
+ * every per-item catch, so with no catch of the sweep's own the throw leaves the advance here as it would leave the timer for Homebridge's process handler.
+ */
+test("a throw out of the sweep's passes is said once and goes no further", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const unreadable = { get uda(): never {
+
+    throw new Error("The record cannot be read");
+  } };
+
+  harness.controller.configuredDevices.set("unreadable", unreadable as unknown as AccessDevice);
+
+  assert.doesNotThrow(() => harness.clock.advance(0), "the throw stops at the sweep's catch");
+  assert.deepEqual(harness.errors, ["Test Controller: Unable to finish checking the UniFi Access controller's devices: The record cannot be read."],
+    "and is said once at error");
+});
+
+test("a throw out of the orphan pass is said once and goes no further", async (t) => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: LONG_UP_CONTROLLER, topology: buildingTopology([]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(accessory("AABBCCDDEE98", { controller: "FOREIGN", id: "AABBCCDDEE98", mac: 7 as unknown as string }));
+
+  await harness.controller.login();
+
+  assert.doesNotThrow(() => harness.clock.advance(0), "the throw from the orphan pass's filter stops at the sweep's catch");
+  assert.equal(harness.errors.length, 1, "and is said once");
+});
+
+// The clock reads a millisecond short at the sweep's fire, as a platform timer can, so this row reads the sweep's own guard rather than the verdict after it.
+test("a recovery sweep whose timer fires a millisecond short still re-derives the departure", async (t) => {
+
+  const monitor = connectionDouble();
+  const { harness, store } = availabilityController({ connection: monitor.connection });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+  harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
+
+  monitor.connection.isHealthy = false;
+  await monitor.drive("healthy", "degraded");
+  await monitor.drive("degraded", "reconnecting");
+
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  monitor.connection.isHealthy = true;
+  await monitor.drive("reconnecting", "healthy");
+
+  const read = harness.clock.now.bind(harness.clock);
+
+  harness.clock.now = (): number => read() - 1;
+  harness.clock.advance(ACCESS_REMOVAL_STABILITY_WINDOW);
+
+  assert.equal(delayLines(harness), 1, "the sweep reads the window it waited out as complete, so the held departure arms");
 });

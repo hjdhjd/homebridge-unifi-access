@@ -14,12 +14,12 @@ import type { AccessDoorStateEntry, AccessEventPacket, AccessOfficialUser, Acces
 import type { ConnectFailure, GateDoorLocations } from "./policy.ts";
 import { GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, ROOT_ID, buildingTopology, configRows, doorsTopology, gatePort, gatePorts, hubRecord,
   readerRecord } from "./testing.helpers.ts";
-import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeConnectIdentity, connectFailureReading,
+import { accessMethodChoices, accessMethods, accessoryOwnership, accessoryStranded, canTransition, composeConnectIdentity, computeStableSince, connectFailureReading,
   createConnectRetryPolicy, createMembershipIdsSelector, describeUnlock, deviceDisplayName, deviceHasCapability, deviceModel, deviceName, deviceRecord, deviceSerial,
   discoverDoorLocations, doorGuardChoices, doorServiceChoices,
   doorbellOutcome, doorbellReaderId, doorbellRingAllowed, doorbellTriggerAction, dpsSensorEligible, entPortSuffix, gateDoorRelayKey, hasDpsEvidence, hubSensorChoices,
-  hubSensorModels,
-  isManagedRecord, isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
+  hubSensorModels, isManagedRecord, isStabilityWindowElapsed,
+  isSupportedAccessDevice, lockCommandRule, logEventChoices, membershipRecords, officialDeviceModel, orphanedWebhookRegistrations, projectedRecords,
   reclaimFenceOpen, recordAvailable, recordByMac, resolveDoorService, resolveWebhookPort, serialForm, unlockAttribution, webhookDeliveryFresh, webhookEndpointPath,
   webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations, webhookSignatureHeader } from "./policy.ts";
 import assert from "node:assert/strict";
@@ -2104,4 +2104,54 @@ test("the logging list offers every category with no device and narrows on the m
   // A hub without a doorbell is offered no doorbell category, and the terminal-input categories follow the same models their sensors do.
   assert.deepEqual(logEventChoices({ capabilities: ["is_hub"], display_model: "UA Gate" }).map(choice => choice.value), [ "DPS", "Lock" ]);
   assert.deepEqual(logEventChoices({ capabilities: ["is_hub"], display_model: "UA Ultra" }).map(choice => choice.value), [ "DPS", "Lock", "REX" ]);
+});
+
+// The stability window the production gate uses and an instant to read it from, restated as plain literals so the arithmetic rows read independently of the settings
+// constant.
+const STABILITY_NOW_MS = 1000000;
+const STABILITY_WINDOW_MS = 600000;
+
+test("a long-up controller at first good state is trusted immediately", () => {
+
+  // A first entry with an uptime well past the window: the backdate clamps to exactly one window, so the window has already elapsed at now and a removal is permitted.
+  const stableSinceMs = computeStableSince({ hasStabilizedBefore: false, nowMs: STABILITY_NOW_MS, uptimeMs: STABILITY_WINDOW_MS + 500000,
+    windowMs: STABILITY_WINDOW_MS });
+
+  assert.equal(stableSinceMs, STABILITY_NOW_MS - STABILITY_WINDOW_MS);
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs, windowMs: STABILITY_WINDOW_MS }), true);
+});
+
+test("a short-up controller at first good state must still wait out the remainder", () => {
+
+  // A first entry with an uptime shorter than the window: the backdate counts from boot, so the gate stays closed now and opens once the full window has elapsed since
+  // boot.
+  const uptimeMs = 180000;
+  const stableSinceMs = computeStableSince({ hasStabilizedBefore: false, nowMs: STABILITY_NOW_MS, uptimeMs, windowMs: STABILITY_WINDOW_MS });
+
+  assert.equal(stableSinceMs, STABILITY_NOW_MS - uptimeMs);
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs, windowMs: STABILITY_WINDOW_MS }), false);
+  assert.equal(isStabilityWindowElapsed({ nowMs: stableSinceMs + STABILITY_WINDOW_MS, stableSinceMs, windowMs: STABILITY_WINDOW_MS }), true);
+});
+
+test("a recovery counts from now and ignores uptime", () => {
+
+  // A later entry always counts from now however long the controller has been up, because a disruption we observed resets our trust, so even a huge uptime leaves the
+  // gate closed until a fresh full window elapses.
+  const stableSinceMs = computeStableSince({ hasStabilizedBefore: true, nowMs: STABILITY_NOW_MS, uptimeMs: STABILITY_WINDOW_MS * 10, windowMs: STABILITY_WINDOW_MS });
+
+  assert.equal(stableSinceMs, STABILITY_NOW_MS);
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs, windowMs: STABILITY_WINDOW_MS }), false);
+});
+
+test("the window is elapsed at exactly the boundary", () => {
+
+  // The gate is a >= comparison, so the instant the elapsed time equals the window the controller is stable, and one millisecond before it is not.
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs: STABILITY_NOW_MS - STABILITY_WINDOW_MS, windowMs: STABILITY_WINDOW_MS }), true);
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs: STABILITY_NOW_MS - STABILITY_WINDOW_MS + 1, windowMs: STABILITY_WINDOW_MS }), false);
+});
+
+test("a null stable-since is never elapsed", () => {
+
+  // Null means the controller is not currently good, mid-disruption, so the gate is closed no matter the window.
+  assert.equal(isStabilityWindowElapsed({ nowMs: STABILITY_NOW_MS, stableSinceMs: null, windowMs: STABILITY_WINDOW_MS }), false);
 });

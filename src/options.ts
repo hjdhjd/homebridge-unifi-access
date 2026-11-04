@@ -111,7 +111,7 @@ export const featureOptions: Record<string, AccessFeatureOption[]> = {
   // Controller options.
   "Controller": [
 
-    { default: true, defaultValue: ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, description: "Delay, in seconds, before removing devices that are no longer detected on the Access controller. By default, devices are added and removed in realtime.", name: "DelayDeviceRemoval" },
+    { default: true, defaultValue: ACCESS_DEVICE_REMOVAL_DELAY_INTERVAL, description: "Delay, in seconds, before removing devices that are no longer detected on the Access controller. Removal is held off until the controller has been healthy for ten minutes, and this delay then applies.", name: "DelayDeviceRemoval" },
     { default: false, description: "Publish all the realtime telemetry received from the Access controller to MQTT.", name: "Publish.Telemetry" },
     { default: false, description: "Listen for webhook deliveries from the Access controller. Each unlock reports who unlocked the door and how, in the log and over MQTT, and each doorbell call reports how it ended in the log. Requires an API token.", name: "Webhooks" },
     { default: true, defaultValue: ACCESS_WEBHOOK_PORT, description: "Port the webhook listener binds to. One listener serves every controller configured in this plugin.", group: "Webhooks", name: "Webhooks.Port", scopes: ["global"] }

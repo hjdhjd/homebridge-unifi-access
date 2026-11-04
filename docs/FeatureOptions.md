@@ -74,7 +74,7 @@ These option(s) apply to: Access controllers.
 
 | Option                                                                               | Description
 |--------------------------------------------------------------------------------------|-------------------------------------------------------------
-| <A NAME="Controller.DelayDeviceRemoval"></A>`Controller.DelayDeviceRemoval=<value>`  | Delay, in seconds, before removing devices that are no longer detected on the Access controller. By default, devices are added and removed in realtime. **(default: 60)**.
+| <A NAME="Controller.DelayDeviceRemoval"></A>`Controller.DelayDeviceRemoval=<value>`  | Delay, in seconds, before removing devices that are no longer detected on the Access controller. Removal is held off until the controller has been healthy for ten minutes, and this delay then applies. **(default: 60)**.
 | <A NAME="Controller.Publish.Telemetry"></A>`Controller.Publish.Telemetry`            | Publish all the realtime telemetry received from the Access controller to MQTT. **(default: disabled)**.
 | <A NAME="Controller.Webhooks"></A>`Controller.Webhooks`                              | Listen for webhook deliveries from the Access controller. Each unlock reports who unlocked the door and how, in the log and over MQTT, and each doorbell call reports how it ended in the log. Requires an API token. **(default: disabled)**.
 | <A NAME="Controller.Webhooks.Port"></A>`Controller.Webhooks.Port=<value>`            | Port the webhook listener binds to. One listener serves every controller configured in this plugin. **(default: 10120)**.
