@@ -1096,9 +1096,9 @@ test("an entry that is not an object is left out, and the object entries beside 
 
   const first = { ...CREDENTIALS };
   const second = { address: SECOND_ADDRESS, tokens: TOKENS };
-  const read = controllers({ controllers: [ null, first, "unifi.local", second, 42 ] });
+  const read = controllers({ controllers: [ null, first, "unifi.local", second, 42, [] ] });
 
-  assert.equal(read.length, 2, "null, a string, and a number are left out");
+  assert.equal(read.length, 2, "null, a string, a number, and an array are left out");
   assert.equal(read[0], first, "the first object entry is kept as the stored object itself");
   assert.equal(read[1], second, "and so is the second, in its stored order");
 });

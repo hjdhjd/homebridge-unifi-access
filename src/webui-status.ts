@@ -18,7 +18,7 @@
 import type { AccessApiCode, AccessApiMode, AccessCapabilities, AccessDoorStateEntry, AccessLogging, AccessState, AccessStateDevice, ConnectOptions,
   ConnectionEvents, ConnectionState, StateStore } from "unifi-access";
 import { AccessApiError, AccessBootstrapError, AccessCertificateError, AccessClient, AccessProtocolError, AccessRequestError, AccessStallError, AccessTimeoutError,
-  deviceAccessMethodStates, isHub, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates,
+  deviceAccessMethodStates, isHub, isPlainObject, isReader, isSignInRefusal, isTamperCapable, selectController, selectControllerUptime, selectDoorStates,
   tamperState } from "unifi-access";
 import type { Nullable, StatusChoice, StatusChoicesRow, StatusErrorReason, StatusEvent, StatusRow, StatusTextRow } from "homebridge-plugin-utils";
 import { OFFICIAL_API_ABSENT_CODE, accessMethods, composeConnectIdentity, deviceHasCapability, deviceRecord, deviceSerial, discoverDoorLocations, dpsSensorEligible,
@@ -62,7 +62,7 @@ export interface StatusContextRequest {
  */
 function narrowStatusContextController(candidate: unknown): Nullable<StatusContextController> {
 
-  if((typeof candidate !== "object") || (candidate === null)) {
+  if(!isPlainObject(candidate)) {
 
     return null;
   }
@@ -99,7 +99,7 @@ function narrowStatusContextController(candidate: unknown): Nullable<StatusConte
 
   if(record.tokens !== undefined) {
 
-    if((typeof record.tokens !== "object") || (record.tokens === null)) {
+    if(!isPlainObject(record.tokens)) {
 
       return null;
     }
@@ -148,7 +148,7 @@ function narrowStatusContextController(candidate: unknown): Nullable<StatusConte
  */
 export function narrowStatusContextRequest(body: unknown): Nullable<StatusContextRequest> {
 
-  if((typeof body !== "object") || (body === null)) {
+  if(!isPlainObject(body)) {
 
     return null;
   }

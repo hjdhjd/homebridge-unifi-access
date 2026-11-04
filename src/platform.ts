@@ -13,13 +13,7 @@ import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin
 import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen, resolveWebhookPort } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { AccessController } from "./controller/controller.ts";
-
-// Whether a configured entry is an object, which an entry has to be before anything in it can be read. A hand edit can leave anything in the list, and the type the
-// configuration is read through cannot say so, so the check takes the entry as unknown.
-function isObject(entry: unknown): entry is object {
-
-  return (typeof entry === "object") && (entry !== null);
-}
+import { isPlainObject } from "unifi-access";
 
 /* What one controller's startup settled: the controller itself, and what its login established about its identity. The two are paired at the moment the login is
  * started, so nothing downstream has to match an outcome back to a controller by its position in an array.
@@ -180,7 +174,9 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     for(const entry of controllers) {
 
-      if(!isObject(entry)) {
+      // A hand edit can leave anything in the list and the type the configuration is read through cannot say so, so an entry has to be a record before anything in it
+      // can be read.
+      if(!isPlainObject(entry)) {
 
         continue;
       }

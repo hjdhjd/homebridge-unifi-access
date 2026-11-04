@@ -569,7 +569,7 @@ export const makeControllerList = ({ addressListedElsewhere, addressListingForm 
 
     return config.controllers.filter((item: unknown): item is AccessControllerConfig => {
 
-      if((typeof item !== "object") || (item === null)) {
+      if((typeof item !== "object") || (item === null) || Array.isArray(item)) {
 
         return false;
       }

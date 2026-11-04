@@ -523,7 +523,7 @@ test("a controllers value that is not a list reads as no controllers, and an ent
   }
 
   const harness = makeHarness();
-  const platform = harness.make({ controllers: [ null, "unifi.local", { address: "10.0.0.1", tokens: { access: "token" } } ] as unknown as
+  const platform = harness.make({ controllers: [ null, "unifi.local", [], { address: "10.0.0.1", tokens: { access: "token" } } ] as unknown as
     AccessPlatformConfig["controllers"], options: [], platform: "UniFi Access" });
 
   assert.deepEqual(configuredControllers(platform).map((controller) => controller.config.address), ["10.0.0.1"], "construction completes over the one object entry");
