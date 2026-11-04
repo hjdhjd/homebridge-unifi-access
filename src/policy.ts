@@ -1382,8 +1382,8 @@ export function doorbellTriggerAction(options: { officialAvailable: boolean; rin
 /**
  * The door guards a doorbell's ring filter can name, as the choices the settings page offers: one per guard the door lists, labeled by the user's name where the
  * official users census carries it and by the bare identifier otherwise. A door whose guards are unknown - the official listing carries no door guards, so a
- * token-only client knows none - offers every user the census carries instead, since any of them may be the guard a ring will name; a deactivated user is left
- * out there, because the controller no longer calls one, while a guard the door itself lists is offered whatever their status.
+ * token-only client knows none, and a door listing none reads the same - offers every user the census carries instead, since any of them may be the guard a ring will
+ * name; a deactivated user is left out there, because the controller no longer calls one, while a guard the door itself lists is offered whatever their status.
  *
  * The value is always the user's identifier, which is what a ring's guard list carries and what the filter matches; the label is only ever what the user reads.
  *
@@ -1398,7 +1398,7 @@ export function doorGuardChoices(options: { guardIds: readonly string[] | undefi
   // What a user is called on the settings page: the first name the census carries, falling back to the identifier the ring will name.
   const labelFor = (user: AccessOfficialUser): string => [ user.full_name, user.alias, user.username ].find(name => name.length > 0) ?? user.id;
 
-  if(guardIds === undefined) {
+  if(!guardIds?.length) {
 
     return users.filter(user => user.status !== "DEACTIVATED").map(user => ({ label: labelFor(user), value: user.id }))
       .sort((a, b) => a.label.localeCompare(b.label));

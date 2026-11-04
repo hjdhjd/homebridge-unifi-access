@@ -2026,9 +2026,10 @@ test("doorGuardChoices labels a door's guards by name where the census knows the
   // A door whose guards nothing lists offers every active or pending user, sorted by label, and never a deactivated one.
   assert.deepEqual(doorGuardChoices({ guardIds: undefined, users }), [ { label: "Annie", value: "guard-a" }, { label: "Zed Guard", value: "guard-z" } ]);
 
-  // An empty door and an empty census each offer nothing.
-  assert.deepEqual(doorGuardChoices({ guardIds: [], users }), []);
+  // An empty guard list reads as nothing having listed them, which offers the same census, and an empty census offers nothing however the guards read.
+  assert.deepEqual(doorGuardChoices({ guardIds: [], users }), [ { label: "Annie", value: "guard-a" }, { label: "Zed Guard", value: "guard-z" } ]);
   assert.deepEqual(doorGuardChoices({ guardIds: undefined, users: [] }), []);
+  assert.deepEqual(doorGuardChoices({ guardIds: [], users: [] }), []);
 });
 
 test("resolveDoorService takes an explicit service as chosen and defers everything else to the hardware", () => {
