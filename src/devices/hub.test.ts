@@ -6760,8 +6760,7 @@ test("a custom name renames each part an accessory is restored with at adoption,
   assert.deepEqual(namesOf(sensor), { configured: "Porch Side Door Position Sensor", displayName: "Porch Side Door Position Sensor",
     name: "Porch Side Door Position Sensor" }, "the side door position sensor took the custom name followed by its suffix");
   assert.deepEqual(namesOf(trigger), { configured: "Porch Lock Trigger", displayName: "Porch Lock Trigger", name: "Porch Lock Trigger" }, "and so did the lock trigger");
-  assert.deepEqual(namesOf(sideLock), { configured: undefined, displayName: "Porch Side Door", name: "Porch Side Door" },
-    "and the side door lock, a kind HomeKit names with Name alone");
+  assert.deepEqual(namesOf(sideLock), { configured: "Porch Side Door", displayName: "Porch Side Door", name: "Porch Side Door" }, "and so did the side door lock");
   assert.equal(openerService(gate).getCharacteristic(Characteristic.Name).value, CUSTOM_NAME, "while the main door's opener, declaring no suffix, is the custom name");
 });
 
@@ -6863,7 +6862,7 @@ test("a watched part a device update adds is let go when a later update's verdic
   assert.equal(abortRegistrations(harness), standing, "and its watch released its registration on the device's signal");
 });
 
-test("the lock an accessory is restored with is renamed under a custom name and carries no watch, a kind HomeKit names with Name alone", () => {
+test("the lock an accessory is restored with is renamed and watched under a custom name, and with none it keeps its name and gains no configured name", () => {
 
   const plain = makeHub({ existing: [new Service.LockMechanism("Old Lock")] });
   const owned = makeHub({ existing: [new Service.LockMechanism("Old Lock")], options: [CUSTOM_NAME_ENTRY] });
@@ -6871,8 +6870,25 @@ test("the lock an accessory is restored with is renamed under a custom name and 
   const ownedLock = lockService(owned);
 
   assert.equal(plainLock.getCharacteristic(Characteristic.Name).value, "Old Lock", "with no custom name the lock keeps its name");
+  assert.equal(plainLock.testCharacteristic(Characteristic.ConfiguredName), false, "and gains no configured name");
   assert.equal(ownedLock.getCharacteristic(Characteristic.Name).value, CUSTOM_NAME, "with one it takes the custom name");
-  assert.equal(changeListeners(ownedLock), changeListeners(plainLock), "and it carries no change listener beyond the ones the unwatched lock carries");
+  assert.equal(ownedLock.getCharacteristic(Characteristic.ConfiguredName).value, CUSTOM_NAME, "on its configured name as well");
+  assert.equal(changeListeners(ownedLock), changeListeners(plainLock) + 1, "and it carries one change listener beyond the unwatched lock's, the watch");
+});
+
+test("a gate switched from opener to lock keeps its side door lock's watch, because the main door's lock joins the accessory before the side door lock is " +
+  "held", async () => {
+
+  const sideLock = restoredPart(Service.LockMechanism, AccessReservedNames.LOCK_DOOR_SIDE, "Old Gate Side Door");
+  const gate = makeGate({ existing: [sideLock], options: [ CUSTOM_NAME_ENTRY, "Enable.Hub.Door.Service=Lock" ] });
+
+  assert.ok(gate.services.includes(sideLock), "the gate kept the side door lock it was restored with");
+  assert.equal(lockService(gate).getCharacteristic(Characteristic.Name).value, CUSTOM_NAME, "and added the main door's lock beside it");
+
+  await renameInHomeApp(sideLock, "Den Side");
+
+  assert.equal(sideLock.getCharacteristic(Characteristic.ConfiguredName).value, "Porch Side Door", "the owned name is back on the side door lock");
+  assert.equal(restoreCount(gate), 1, "and the restore was logged once");
 });
 
 test("a controller rename under SyncName renames every held part on the yield that renames the accessory, and a yield leaving the accessory's names as they " +

@@ -181,10 +181,11 @@ export abstract class AccessDevice extends AccessBase {
   public uda: AccessStateDevice;
   // The controller half of the composed lifetime above. Aborted by cleanup(), which is what ends this device alone without disturbing its siblings.
   readonly #deviceController: AbortController;
-  /* The parts held to the name the plugin owns for this device, keyed by service type and subtype (see #holdPartName). The registry assumes that any kind carrying a
-   * subtype-less part beside subtyped ones, as LockMechanism does with the main door's lock beside a UA Gate's side door lock, is a kind HomeKit names with Name
-   * alone: homebridge-plugin-utils makes room for a subtype-less service by detaching and re-adding its subtyped siblings, which clears every listener a detached
-   * sibling carries, and a sibling of such a kind carries no watch to lose.
+  /* The parts held to the name the plugin owns for this device, keyed by service type and subtype (see #holdPartName). homebridge-plugin-utils makes room for a
+   * subtype-less service by detaching and re-adding its subtyped siblings, which clears every listener a detached sibling carries, a watch included. The registry
+   * therefore assumes that a subtype-less part joins the accessory before its subtyped siblings are held, as the main door's lock does ahead of a UA Gate's side door
+   * lock: a configuration pass settles the main door first, and the verdict that adds its lock comes from the door's presentation option and the hub's capability,
+   * neither of which moves while the device stands.
    */
   readonly #ownedParts: Map<string, OwnedPart>;
 
