@@ -921,8 +921,9 @@ export interface GateDoorLocations {
  *
  * The held arm stands above the port binding the controller publishes for a port, and only for a record carrying no relay data. That binding outranks every other arm,
  * because it is the same binding the library's own single-door resolution reads. Port 1 names the main door and port 2 names the side door, whatever the controller wrote
- * beside them, whatever order they arrived in and whatever other binding stands beside them. A door the topology lacks takes no role on any arm, so a port bound to one
- * answers nothing.
+ * beside them and whatever binding stands on another port. Each port answers with the first binding delivered on it, so delivery order decides nothing while each port
+ * carries one binding, and decides the role where a record lists two on one port. A door the topology lacks takes no role on any arm, so a port bound to one answers
+ * nothing.
  *
  * Whenever the record binds any of the topology's doors, every arm below the ports chooses among those doors alone, because the topology is every door on the
  * controller and a door of another hub must never take either role. They keep topology order, so the order the controller delivered the bindings in decides nothing,
@@ -956,7 +957,8 @@ export function discoverDoorLocations(options: { device: AccessStateDevice; door
 
   const { device, doors, held, sideDoorEligible } = options;
 
-  // The door each of the record's own ports names, counted only where the topology carries it. The port is what names the role, so delivery order never decides one.
+  // The door each of the record's own ports names, counted only where the topology carries it. The port is what names the role, and its first delivered binding
+  // answers for it, so delivery order decides nothing with one binding per port and decides the role with two on a port.
   const bindings = portBindings(device);
   const mainBinding = bindings.find(binding => binding.port === GATE_MAIN_PORT);
   const sideBinding = bindings.find(binding => binding.port === GATE_SIDE_PORT);
