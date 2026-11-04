@@ -494,13 +494,15 @@ export class AccessHub extends AccessDevice {
    * disagree with what the door state map says - so a characteristic left holding the record's reading would render a stale door until that door next moved. The
    * locks go through their setters, whose early return on an agreeing reading makes the two sources agreeing cost nothing; the side door's position has no accessor pair,
    * so it takes the file's own idiom for that field - the assignment followed by an explicit push. Adoption stays silent throughout, with no MQTT tail and no log
-   * line, because a reading we are seeing for the first time is not a transition anyone observed.
+   * line, because a reading we are seeing for the first time is not a transition anyone observed. A pass past adoption states each moved door's lock topic and writes no
+   * log line, because a subscriber still holds the reading of the door that left the role.
    *
    * It seeds exactly the doors it is handed, which is every door a gate drives at construction and whichever doors a rebind moved afterwards.
    *
    * @param doors - The doors to seed.
+   * @param pass  - The pass this seed is running as.
    */
-  private initializeDoorStates(doors: readonly DrivenDoor[]): void {
+  private initializeDoorStates(doors: readonly DrivenDoor[], { initialized }: ConfigurePass): void {
 
     for(const door of doors) {
 
@@ -521,6 +523,11 @@ export class AccessHub extends AccessDevice {
 
           this.updateDoorServiceState(false);
         }
+      }
+
+      if(initialized) {
+
+        this.#publishTopic({ key: door.isSideDoor ? "sidedoorLock" : "lock" });
       }
     }
   }
@@ -550,7 +557,7 @@ export class AccessHub extends AccessDevice {
     this.configureSideDoorLockTrigger(pass);
     this.configureDoorbell(pass);
     this.configureDoorbellTrigger(pass);
-    this.initializeDoorStates(rebound);
+    this.initializeDoorStates(rebound, pass);
     this.#reconcileTopicAnswers();
   }
 

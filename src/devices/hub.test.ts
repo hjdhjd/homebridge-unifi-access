@@ -3399,8 +3399,8 @@ test("a gate whose record rebinds its ports mid-run follows the rebind", () => {
 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.UNSECURED,
     "the door the main port now names is seeded from the map");
-  assert.deepEqual(lockPayloads(gate), [], "silently, as every seed is");
-  assert.equal(lineCount(gate, "Gate unlocked."), 0);
+  assert.deepEqual(lockPayloads(gate), ["false"], "and the topic states that seed");
+  assert.equal(lineCount(gate, "Gate unlocked."), 0, "with no log line");
 
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
 
@@ -3411,16 +3411,16 @@ test("a gate whose record rebinds its ports mid-run follows the rebind", () => {
 
   assert.equal(lockService(gate).getCharacteristic(Characteristic.LockCurrentState).value, Characteristic.LockCurrentState.SECURED,
     "while the door it moved onto reaches it through the rail as every reading does");
-  assert.deepEqual(lockPayloads(gate), ["true"]);
+  assert.deepEqual(lockPayloads(gate), [ "false", "true" ]);
 
   gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: NEW_SIDE });
 
-  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "the side port's new door is owned from the rebind on");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "true", "false" ], "the side port's new door is owned from the rebind on");
   assert.equal(lineCount(gate, "Side door unlocked."), 1);
 
   gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: SIDE_DOOR });
 
-  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["false"], "and the one it left behind owns nothing");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [ "true", "false" ], "and the one it left behind owns nothing");
 
   // Each announcement names the door the binding gave the role by the name the topology carries for it.
   assert.equal(lineCount(gate, "The gate's main door is now New Main Gate."), 1);
@@ -3441,7 +3441,7 @@ test("a gate announces each door whose identity moved by its topology name, and 
   restateRecord(gate, { extensions: [ mainPort(SIDE_DOOR), sidePort(MAIN_DOOR) ] });
 
   assert.equal(gate.lines.length, 2, "a record whose bindings did not move moves no identity, so it says nothing");
-  assert.deepEqual(lockPayloads(gate), [], "and no seed of either pass reaches the topic");
+  assert.deepEqual(lockPayloads(gate), ["true"], "and only the pass that moved the role states its seed");
 });
 
 test("a gate whose side door binding is withdrawn says so once and keeps the side door's services at their last reading", () => {
@@ -3462,7 +3462,7 @@ test("a gate whose side door binding is withdrawn says so once and keeps the sid
 
   deliverDoorState(gate, { dps: "open", location_id: NEW_SIDE, lock: "unlock" });
 
-  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), [], "and nothing delivered under the withdrawn identity moves it");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["true"], "and nothing delivered under the withdrawn identity moves it");
 
   restateRecord(gate, { extensions: [mainPort(MAIN_DOOR)] });
 
@@ -3484,17 +3484,38 @@ test("a rebind retires the relock window opened for the door that left the role"
   gate.setDoorState({ dps: "open", location_id: NEW_MAIN, lock: "unlock" });
   restateRecord(gate, { extensions: [ sidePort(NEW_SIDE), mainPort(NEW_MAIN) ] });
 
-  assert.deepEqual(lockPayloads(gate), ["false"], "the seed of the door that took the role agrees with what the gate already reads, so it is silent");
+  assert.deepEqual(lockPayloads(gate), [ "false", "false" ], "the topic states the seed of the door that took the role");
 
   gate.clock.advance(RELOCK_DELAY_MS);
 
-  assert.deepEqual(lockPayloads(gate), ["false"], "a window of ours belongs to the door it was opened for, so it leaves with that door");
+  assert.deepEqual(lockPayloads(gate), [ "false", "false" ], "a window of ours belongs to the door it was opened for, so it leaves with that door");
   assert.equal(lineCount(gate, "Gate locked."), 0, "and fires against neither the door that took the role nor the one that left it");
 
   deliverDoorState(gate, { dps: "close", location_id: NEW_MAIN, lock: "lock" });
 
-  assert.deepEqual(lockPayloads(gate), [ "false", "true" ], "the controller's own report of the new door still reaches it through the rail");
+  assert.deepEqual(lockPayloads(gate), [ "false", "false", "true" ], "the controller's own report of the new door still reaches it through the rail");
   assert.equal(lineCount(gate, "Gate locked."), 1);
+});
+
+test("a role moving past adoption states each moved door's seeded lock state with no log line, and adoption and a pass that moved nothing stay silent", () => {
+
+  const gate = makeGate({ keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"] });
+
+  assert.deepEqual([ lockPayloads(gate), lockPayloads(gate, "sidedoor/lock") ], [ [], [] ], "adoption stays silent");
+
+  addReboundDoors(gate);
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: MAIN_DOOR });
+  restateRecord(gate, { extensions: [ mainPort(NEW_MAIN), sidePort(NEW_SIDE) ] });
+  restateRecord(gate, { extensions: [ mainPort(MAIN_DOOR), sidePort(NEW_SIDE) ] });
+
+  // The window opened for the main door is retired by the move away, so the door's return seeds it locked, which is the reading a subscriber would otherwise never hear.
+  assert.deepEqual(lockPayloads(gate), [ "false", "true", "true" ], "the window's unlock, then each move's seed");
+  assert.deepEqual(lockPayloads(gate, "sidedoor/lock"), ["true"], "the side door's one move states its own topic");
+  assert.equal(lineCount(gate, "Gate locked."), 0, "with no log line");
+
+  restateRecord(gate, { extensions: [ mainPort(MAIN_DOOR), sidePort(NEW_SIDE) ] });
+
+  assert.equal(lockPayloads(gate).length, 3, "and a pass that moved nothing states nothing");
 });
 
 test("a gate whose bindings sit on neither of its ports keeps each door in its role, whichever order the controller delivers the bindings in", () => {
