@@ -448,12 +448,13 @@ export class AccessHub extends AccessDevice {
     }
 
     /* The bindings are read here rather than handed back by the policy, which answers with the door identities and what decided them, and only on a pass that
-     * moved a role or an adoption that resolved none. Each binding renders as the name the controller wrote beside it, its port, and its door, with an absent name or
-     * port said as such, and each line below carries that one rendering.
+     * moved a role or an adoption that resolved none. Each binding renders as the name the controller wrote beside it, its port, its relay, and its door, with an absent
+     * name, port or relay said as such, and each line below carries that one rendering.
      */
     if(changed || (!initialized && !next.length)) {
 
-      const bindings = portBindings(this.uda).map(binding => (binding.name ?? "unnamed") + " on " + (binding.port ?? "an unnamed port") + " bound to " + binding.doorId);
+      const bindings = portBindings(this.uda).map(binding => (binding.name ?? "unnamed") + " on " + (binding.port ?? "an unnamed port") + " with " +
+        (binding.relayKey ?? "an unnamed relay") + " bound to " + binding.doorId);
       const renderedBindings = bindings.length ? bindings.join(", ") : "none";
       const mainDoor = next.find(door => !door.isSideDoor)?.locationId;
       const sideDoor = next.find(door => door.isSideDoor)?.locationId;
