@@ -3518,6 +3518,42 @@ test("a role moving past adoption states each moved door's seeded lock state wit
   assert.equal(lockPayloads(gate).length, 3, "and a pass that moved nothing states nothing");
 });
 
+test("a gate whose record has left the state drives no doors through its removal wait, and keeps its roles for a record that returns", () => {
+
+  const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });
+  const record = gate.live.record;
+
+  // A record reading offline still stands, so the gate still drives its doors, which is where a read of the verdict rather than the record would go quiet too soon.
+  gate.live.record = testHub({ device_type: "UGT", is_online: false });
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "an offline record's door still answers");
+
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+  gate.lines.length = 0;
+  gate.publishes.length = 0;
+
+  gate.live.record = undefined;
+
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
+  gate.emit(ACCESS_REMOTE_UNLOCK_EVENT, { event: ACCESS_REMOTE_UNLOCK_EVENT, event_object_id: SIDE_DOOR });
+  gate.deliver(ACCESS_WEBHOOK_EVENTS.doorUnlock, unlockDelivery({ door: MAIN_DOOR }));
+
+  assert.deepEqual([ lockPayloads(gate), lockPayloads(gate, "sidedoor/lock"), topicPayloads(gate, "dps"), topicPayloads(gate, "unlock") ], [ [], [], [], [] ],
+    "no door-state delivery, remote unlock or webhook delivery reaches a topic");
+  assert.deepEqual(gate.lines, [], "or the log");
+
+  gate.live.record = record;
+  restateRecord(gate, {});
+
+  assert.deepEqual(gate.lines, [], "the returning record moves no role");
+  assert.deepEqual(guessLines(gate), [], "and guesses none");
+
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.deepEqual(lockPayloads(gate), ["false"], "and the door answers again");
+});
+
 test("a gate whose bindings sit on neither of its ports keeps each door in its role, whichever order the controller delivers the bindings in", () => {
 
   const gate = makeGate({ options: ["Enable.Hub.Door.Service=Lock"] });

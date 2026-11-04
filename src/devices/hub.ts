@@ -2174,13 +2174,14 @@ export class AccessHub extends AccessDevice {
    *
    * A UA Gate answers with the doors discovery last resolved for it, because the library derives no per-door facts for hardware whose doors it cannot tell apart.
    * Every other hub answers from the library's own published door resolution. A hub inside its removal grace enumerates nothing at all rather than throwing, which
-   * is what the guarded identity read above makes true and which matters because every hub on a controller sees every delivery.
+   * matters because every hub on a controller sees every delivery. The guarded identity read above makes that true of every other hub and the live record read makes it
+   * true of a gate, whose doors stay held behind that read so a record that returns keeps its roles.
    */
   get #drivenDoors(): readonly DrivenDoor[] {
 
     if(this.uda.device_type === "UGT") {
 
-      return this.#gateDoors;
+      return this.projection.peek() ? this.#gateDoors : [];
     }
 
     const doorId = this.#doorId;
