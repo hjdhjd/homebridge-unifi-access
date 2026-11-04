@@ -47,7 +47,8 @@ export type AccessAccessoryOwnership = "current" | "foreign" | "prior";
  *
  *   - `connecting`: initial setup. Connection errors still surface to the user, since a failure here is something they need to see.
  *   - `running`: connected and in steady-state operation.
- *   - `shuttingDown`: terminal. The plugin or the host process is going away, and no recovery is expected.
+ *   - `shuttingDown`: terminal. This controller has stopped: the plugin or the host process is going away, or a login rejected past connect stopped it until a restart,
+ *     and no recovery is expected.
  *
  * Access has no plugin-induced reboot domain, so there is no `rebooting` arm. Transitions are owned by the controller's `transition()` chokepoint, and derived
  * predicates project from the phase so that phase remains the lone mutable axis.

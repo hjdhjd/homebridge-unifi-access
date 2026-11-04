@@ -444,7 +444,7 @@ export function savesOn(api: TestHomebridgeApi): string[][] {
  * place rather than a silent fallback at every site that stands one up.
  */
 type ControllerSurface = Pick<AccessController, "client" | "config" | "events" | "getDeviceName" | "hasFeature" | "id" | "isAvailable" | "log" | "login" | "mqtt" |
-  "mqttPublish" | "name" | "ownershipKey" | "platform" | "reclaimClaims" | "reclaimKeys" | "resolveDeviceModel" | "signal" | "spawnLoop">;
+  "mqttPublish" | "name" | "ownershipKey" | "platform" | "reclaimClaims" | "reclaimKeys" | "resolveDeviceModel" | "shutdown" | "signal" | "spawnLoop">;
 
 /* The client members the plugin reads, each optional because an arm supplies only the ones its path reaches: the official surface and the transport are whatever the
  * arm hands over, the connection and the state answer what a device composes its own availability and membership from, the capabilities say which kind of client
@@ -488,6 +488,7 @@ export interface ControllerDoubleOptions {
   reclaimClaims?: () => MembershipClaims | undefined;
   reclaimKeys?: ControllerOwnershipKeys;
   resolveDeviceModel?: (device: AccessStateDevice) => string;
+  shutdown?: () => Promise<void>;
   signal?: AbortSignal;
   spawnLoop?: (title: string, loop: () => Promise<void>) => void;
 }
@@ -526,7 +527,7 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
     // The controller's verdict as the real getter reads it, so an arm moves it through the connection its client holds rather than by naming an answer of its own.
     get isAvailable(): boolean {
 
-      return !this.client.connection.isLost;
+      return !this.signal.aborted && !this.client.connection.isLost;
     },
     log: { ...silentLog(), ...options.log },
     login: options.login ?? (async (): Promise<AccessLoginOutcome> => "reporting"),
@@ -538,6 +539,7 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
     reclaimClaims: options.reclaimClaims ?? ((): MembershipClaims | undefined => undefined),
     reclaimKeys: options.reclaimKeys ?? { currentKey: config.address, priorKey: undefined },
     resolveDeviceModel,
+    shutdown: options.shutdown ?? (async (): Promise<void> => undefined),
     signal: options.signal ?? new AbortController().signal,
     spawnLoop: options.spawnLoop ?? ((): void => undefined)
   };

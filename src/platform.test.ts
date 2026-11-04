@@ -10,7 +10,7 @@ import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
 import { Characteristic, Service, accessoryUuid, makeControllerDouble, makeTestAccessory, makeTestApi, platformInternals, savesOn } from "./testing.helpers.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
-import { TestMqttClient, hapStatus, settle, settleUntil, stopListening, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
+import { TestMqttClient, assertNoUnhandledRejections, hapStatus, settle, settleUntil, stopListening, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { mock, test } from "node:test";
 import type { AccessClient } from "unifi-access";
 import { AccessController } from "./controller/controller.ts";
@@ -594,7 +594,7 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   await settle();
 
   // The whole sentence, spelled out, so the arm cannot pass on a prefix that a wording dropping the consequence would satisfy just as well.
-  const refused = "Unable to log in to this controller: Connection refused. " +
+  const refused = "Unable to finish starting the UniFi Access controller: Connection refused. Stopping it until Homebridge is restarted. " +
     "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.";
 
   assert.ok(failures.includes(refused), "the failure must be said against the controller it belongs to, naming the refusal and what it costs the session");
@@ -997,6 +997,151 @@ test("a reclaim whose logins settle inside the final words' grace removes nothin
 
   release();
   await settleUntil(() => platform.signal.aborted, { description: "the plugin's lifetime to end once the held word is said" });
+});
+
+// What a login rejected past connect says, whole, around the rendered reason, so a wording that drops the stop or the reclaim's consequence reddens an arm.
+function loginRejectedLine(reason: string): string {
+
+  return "Unable to finish starting the UniFi Access controller: " + reason + ". Stopping it until Homebridge is restarted. " +
+    "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.";
+}
+
+/* The platform's half of the stop: the line lands on the controller that rejected, that controller is asked to stop once, and its report still settles as unavailable,
+ * so the reclaim stands down as it does for any identity nobody can attribute. The debug line is where the outcome the report carried can be read.
+ */
+test("a login rejected past connect says so once, stops that controller once, and reports it unavailable", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Enable.Log.Debug"], platform: "UniFi Access" });
+  const failures: string[] = [];
+
+  let stops = 0;
+
+  const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
+    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
+    login: async (): Promise<never> => { throw new Error("The record is gone."); },
+    shutdown: async (): Promise<void> => { stops++; } });
+  const inner = platformInternals(platform);
+
+  inner.controllers.splice(0, inner.controllers.length, failing);
+  inner.launchControllers();
+
+  await settle();
+
+  assert.deepEqual(failures, [loginRejectedLine("The record is gone")], "the line is said once against the controller it happened to");
+  assert.equal(stops, 1, "that controller is stopped once");
+  assert.ok(harness.lines.some((line) => line.endsWith("their logins reported unavailable.")), "and its report reads unavailable, so the reclaim stands down");
+});
+
+// A shutdown that tears a login down is our own doing, so what it rejects with is no reason to report, and a controller whose signal has aborted is already stopping.
+test("a login rejected once its controller's signal has aborted writes nothing and asks for no stop, and still reports unavailable", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Enable.Log.Debug"], platform: "UniFi Access" });
+  const failures: string[] = [];
+
+  let stops = 0;
+
+  const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
+    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
+    login: async (): Promise<never> => { throw new Error("The record is gone."); },
+    shutdown: async (): Promise<void> => { stops++; }, signal: AbortSignal.abort() });
+  const inner = platformInternals(platform);
+
+  inner.controllers.splice(0, inner.controllers.length, failing);
+  inner.launchControllers();
+
+  await settle();
+
+  assert.deepEqual(failures, [], "the rejection is read, and nothing is said about it");
+  assert.equal(stops, 0, "and the stop already under way is not asked for again");
+  assert.ok(harness.lines.some((line) => line.endsWith("their logins reported unavailable.")), "while its report still reads unavailable");
+});
+
+// The line has to reach the log whatever the stop goes on to do, so it comes ahead of the stop's first wait.
+test("the line stands on the log while the stop's MQTT end is held", async (t) => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const [controller] = configuredControllers(platform);
+
+  assert.ok(controller, "the entry describes a whole identity, so a real controller is constructed for it");
+
+  const release = clientWithWord(controller).holdPublishes();
+
+  t.after(() => {
+
+    release();
+    harness.api.emit(APIEvent.SHUTDOWN);
+  });
+
+  controller.login = async (): Promise<never> => { throw new TypeError("The record is gone."); };
+
+  await assertNoUnhandledRejections(async (): Promise<void> => {
+
+    platformInternals(platform).launchControllers();
+
+    await settleUntil(() => harness.lines.length > 0, { description: "the line" });
+
+    assert.deepEqual(harness.lines, ["error: 1.2.3.4: " + loginRejectedLine("The record is gone")]);
+    assert.equal(controller.signal.aborted, false, "the end holds the stop back");
+
+    release();
+
+    await settleUntil(() => controller.signal.aborted, { description: "the stop" });
+  });
+});
+
+/* A stop that rejects is the last thing that could float out of the launch, so the controller says it on a line of its own and it costs that controller alone. The one
+ * run it holds cannot reject, so a later Homebridge shutdown reads it, and the signal's listener, which voids what it is handed, has nothing to raise.
+ */
+test("a stop that rejects says so once, and a later Homebridge shutdown floats nothing", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const [controller] = configuredControllers(platform);
+
+  assert.ok(controller, "the entry describes a whole identity, so a real controller is constructed for it");
+
+  controller.client = { [Symbol.asyncDispose]: async (): Promise<void> => { throw new Error("The disposal failed."); } } as unknown as AccessClient;
+  controller.login = async (): Promise<never> => { throw new TypeError("The record is gone."); };
+
+  await assertNoUnhandledRejections(async (): Promise<void> => {
+
+    platformInternals(platform).launchControllers();
+
+    await settleUntil(() => harness.lines.length > 1, { description: "the stop's line" });
+
+    harness.api.emit(APIEvent.SHUTDOWN);
+
+    await settle();
+  });
+
+  assert.deepEqual(harness.lines, [ "error: 1.2.3.4: " + loginRejectedLine("The record is gone"),
+    "error: 1.2.3.4: Unable to finish stopping the UniFi Access controller: The disposal failed." ], "each line is said once");
+  assert.equal(controller.signal.aborted, true, "and the sequence reached its transition ahead of the disposal");
+});
+
+// The signal's listener voids what it is handed, so a stop Homebridge's shutdown asked for first has no caller to read a rejection, and the line stands for it alone.
+test("a stop that rejects after Homebridge's shutdown asked first says so once and floats nothing", async () => {
+
+  const harness = makeHarness();
+  const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: [], platform: "UniFi Access" });
+  const [controller] = configuredControllers(platform);
+
+  assert.ok(controller, "the entry describes a whole identity, so a real controller is constructed for it");
+
+  controller.client = { [Symbol.asyncDispose]: async (): Promise<void> => { throw new Error("The disposal failed."); } } as unknown as AccessClient;
+
+  await assertNoUnhandledRejections(async (): Promise<void> => {
+
+    harness.api.emit(APIEvent.SHUTDOWN);
+
+    await settle();
+  });
+
+  assert.deepEqual(harness.lines, ["error: 1.2.3.4: Unable to finish stopping the UniFi Access controller: The disposal failed."]);
+  assert.equal(controller.signal.aborted, true, "the sequence reached its transition ahead of the disposal");
 });
 
 test("a webhook port setting that is not a port is said once and the default is used, and one that is a port is used as written", () => {

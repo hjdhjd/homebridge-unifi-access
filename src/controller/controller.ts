@@ -113,9 +113,11 @@ export class AccessController {
   #name: string;
   // Lifecycle phase, mutated only through transition().
   #phase: AccessControllerPhase;
-  // The terminal plugin-shutdown abort, fired exactly once in transition("shuttingDown") when the plugin's lifetime ends, after its final words. Every loop and every
-  // per-device controller composes against it, so shutdown tears the whole tree down as one cascade.
+  // The terminal shutdown abort, fired exactly once in transition("shuttingDown") when this controller stops, after its final words. Every loop and every per-device
+  // controller composes against it, so a stop tears the whole tree down as one cascade.
   readonly #shutdownController: AbortController;
+  // The one run of the shutdown sequence, null until something asks for it.
+  #shutdownRun: Nullable<Promise<void>>;
   #unsupportedDevices: Record<string, boolean>;
   /* This controller's webhook registration, or null when it holds none. The registration is active exactly when this is non-null, and it is set and cleared as one
    * value so the endpoint, the replay ledger, and the route it feeds can never disagree about whether webhooks are running.
@@ -137,6 +139,7 @@ export class AccessController {
     this.#phase = "connecting";
     this.platform = platform;
     this.#shutdownController = new AbortController();
+    this.#shutdownRun = null;
     this.#unsupportedDevices = {};
     this.#webhook = null;
 
@@ -214,14 +217,55 @@ export class AccessController {
 
     this.#identity = identity.identity;
 
-    /* Tear ourselves down when the plugin's lifetime ends. The platform owns the one shutdown registration and every controller composes from its signal, which is
-     * the same composition the device base applies one layer down.
+    /* Stop when the plugin's lifetime ends. The platform owns the one shutdown registration and every controller composes from its signal, which is the same composition
+     * the device base applies one layer down.
      */
-    onAbort(this.platform.signal, () => {
+    onAbort(this.platform.signal, () => void this.shutdown());
+  }
 
-      this.transition("shuttingDown");
-      void this.#disconnect();
-    });
+  /**
+   * Stop this controller: every loop, timer and connection it stood up ends, and its accessories stay and refuse until a restart. Homebridge's shutdown asks for this
+   * through the platform's signal, and so does the platform for a login rejected past connect, so the first call runs the sequence and every later call reads that one
+   * run and repeats nothing. A stop that itself rejects is said here, once, whichever caller asked first. So the run held here cannot reject, and the promise the
+   * signal's listener voids has nothing to float...a rejection that floats ends the process.
+   *
+   * @returns A promise that settles once the one run of the shutdown sequence has.
+   */
+  public async shutdown(): Promise<void> {
+
+    await (this.#shutdownRun ??= this.#runShutdown().catch((error: unknown): void => {
+
+      this.log.error("Unable to finish stopping the UniFi Access controller: %s.", formatErrorMessage(error));
+    }));
+  }
+
+  /* The shutdown sequence, in the order the graceful MQTT end of homebridge-plugin-utils asks for. Homebridge's shutdown reaches it through the platform's abort, once
+   * the platform has awaited each client's end, so there the end below is already over and this runs inside the few seconds Homebridge gives it. A login rejected past
+   * connect runs the same sequence while the process runs on, so what it ends stays ended until a restart. A controller with no MQTT client has no words to wait on, so
+   * it runs straight through in its caller's own turn.
+   */
+  async #runShutdown(): Promise<void> {
+
+    // Tear down the removal gate's timers unconditionally, ahead of the MQTT end below. The stability sweep and every pending delayed removal are deferred destructive
+    // acts that must not fire against a controller going away, and a login rejected past connect on a long-up controller has a sweep armed and already due, so leaving
+    // this to the transition below would let that sweep run inside the end's hold. The transition's own push clears the same state once it lands, and the gate's
+    // lifetime binding is the last backstop.
+    this.removals.reset();
+
+    // End the MQTT client gracefully, which states every registered final word, each device's retained offline and this controller's, while the broker session still
+    // holds. It comes ahead of the transition below, because aborting the signal the client and those words live on leaves the words unsaid. The rest of the plugin is
+    // not quieted for this bounded grace: anything that publishes meanwhile is refused at debug, and a removal clock that re-arms is cancelled by the transition. A login
+    // rejected past connect has had no turn in which to open a session, so there the client simply ends, and a retained value stands as the last run left it.
+    if(this.mqtt) {
+
+      await this.mqtt.end();
+    }
+
+    // Mark the lifecycle phase before tearing down. This is the single chokepoint that aborts the terminal shutdown signal, so every observe loop unwinds as one cascade
+    // and the disconnect below runs with each of them already on its way out.
+    this.transition("shuttingDown");
+
+    await this.#disconnect();
   }
 
   /**
@@ -287,8 +331,8 @@ export class AccessController {
     /* Initialize MQTT, if configured. The library resolves both settings in one place, and the rule it applies is that a configured option answers in every state
      * it can be in: an option the user turned off, or enabled without giving it a value, is the user saying MQTT is off for this controller. The controller's own
      * configuration properties answer only where no option speaks. A null answer means there is nothing to connect to, so no client is constructed at all. The
-     * platform ends the client gracefully at shutdown, so this controller and each device state their final words while the session still holds, and the client binds
-     * to our terminal shutdown signal as well, so its connection can never outlive the plugin.
+     * platform's shutdown and this controller's own stop each end the client gracefully, so this controller and each device state their final words while the session
+     * still holds, and the client binds to our terminal shutdown signal as well, so its connection can never outlive this controller.
      *
      * A controller reached with an API token alone answers by its address identity, so a per-controller option entry addresses it exactly as it addresses a
      * credentialed controller and its broker and topic resolve at controller scope like any other's. The configuration properties answer only where no option
@@ -438,9 +482,9 @@ export class AccessController {
     return true;
   }
 
-  /* Tear this controller down. Called from the shutdown handler after the phase has already moved, so the abort cascade has fired and every loop is unwinding by the
-   * time we get here. The removal gate needs no explicit call, since its timers were armed against our terminal signal and end with it. Neither does the MQTT
-   * client: the platform's shutdown ended it gracefully ahead of the abort that brought us here, and its own binding to our terminal signal ends it regardless.
+  /* Tear this controller down. Called from the shutdown sequence after the phase has moved, so the abort cascade has fired and every loop is unwinding by the time we
+   * get here. The removal gate needs no explicit call, since its timers were armed against our terminal signal and end with it. Neither does the MQTT client: the
+   * sequence ended it gracefully ahead of the abort that brought us here, and its own binding to our terminal signal ends it regardless.
    */
   async #disconnect(): Promise<void> {
 
@@ -1571,10 +1615,13 @@ export class AccessController {
    * lost, until recovery. It reads that fact and never the library's first-fault flag, which also reads false while the library is still probing, while it re-bootstraps
    * a controller it has already proven reachable and while its request breaker is open: none of those mean the values have gone stale, and refusing on them would mark
    * every accessory No Response for a blip the library is already handling. It reads the connected client, so nothing ahead of a connect reads it.
+   *
+   * A controller whose signal has aborted is unavailable until a restart. Its client is disposed, and a disposed client's connection goes on reading healthy, so its
+   * accessories would otherwise go on answering from a client with nothing left to tell them.
    */
   public get isAvailable(): boolean {
 
-    return !this.client.connection.isLost;
+    return !this.signal.aborted && !this.client.connection.isLost;
   }
 
   // Whether client-side errors should reach the user. True in every phase but shutdown, where the teardown cascade produces noise about a connection we are
@@ -1584,7 +1631,7 @@ export class AccessController {
     return (this.#phase === "connecting") || (this.#phase === "running");
   }
 
-  // The terminal plugin-shutdown abort signal, fired exactly once through the transition chokepoint. Every loop and per-device controller composes against it.
+  // The terminal shutdown abort signal, fired exactly once through the transition chokepoint. Every loop and per-device controller composes against it.
   public get signal(): AbortSignal {
 
     return this.#shutdownController.signal;

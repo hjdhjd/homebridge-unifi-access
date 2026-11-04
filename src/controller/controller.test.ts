@@ -3718,3 +3718,106 @@ test("a recovery sweep whose timer fires a millisecond short still re-derives th
 
   assert.equal(delayLines(harness), 1, "the sweep reads the window it waited out as complete, so the held departure arms");
 });
+
+/* Whichever caller asks first runs the sequence and the other reads that one run, so what it ends is ended once. Each order is a row of its own, because the signal's
+ * listener and the platform's rejection arm reach the stop from different turns.
+ */
+for(const { label, stopFirst } of [ { label: "a stop and then the plugin's shutdown", stopFirst: true },
+  { label: "the plugin's shutdown and then a stop", stopFirst: false } ]) {
+
+  test(label + " run the sequence once", async (t) => {
+
+    const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } } });
+
+    let disposals = 0;
+
+    harness.controller.client[Symbol.asyncDispose] = async (): Promise<void> => {
+
+      disposals++;
+    };
+
+    t.after(() => harness.shutdown.abort());
+
+    if(stopFirst) {
+
+      await harness.controller.shutdown();
+
+      harness.shutdown.abort();
+    } else {
+
+      harness.shutdown.abort();
+
+      await harness.controller.shutdown();
+    }
+
+    await settle(DISPATCH_SETTLE_TURNS);
+
+    assert.equal(harness.controller.signal.aborted, true, "the sequence reached its terminal phase");
+    assert.equal(disposals, 1, "and disposed the client once, whichever caller asked first");
+  });
+}
+
+/* A controller up past the window has its sweep armed and due the moment it reaches running, on a macrotask the held end gives it. Only the reset ahead of the end keeps
+ * it out, because the transition's own push waits behind the same hold. The word held mid-flight is what holds the end, and the advances land inside that hold.
+ */
+test("a long-up controller stopped with an orphan, its end held and the clock advanced, fires no sweep and removes nothing", async (t) => {
+
+  const { harness, mqtt } = availabilityController({ recordless: true });
+
+  t.after(() => harness.shutdown.abort());
+
+  harness.restore(restoredHub());
+
+  await harness.controller.login();
+
+  assert.equal(harness.controller.removals.removalStable, true, "the controller is past the window");
+  assert.equal(harness.clock.nextDeadline, 0, "so its sweep is armed and due");
+
+  const release = mqtt.holdPublishes();
+
+  t.after(release);
+
+  const stopping = harness.controller.shutdown();
+
+  harness.clock.advance(0);
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  await settle();
+
+  assert.equal(harness.controller.signal.aborted, false, "the end still holds");
+  assert.equal(delayLines(harness), 0, "the sweep did not run inside the hold");
+  assert.deepEqual(harness.unregistered, [], "and the orphan stays");
+
+  release();
+
+  await stopping;
+
+  harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
+
+  assert.equal(harness.controller.signal.aborted, true, "the stop finished");
+  assert.equal(delayLines(harness), 0, "with no sweep behind it");
+  assert.deepEqual(harness.unregistered, [], "and the orphan still stays");
+});
+
+// A disposed client's connection goes on reading healthy, so the signal is the one fact left telling an accessory its controller is gone. No device exists on the stop's
+// own path, so the row reads the getter, beside a controller that was not stopped as the control.
+test("a stopped controller reads unavailable though its connection reads healthy, while another controller's verdict stands", async (t) => {
+
+  const connection = { isHealthy: true, isLost: false };
+  const stopped = makeController({ connection });
+  const other = makeController({ connection });
+
+  t.after(() => {
+
+    stopped.shutdown.abort();
+    other.shutdown.abort();
+  });
+
+  assert.equal(stopped.controller.isAvailable, true, "a controller whose signal holds is available");
+
+  await stopped.controller.shutdown();
+
+  assert.equal(connection.isLost, false, "the connection levers have not moved");
+  assert.equal(stopped.controller.isAvailable, false, "a controller whose signal has aborted is unavailable");
+  assert.equal(other.controller.isAvailable, true, "and the other controller's verdict stands");
+});

@@ -316,11 +316,21 @@ export class AccessPlatform implements DynamicPlatformPlugin {
 
     const reports = this.controllers.map((controller) => controller.login().then(
       (outcome): AccessControllerReport => ({ controller, outcome }),
-      (error: unknown): AccessControllerReport => {
+      async (error: unknown): Promise<AccessControllerReport> => {
 
-        // A login that rejects outright leaves this controller's identity unknown, which the fence reads as unavailable...the reclaim stands down for the session.
-        controller.log.error("Unable to log in to this controller: %s. " +
-          "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.", formatErrorMessage(error));
+        /* A login that rejects leaves this controller's identity unknown, which the fence reads as unavailable...the reclaim stands down for the session. It also stops
+         * this controller until a restart, because what login had already stood up would otherwise run on half-started: every loop, timer and connection ends through the
+         * sequence Homebridge's own shutdown runs, and the accessories stay and refuse. The line comes first, so it stands on the log however long the stop takes. A
+         * rejection once the controller's signal has aborted is our own teardown rather than something to report. The stop says its own failure and never rejects, so it
+         * costs this controller alone and the report still settles.
+         */
+        if(!controller.signal.aborted) {
+
+          controller.log.error("Unable to finish starting the UniFi Access controller: %s. Stopping it until Homebridge is restarted. " +
+            "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.", formatErrorMessage(error));
+
+          await controller.shutdown();
+        }
 
         return { controller, outcome: "unavailable" };
       }));
