@@ -47,6 +47,11 @@ export class AccessEvents extends EventEmitter {
 
     super();
 
+    // EventEmitter warns once a single event accumulates more listeners than its default limit, a heuristic meant to catch leaks. Every device this controller
+    // adopts registers on the same event names, so a name's listener count grows with the devices it serves, and leak prevention is handled structurally: each
+    // device removes its own listeners at cleanup and dispose drops every one. So we lift the cap rather than warn about a count we already manage by construction.
+    this.setMaxListeners(0);
+
     this.controller = controller;
     this.mqttPublishTelemetry = controller.hasFeature("Controller.Publish.Telemetry");
     this.#subscription = null;

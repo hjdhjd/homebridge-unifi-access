@@ -3,14 +3,16 @@
  * events.test.ts: Tests for the Access event bridge.
  */
 /* eslint-disable camelcase */
-import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
+import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
+import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
 import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
 import { makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
-import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
 import type { AccessController } from "./controller.ts";
+import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "../policy.ts";
 import { format } from "node:util";
+import { settle } from "homebridge-plugin-utils/testing";
 import test from "node:test";
 
 // The controller's own MAC in the normalized form an identity carries, which is the identity every telemetry topic here opens with.
@@ -191,4 +193,46 @@ test("a delivery is emitted under its own prefix and never mirrored to telemetry
 
   // The telemetry mirror republishes the controller's notification socket, and a delivery is not one of its frames.
   assert.equal(publishes.length, 0, "the telemetry mirror must carry socket frames only");
+});
+
+test("a name every adopted device registers on takes any number of listeners with no leak warning", async () => {
+
+  const { controller } = makeController({ telemetry: false });
+  const events = new AccessEvents(controller);
+  const names = [ ACCESS_REMOTE_UNLOCK_EVENT, "access.remote_view", "access.remote_view.change",
+    ...ACCESS_WEBHOOK_EVENT_LIST.map((event) => ACCESS_WEBHOOK_EVENT_PREFIX + event) ];
+  const registered = EventEmitter.defaultMaxListeners + 1;
+  const warnings: Error[] = [];
+  const observe = (warning: Error): void => void warnings.push(warning);
+
+  process.on("warning", observe);
+
+  try {
+
+    // Every hub registers on each of these names, so one listener past the default limit on each stands for a controller serving one hub more than that limit.
+    for(const name of names) {
+
+      for(let listener = 0; listener < registered; listener++) {
+
+        events.on(name, (): void => undefined);
+      }
+    }
+
+    // The emitter states its warning on a later turn than the registration that crossed the limit, so the read waits a turn for it.
+    await settle();
+  } finally {
+
+    process.off("warning", observe);
+  }
+
+  assert.deepEqual(warnings.filter((warning) => warning.name === "MaxListenersExceededWarning").map((warning) => warning.message), [],
+    "a name's listeners past the default limit must not read as a leak");
+
+  for(const name of names) {
+
+    assert.equal(events.listenerCount(name), registered, "every listener registered on " + name + " must stand");
+  }
+
+  // A raised cap would pass the read above at this count, so the limit itself is read: zero is the emitter's own spelling of no limit.
+  assert.equal(events.getMaxListeners(), 0);
 });
