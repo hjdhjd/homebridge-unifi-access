@@ -77,7 +77,7 @@ The topics and messages that `homebridge-unifi-access` publishes are:
 
 | Topic           | Access Device Type       | Message Published
 |-----------------|--------------------------|----------------------------------
-| `availability`  | All devices, Controller  | `online` when the plugin can reach the device, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. A device is available only when this topic and the plugin-level `availability` topic both read `online`.
+| `availability`  | All devices, Controller  | `online` when the plugin can vouch for the state it reports, `offline` when it cannot. Retained, so a subscriber attaching later reads the last statement. A device is available only when this topic and the plugin-level `availability` topic both read `online`.
 
 #### Door and Lock Topics
 

@@ -9,14 +9,21 @@
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions } from "homebridge-plugin-utils";
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
-import type { AccessBootstrapConfig, AccessDoorConfig } from "unifi-access";
-import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi,
-  readerRecord, savesOn } from "./testing.helpers.ts";
-import { TestClock, TestMqttClient } from "homebridge-plugin-utils/testing";
+import type { AccessBootstrapConfig, AccessDoorConfig, OfficialApi } from "unifi-access";
+import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeClientDouble, makeControllerDouble, makePlatformDouble, makeTestAccessory,
+  makeTestApi, readerRecord, savesOn } from "./testing.helpers.ts";
+import { TestClock, TestMqttClient, TestMqttClientFactory, silentLog } from "homebridge-plugin-utils/testing";
 import type { AccessAccessory } from "./types.ts";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "./policy.ts";
+import { createStateStore } from "unifi-access";
 import test from "node:test";
+
+// A broker configuration as a controller hands it to its factory: the refused local broker, the plugin's topic prefix, and a log that says nothing.
+function brokerConfig(): { brokerUrl: string; log: ReturnType<typeof silentLog>; topicPrefix: string } {
+
+  return { brokerUrl: "mqtt://127.0.0.1:1", log: silentLog(), topicPrefix: "unifi/access" };
+}
 
 // The doors a topology document carries, read off the one floor doorsTopology builds them on.
 function doorsOf(topology: AccessBootstrapConfig): AccessDoorConfig[] {
@@ -168,6 +175,12 @@ test("makePlatformDouble with no options answers every member a suite stands its
 
   assert.equal(platform.signal.aborted, false, "the plugin's lifetime is live, so nothing an arm stands up is torn down before it runs");
 
+  /* The MQTT factory is homebridge-plugin-utils' test factory, so a controller naming a broker over a bare double builds a recording double and reaches no broker.
+   * The signal handed here has already aborted, so the double answered has already ended, with nothing left open behind the row.
+   */
+  assert.ok(platform.mqttFactory(brokerConfig(), { signal: AbortSignal.abort() }) instanceof TestMqttClient,
+    "a broker configuration over the default factory answers a recording double rather than a client of its own");
+
   // Asking for a webhook listener says there is none rather than answering a silent one.
   assert.throws((): void => {
 
@@ -188,6 +201,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
 
     throw new Error("This arm's listener.");
   };
+  const mqttFactory = new TestMqttClientFactory().create;
 
   aborted.abort();
 
@@ -199,7 +213,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
     localAddressFor: async (): Promise<string> => "192.0.2.9",
     log: { error: (message: string): void => void lines.push("error " + message), info: (message: string): void => void lines.push("info " + message),
       warn: (message: string): void => void lines.push("warn " + message) },
-    signal: aborted.signal, webhookListener: listener, webhookPort: 4242 });
+    mqttFactory, signal: aborted.signal, webhookListener: listener, webhookPort: 4242 });
 
   platform.log.warn("w");
 
@@ -214,6 +228,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
     "while entries with no engine beside them reach the engine the factory builds");
   assert.equal(await platform.localAddressFor("any host"), "192.0.2.9", "the local address answers what the arm resolves rather than the default one");
   assert.deepEqual(lines, ["warn w"], "a line said at warning level reaches the arm's recorder, on the channel it was said on");
+  assert.equal(platform.mqttFactory, mqttFactory, "the MQTT factory is the arm's own, so the controllers over this double build their clients through it");
   assert.equal(platform.signal, aborted.signal, "the lifetime is the arm's own signal");
   assert.equal(platform.signal.aborted, true, "torn down already, which no freshly built default could answer");
 
@@ -377,4 +392,42 @@ test("a publish through makeControllerDouble reaches the broker it was given and
 
   // A double standing up without a broker publishes into nothing rather than throwing, which is what lets every arm that never mentions MQTT build one bare.
   makeControllerDouble().mqttPublish("t", "p");
+});
+
+test("makeClientDouble answers a healthy client over the store it is handed, inert unless an arm hands it more", async () => {
+
+  const store = createStateStore({});
+  const client = makeClientDouble({ controllerInfo: null, store });
+
+  assert.equal(client.state, store, "the state is the arm's own store, so what the arm dispatches is what a login reads");
+  assert.equal(client.connection.isHealthy, true, "its connection reads healthy");
+  assert.equal(client.connection.isLost, false, "and not lost");
+  assert.deepEqual(await client.connection.observe().next(), { done: true, value: undefined }, "and yields no transition, so an observer over it stays inert");
+  assert.equal(client.controllerInfo, null, "it carries the controller document it was handed, here none");
+  assert.equal(client.controllerName, "Test Controller", "and the controller name every suite's log prefix is composed from");
+  assert.equal(client.official, null, "it offers no published API an arm did not hand over");
+  assert.equal(client.hub("device1"), undefined, "and answers no handle for an identity no arm named");
+
+  await assert.doesNotReject(client[Symbol.asyncDispose](), "its disposal is a no-op");
+
+  /* Every member an arm can hand over, each a value no default could coincide with: a connection reading lost, a controller document, a handle under one identity, a
+   * published API, and a disposal the arm counts.
+   */
+  const connection = { isHealthy: false, isLost: true };
+  const controllerInfo = { host: { mac: "112233445566" } };
+  const handle = { config: hubRecord() };
+  const official = { webhooks: {} } as unknown as OfficialApi;
+
+  let disposals = 0;
+
+  const handed = makeClientDouble({ connection, controllerInfo, handles: new Map([[ "device1", handle ]]), official, onDispose: (): void => { disposals++; }, store });
+
+  assert.equal(handed.connection, connection, "a connection the arm hands over is the one the client answers with");
+  assert.equal(handed.controllerInfo, controllerInfo, "as is its controller document");
+  assert.equal(handed.hub("device1"), handle, "and the handle it named, under the identity it named it by");
+  assert.equal(handed.official, official, "and the published API");
+
+  await handed[Symbol.asyncDispose]();
+
+  assert.equal(disposals, 1, "and a disposal reaches the arm's own count, once");
 });

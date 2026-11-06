@@ -2,8 +2,8 @@
  *
  * testing.helpers.ts: The fixture builders more than one suite reads - the Homebridge runtime and the builder of every Homebridge API double, the accessories
  * built on that runtime and the readers of what HAP recorded on them, the line a name watch logs as it restores a name, the topology documents, the configuration
- * rows, a UA Gate's port bindings, the managed device records, the platform and controller doubles every suite stands its devices up over, and the cast that reads a
- * real platform's plumbing.
+ * rows, a UA Gate's port bindings, the managed device records, the platform and controller doubles every suite stands its devices up over, the cast that reads a
+ * real platform's plumbing, and the client double a real controller logs in over.
  *
  * Every accessory, service and characteristic a suite touches is the real thing. This file loads the Homebridge runtime once, through homebridge-plugin-utils'
  * Homebridge double, and makeTestApi builds every API double a suite uses over it, so an accessory is Homebridge's own PlatformAccessory over the hap-nodejs copy
@@ -28,14 +28,14 @@
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, CharacteristicValue, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "./types.ts";
-import type { AccessBootstrapConfig, AccessCapabilities, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket,
-  AccessStateDevice } from "unifi-access";
+import type { AccessBootstrapConfig, AccessCapabilities, AccessClient, AccessDeviceEntryConfig, AccessDoorStateEntry, AccessEventPacket, AccessStateDevice,
+  OfficialApi, createStateStore } from "unifi-access";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
 import { AccessoryPersistence, ChangeReason, FeatureOptions } from "homebridge-plugin-utils";
-import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable } from "homebridge-plugin-utils";
-import { TestClock, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
+import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable, createMqttClient } from "homebridge-plugin-utils";
+import { TestClock, TestMqttClientFactory, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
@@ -326,8 +326,8 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
  * reads of its platform, so a member the plugin starts reading enters here by the same grep, and a double missing a listed member is a compile error in this one
  * place rather than a silent fallback at every site that stands one up.
  */
-type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "persistence" |
-  "registerAccessory" | "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
+type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "mqttFactory" |
+  "persistence" | "registerAccessory" | "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
 
 // What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
 export interface PlatformDoubleOptions {
@@ -342,6 +342,8 @@ export interface PlatformDoubleOptions {
   featureOptions?: FeatureOptions;
   localAddressFor?: (host: string) => Promise<string>;
   log?: Pick<Logging, "error" | "info" | "warn">;
+  // The factory a real controller over the double builds its MQTT client through. An arm handing none gets a fresh TestMqttClientFactory's, so no suite reaches a broker.
+  mqttFactory?: typeof createMqttClient;
   signal?: AbortSignal;
   webhookListener?: () => HttpListener;
   webhookPort?: number;
@@ -377,6 +379,7 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
     featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, options.entries ?? []),
     localAddressFor: options.localAddressFor ?? (async (): Promise<string> => "10.0.0.7"),
     log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
+    mqttFactory: options.mqttFactory ?? new TestMqttClientFactory().create,
     persistence,
     registerAccessory: (accessory: AccessAccessory): void => {
 
@@ -545,4 +548,36 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
   };
 
   return surface as unknown as AccessController;
+}
+
+// The client double.
+
+/* The client double a controller is stood up over: the members the controller reads on a connected client, and the ones its login path touches - the event
+ * bridge's subscription, the controller's name, the published API where an arm supplies one, and the disposal a disabled controller performs. What varies
+ * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the removal gate
+ * over the caller's own store.
+ */
+export function makeClientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; handles?: Map<string, unknown>;
+  official?: OfficialApi | null; onDispose?: () => void; store: ReturnType<typeof createStateStore>; }): AccessClient {
+
+  return {
+
+    accessPoint: (): undefined => undefined,
+    // A connection that reads healthy and yields nothing unless an arm supplies one it drives, which is what keeps every other arm's observer inert.
+    connection: options.connection ?? { isHealthy: true, isLost: false, observe: async function *(): AsyncGenerator {
+
+      // Nothing transitions in these arms.
+    } },
+    controllerInfo: options.controllerInfo,
+    controllerName: "Test Controller",
+    device: (): undefined => undefined,
+    /* The handles an arm named, by the record identity each one answers for. An arm naming none answers no handle at all, which is what keeps every other arm's
+     * adoption stopping short of a constructed device - the state they are about is the accessory list rather than what hangs off it.
+     */
+    hub: (id: string): unknown => options.handles?.get(id),
+    official: options.official ?? null,
+    on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }),
+    state: options.store,
+    [Symbol.asyncDispose]: async (): Promise<void> => options.onDispose?.()
+  } as unknown as AccessClient;
 }

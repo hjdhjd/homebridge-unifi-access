@@ -4,8 +4,8 @@
  */
 import { ACCESS_DEVICE_REMOVAL_DELAY_MESSAGE, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { API, DynamicPlatformPlugin, Logging } from "homebridge";
-import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, Perms, TimerRegistry, addressListingForm, debugGatedLog, formatErrorMessage, guardedDispatch,
-  localAddressFor, notResponding, systemClock } from "homebridge-plugin-utils";
+import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, Perms, TimerRegistry, addressListingForm, createMqttClient, debugGatedLog, formatErrorMessage,
+  guardedDispatch, localAddressFor, notResponding, systemClock } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
@@ -36,6 +36,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   private readonly controllers: AccessController[];
   public readonly featureOptions: FeatureOptions;
   public readonly log: Logging;
+  public readonly mqttFactory: typeof createMqttClient;
   public readonly persistence: AccessoryPersistence;
   /* The accessories this plugin carries, restored by Homebridge or minted by a controller. The restore path and the registration methods below are its only
    * writers, and everyone else reads it through the view beside them.
@@ -63,7 +64,8 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   // The port that listener will bind.
   readonly #webhookPort: number;
 
-  constructor(log: Logging, config: AccessPlatformConfig | undefined, api: API) {
+  // Homebridge constructs the platform with three arguments. The fourth is a suite's, handing over the factory every controller builds its MQTT client through.
+  constructor(log: Logging, config: AccessPlatformConfig | undefined, api: API, { mqttFactory = createMqttClient }: { mqttFactory?: typeof createMqttClient } = {}) {
 
     this.#accessories = [];
     this.api = api;
@@ -71,6 +73,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.controllers = [];
     this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options ?? []);
     this.log = log;
+    this.mqttFactory = mqttFactory;
     this.#debugLog = debugGatedLog(log, () => this.featureOptions.test("Log.Debug"));
     this.#shutdownController = new AbortController();
     this.#shutdownRun = null;

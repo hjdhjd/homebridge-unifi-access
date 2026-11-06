@@ -11,9 +11,8 @@ import { AccessApiError, AccessClient, isAccessWebhookDelivery, isPrivilegeRefus
 import type { AccessControllerConfig, AccessLogging, AccessOfficialWebhookEndpoint, AccessState, AccessStateDevice, ConnectIdentity, ConnectOptions,
   OfficialApi } from "unifi-access";
 import type { HomebridgePluginLogging, HttpListenerRequest, MqttClient, MqttPublishInit, Nullable } from "homebridge-plugin-utils";
-import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, createMqttClient, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError,
-  loopFaultReporter, membershipDelta, mqttConnectionSettings, mqttTopic, onAbort, parseJson, prefixedLog, repeatDemotedLog, resolveNameOverride, retry,
-  superviseLoop } from "homebridge-plugin-utils";
+import { MQTT_AVAILABILITY_OFFLINE, MQTT_AVAILABILITY_ONLINE, debugGatedLog, formatErrorMessage, guardedDispatch, isHbpuAbortError, loopFaultReporter, membershipDelta,
+  mqttConnectionSettings, mqttTopic, onAbort, parseJson, prefixedLog, repeatDemotedLog, resolveNameOverride, retry, superviseLoop } from "homebridge-plugin-utils";
 import { accessoryOwnership, canTransition, composeConnectIdentity, controllerIdentity, createConnectRetryPolicy, createMembershipIdsSelector, deviceDisplayName,
   deviceModel, deviceName, deviceRecord, deviceSerial, isManagedRecord, isSupportedAccessDevice, isUnsupportedSetup, orphanedWebhookRegistrations, projectedRecords,
   recordByMac, serialForm, webhookDeliveryFresh, webhookEndpointPath, webhookEndpointUrl, webhookRegistrationPlan, webhookRegistrations,
@@ -340,7 +339,7 @@ export class AccessController {
      */
     const mqttSettings = mqttConnectionSettings({ config: this.config, controller: this.id, featureOptions: this.platform.featureOptions });
 
-    this.mqtt ??= mqttSettings && createMqttClient({ ...mqttSettings, log: this.log }, { signal: this.signal });
+    this.mqtt = mqttSettings && this.platform.mqttFactory({ ...mqttSettings, log: this.log }, { signal: this.signal });
 
     this.#configureAvailability();
 

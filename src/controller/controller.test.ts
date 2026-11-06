@@ -4,19 +4,20 @@
  */
 /* eslint-disable camelcase */
 import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HAPStatus, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
+import { ACCESS_MQTT_TOPIC, ACCESS_REMOVAL_STABILITY_WINDOW, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
+  PLUGIN_NAME } from "../settings.ts";
 import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
   AccessNetworkError, AccessRequestError, AccessTimeoutError, createStateStore, selectAccessPoints } from "unifi-access";
-import { ACCESS_REMOVAL_STABILITY_WINDOW, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
-  PLUGIN_NAME } from "../settings.ts";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessControllerConfig, AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions,
   OfficialApi } from "unifi-access";
-import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, makePlatformDouble, makeTestAccessory, makeTestApi, platformInternals,
-  readerRecord, savesOn } from "../testing.helpers.ts";
+import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, makeClientDouble, makePlatformDouble, makeTestAccessory, makeTestApi,
+  platformInternals, readerRecord, savesOn } from "../testing.helpers.ts";
 import { EventEmitter, on } from "node:events";
-import type { HttpListener, MqttClient } from "homebridge-plugin-utils";
-import { TestClock, TestHttpListener, TestMqttClient, drainClock, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
+import { TestClock, TestHttpListener, TestMqttClientFactory, drainClock, expectAt, hapStatus, settle, settlePastMqttEnd, triggerGet,
+  triggerSet } from "homebridge-plugin-utils/testing";
+import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
@@ -26,7 +27,7 @@ import type { AccessDevice } from "../devices/device.ts";
 import { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
 import { Buffer } from "node:buffer";
-import type { TestMqttPublish } from "homebridge-plugin-utils/testing";
+import type { HttpListener } from "homebridge-plugin-utils";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { signWebhookDelivery } from "unifi-access/testing";
@@ -168,36 +169,6 @@ function faultingHandle(record: Record<string, unknown>, fault: HandleFault): un
   };
 }
 
-/* The client double a controller is stood up over: the members the controller reads on a connected client, and the ones its login path touches - the event
- * bridge's subscription, the controller's name, the published API where an arm supplies one, and the disposal a disabled controller performs. What varies
- * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the removal gate
- * over the caller's own store.
- */
-function clientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; handles?: Map<string, unknown>; official?: OfficialApi | null;
-  onDispose?: () => void; store: ReturnType<typeof createStateStore>; }): AccessClient {
-
-  return {
-
-    accessPoint: (): undefined => undefined,
-    // A connection that reads healthy and yields nothing unless an arm supplies one it drives, which is what keeps every other arm's observer inert.
-    connection: options.connection ?? { isHealthy: true, isLost: false, observe: async function *(): AsyncGenerator {
-
-      // Nothing transitions in these arms.
-    } },
-    controllerInfo: options.controllerInfo,
-    controllerName: "Test Controller",
-    device: (): undefined => undefined,
-    /* The handles an arm named, by the record identity each one answers for. An arm naming none answers no handle at all, which is what keeps every other arm's
-     * adoption stopping short of a constructed device - the state they are about is the accessory list rather than what hangs off it.
-     */
-    hub: (id: string): unknown => options.handles?.get(id),
-    official: options.official ?? null,
-    on: (): Disposable => ({ [Symbol.dispose]: (): void => undefined }),
-    state: options.store,
-    [Symbol.asyncDispose]: async (): Promise<void> => options.onDispose?.()
-  } as unknown as AccessClient;
-}
-
 // What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, the lines it said, and the
 // plugin lifetime its own terminal signal composes from.
 interface ControllerHarness {
@@ -209,6 +180,10 @@ interface ControllerHarness {
   // Every line said at error level, the controller's own and its devices' alike, rendered as the user reads it.
   errors: string[];
   logged: string[];
+  // The MQTT client the controller's login built through the platform's factory, which every reading of the double is taken from.
+  mqtt: () => TestMqttClient;
+  // Every call the controller made to the platform's MQTT factory, with the double each one answered.
+  mqttCalls: TestMqttClientFactory["createCalls"];
   // The UUIDs each registration Homebridge accepted named, in the order it accepted them.
   readonly registered: string[];
   // Hand cached accessories to the accessory list through Homebridge's own restore loop, which bridges each, so a later exit or save reaches one Homebridge holds.
@@ -218,26 +193,35 @@ interface ControllerHarness {
   shutdown: AbortController;
   // The UUIDs each unregister Homebridge accepted named, in the order it accepted them.
   readonly unregistered: string[];
+  // Every line said at warning level, rendered as the user reads it, which is also the channel the controller's debug lines reach with Log.Debug on.
+  warnings: string[];
 }
 
 /* Stand up a real AccessController over a platform double and a stubbed client, so an arm reads what the controller actually did to HomeKit rather than what a
  * mock decided it would do. The accessory list, the registration counters, and the state store all belong to the caller.
  *
- * @param options - The controller's configuration, the controller document its client answers with, and the state store behind that client.
+ * The platform's MQTT factory is homebridge-plugin-utils' test factory, so an arm reads every call the controller made to it. An arm asking for MQTT names the
+ * refused local broker on the controller's configuration, as a user names theirs, and the factory answers a double standing as the arm asked. The MQTT option
+ * leaves out the factory's clock, so each double's end grace runs on the system clock and an arm advancing the harness's clock never expires an end it holds.
+ *
+ * @param options - The controller's configuration, the controller document its client answers with, the MQTT an arm asks for with how its double stands, and the
+ *                  state store behind that client.
  */
 function makeController(options: { config?: Partial<AccessControllerOptions>; connection?: unknown;
   controllerInfo?: { host: { device_type?: string; firmware_version?: string; mac: string; shortname?: string }; version?: string } | null;
-  handles?: Map<string, unknown>; options?: string[]; store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
+  handles?: Map<string, unknown>; mqtt?: { connected?: boolean }; options?: string[]; store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
 
   const accessories: AccessAccessory[] = [];
   // The Homebridge API double the platform hands the controller: the accessory class an adoption builds from, and the calls Homebridge accepted, read below.
   const api = makeTestApi();
   const clock = new TestClock();
   const errors: string[] = [];
+  const factory = new TestMqttClientFactory(options.mqtt);
   // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
   const logged: string[] = [];
   // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from.
   const shutdown = new AbortController();
+  const warnings: string[] = [];
 
   // The UUIDs the accepted calls of one kind named, in the order Homebridge accepted them.
   const targets = (kind: "register" | "unregister"): string[] => api.calls.flatMap((call) => (call.kind === kind) ? call.accessories.map((target) => target.UUID) : []);
@@ -248,18 +232,19 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
    */
   const platform = makePlatformDouble({ accessories, api, clock, entries: options.options ?? [],
     log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)), warn: (): void => undefined },
-    signal: shutdown.signal });
+      info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
+      warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
+    mqttFactory: factory.create, signal: shutdown.signal });
 
   // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
-  const client = clientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
+  const client = makeClientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
     store: options.store ?? createStateStore({}) });
   /* The token in the default identity is what makes every arm's teardown real rather than decorative: a controller the identity gate turns back never registers
    * its bridge from the plugin's lifetime to its own, so aborting the plugin would leave that controller's terminal signal standing and prove nothing about what
    * the abort reaches. An arm that is about some other identity states one, and its own configuration wins.
    */
-  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" }, ...options.config },
-    async (): Promise<AccessClient> => client);
+  const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" },
+    ...((options.mqtt === undefined) ? {} : { mqttUrl: "mqtt://127.0.0.1:1" }), ...options.config }, async (): Promise<AccessClient> => client);
 
   controller.client = client;
 
@@ -270,6 +255,15 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     controller,
     errors,
     logged,
+    mqtt: (): TestMqttClient => {
+
+      const { client: mqtt } = expectAt(factory.createCalls, 0, "the controller's MQTT client");
+
+      assert.ok(mqtt, "a controller naming a broker builds its client through the platform's factory");
+
+      return mqtt;
+    },
+    mqttCalls: factory.createCalls,
     get registered(): string[] {
 
       return targets("register");
@@ -287,7 +281,8 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     get unregistered(): string[] {
 
       return targets("unregister");
-    }
+    },
+    warnings
   };
 }
 
@@ -479,7 +474,7 @@ test("a restored characteristic refuses ahead of the login, follows the hub a re
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology([reader]) });
 
-  const client = clientDouble({ connection, controllerInfo: null, handles: new Map([[ reader.unique_id, deviceHandle(reader) ]]), store });
+  const client = makeClientDouble({ connection, controllerInfo: null, handles: new Map([[ reader.unique_id, deviceHandle(reader) ]]), store });
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => client);
   const accessory = makeTestAccessory("Restored Reader", "AABBCCDDEE02");
   const on = accessory.addService(new Service.Switch("Restored PIN", AccessReservedNames.SWITCH_ACCESSMETHOD_PIN)).getCharacteristic(Characteristic.On);
@@ -1581,7 +1576,7 @@ test("login reports the identity outcome its exit took", async (t) => {
 
     connects++;
 
-    return clientDouble({ controllerInfo: null, store: createStateStore({}) });
+    return makeClientDouble({ controllerInfo: null, store: createStateStore({}) });
   });
 
   t.after(() => shutdown.abort());
@@ -2345,7 +2340,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
 
   const store = createStateStore({});
 
-  const client = clientDouble({ controllerInfo: { host: { firmware_version: "4.0.0", mac: CONTROLLER_MAC }, version: "2.0.0" },
+  const client = makeClientDouble({ controllerInfo: { host: { firmware_version: "4.0.0", mac: CONTROLLER_MAC }, version: "2.0.0" },
     official: (options.official === false) ? null : official, onDispose: (): void => void calls.push("dispose"), store });
 
   const entries = options.options ?? [];
@@ -2982,15 +2977,46 @@ test("an authentic delivery this plugin does not model is answered without being
   assert.equal(harness.deliveries.length, 0);
 });
 
-test("the publish chokepoint forwards the caller's own per-publish options to the client", async () => {
+// A configuration naming no broker resolves to MQTT off, so the factory is never asked and nothing stands for the devices to publish through.
+test("a controller logged in with no broker asks its platform's factory for nothing and holds no client", async (t) => {
 
   const harness = makeController();
-  const debugs: string[] = [];
-  const mqtt = new TestMqttClient({ log: { debug: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)),
-    error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined } });
 
-  // The client is injected as the double, cast at the injection site exactly as the double documents.
-  harness.controller.mqtt = mqtt as unknown as MqttClient;
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  assert.deepEqual(harness.mqttCalls, [], "the factory was never asked");
+  assert.equal(harness.controller.mqtt, null, "and the controller holds no client");
+});
+
+// The client prefixes every topic, writes on the log it is handed and ends with the signal it is handed, so the factory is handed each of the controller's own.
+test("a controller logged in with a broker builds one client through its platform's factory, on its own log and signal", async (t) => {
+
+  const harness = makeController({ mqtt: {} });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const { config, init } = expectAt(harness.mqttCalls, 0, "the controller's MQTT client");
+
+  assert.equal(harness.mqttCalls.length, 1, "login builds one client");
+  assert.deepEqual(config, { brokerUrl: "mqtt://127.0.0.1:1", log: harness.controller.log, topicPrefix: ACCESS_MQTT_TOPIC },
+    "the resolved settings, with the controller's own log");
+  assert.equal(init?.signal, harness.controller.signal, "on the controller's own signal");
+  assert.equal(harness.controller.mqtt, harness.mqtt(), "and the controller holds the client the factory answered");
+});
+
+test("the publish chokepoint forwards the caller's own per-publish options to the client", async (t) => {
+
+  const harness = makeController({ mqtt: {}, options: ["Enable.Log.Debug"] });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const mqtt = harness.mqtt();
 
   harness.controller.mqttPublish("AABBCCDDEEFF/lock", "true");
   harness.controller.mqttPublish("AABBCCDDEEFF/lock", "false", { signal: AbortSignal.abort() });
@@ -2999,7 +3025,9 @@ test("the publish chokepoint forwards the caller's own per-publish options to th
 
   // A publish with no options lands; one carrying an already-aborted signal is refused on that signal, which proves the options reached the client.
   assert.deepEqual(mqtt.published, [{ payload: "true", retain: false, topic: "AABBCCDDEEFF/lock" }]);
-  assert.deepEqual(debugs, ["MQTT publish aborted: AABBCCDDEEFF/lock."]);
+
+  // The client logs on the controller's own log, so its refusal is a debug line under the controller's prefix, on the channel Log.Debug sends debug lines to.
+  assert.deepEqual(harness.warnings, ["Test Controller: MQTT publish aborted: AABBCCDDEEFF/lock."]);
 });
 
 /* The library's connection-lost sentence, split at the period a composed reason attaches in place of. Both halves are spelled out rather than derived from one
@@ -3139,16 +3167,19 @@ function restoredHub(): AccessAccessory {
   return accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, id: "AABBCCDDEE01", mac: "AABBCCDDEE01" }, "Restored Hub");
 }
 
-/* A real controller with the MQTT double in place of the client its login would build, over a hub whose record reads every flag available, or over no record at all for
- * an arm about an accessory no device answers for. The double reads connected from construction, so its login has no session edge to cross and an arm drives each
- * session itself.
+/* A real controller naming the refused local broker, over a hub whose record reads every flag available, or over no record at all for an arm about an accessory no
+ * device answers for. Its login builds its MQTT client through the platform's factory, which answers a recording double reading connected unless the arm asks for
+ * none, so its login has no session edge to cross and an arm drives each session itself. login() answers the double the factory built, so a login that built none
+ * fails where the arm logs in.
  *
- * @param options - What the arm varies: the connection it moves, the controller document, the user's settings, and whether the hub's record stands.
+ * @param options - What the arm varies: whether the double holds a broker session, the connection it moves, the controller document, the user's settings, and
+ *                  whether the hub's record stands.
  *
- * @returns The controller's harness, its client, its store, and the way to read and to establish a session.
+ * @returns The controller's harness, its login, its store, and the way to read and to establish a session.
  */
-function availabilityController(options: { connection?: unknown; controllerInfo?: { host: { mac: string } } | null; options?: string[]; recordless?: boolean } = {}):
-{ harness: ControllerHarness; mqtt: TestMqttClient; newSession: () => void; statements: () => TestMqttPublish[]; store: ReturnType<typeof createStateStore> } {
+function availabilityController(options: { connected?: boolean; connection?: unknown; controllerInfo?: { host: { mac: string } } | null; options?: string[];
+  recordless?: boolean; } = {}): { harness: ControllerHarness; login: () => Promise<TestMqttClient>; newSession: () => void; statements: () => TestMqttPublish[];
+  store: ReturnType<typeof createStateStore>; } {
 
   const record = hubRecord({ alias: "", is_adopted: true, is_connected: true, is_online: true, name: "Plain Hub", unique_id: "plain" });
   const store = createStateStore({});
@@ -3156,23 +3187,28 @@ function availabilityController(options: { connection?: unknown; controllerInfo?
   store.applyRefreshDocuments({ controller: (options.controllerInfo === null) ? null : LONG_UP_CONTROLLER,
     topology: buildingTopology(options.recordless ? [] : [record]) });
 
-  const harness = makeController({ connection: options.connection, controllerInfo: (options.controllerInfo === undefined) ? { host: { mac: CONTROLLER_MAC } } :
-    options.controllerInfo, handles: new Map([[ "plain", deviceHandle(record) ]]), options: options.options, store });
-  const mqtt = new TestMqttClient();
-
-  harness.controller.mqtt = mqtt as unknown as MqttClient;
+  const harness = makeController({ connection: options.connection,
+    controllerInfo: (options.controllerInfo === undefined) ? { host: { mac: CONTROLLER_MAC } } : options.controllerInfo,
+    handles: new Map([[ "plain", deviceHandle(record) ]]), mqtt: { connected: options.connected }, options: options.options, store });
 
   return {
 
     harness,
-    mqtt,
+    login: async (): Promise<TestMqttClient> => {
+
+      await harness.controller.login();
+
+      return harness.mqtt();
+    },
     newSession: (): void => {
 
-      mqtt.connected = false;
-      mqtt.connected = true;
+      const double = harness.mqtt();
+
+      double.connected = false;
+      double.connected = true;
     },
     // Every availability statement since the last reading, in the order the client took them, so each arm reads only what its own step caused.
-    statements: (): TestMqttPublish[] => mqtt.published.splice(0).filter(({ topic }) => topic.endsWith(PLUGIN_TOPIC)),
+    statements: (): TestMqttPublish[] => harness.mqtt().published.splice(0).filter(({ topic }) => topic.endsWith(PLUGIN_TOPIC)),
     store
   };
 }
@@ -3180,11 +3216,11 @@ function availabilityController(options: { connection?: unknown; controllerInfo?
 test("a session states the plugin's availability, the controller's, then the device's, and a moved verdict states the controller's then the device's", async (t) => {
 
   const { connection, drive } = connectionDouble();
-  const { harness, mqtt, newSession, statements } = availabilityController({ connection });
+  const { harness, login, newSession, statements } = availabilityController({ connection });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  const mqtt = await login();
 
   assert.deepEqual(statements(), [stated(HUB_TOPIC, "online")], "an adoption states the device's own, and the login crossed no session to state the other");
 
@@ -3223,11 +3259,11 @@ test("a session states the plugin's availability, the controller's, then the dev
 test("a clean end states its offline whatever was stated last, because the broker has to hold it", async (t) => {
 
   const monitor = connectionDouble();
-  const { harness, mqtt, statements } = availabilityController({ connection: monitor.connection });
+  const { harness, login, statements } = availabilityController({ connection: monitor.connection });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  const mqtt = await login();
 
   monitor.connection.isLost = true;
   await monitor.drive("degraded", "lost");
@@ -3240,11 +3276,11 @@ test("a clean end states its offline whatever was stated last, because the broke
 
 test("a controller reached with an API token alone states its availability under its address identity", async (t) => {
 
-  const { harness, newSession, statements } = availabilityController({ controllerInfo: null });
+  const { harness, login, newSession, statements } = availabilityController({ controllerInfo: null });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   statements();
   newSession();
 
@@ -3258,13 +3294,14 @@ for(const { label, recordless } of [ { label: "its adoption gate, its record sta
 
   test("a disabled device's removal by " + label + " publishes and subscribes nothing", async (t) => {
 
-    const { harness, mqtt, newSession, statements } = availabilityController({ options: ["Disable.Device.AABBCCDDEE01"], recordless });
+    const { harness, login, newSession, statements } = availabilityController({ options: ["Disable.Device.AABBCCDDEE01"], recordless });
 
     t.after(() => harness.shutdown.abort());
 
     harness.restore(restoredHub());
 
-    await harness.controller.login();
+    const mqtt = await login();
+
     harness.clock.advance(0);
 
     harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
@@ -3281,11 +3318,11 @@ for(const { label, recordless } of [ { label: "its adoption gate, its record sta
 
 test("a device removed while running states one offline, and no later session repeats it", async (t) => {
 
-  const { harness, newSession, statements, store } = availabilityController({ options: [DELAY_OFF] });
+  const { harness, login, newSession, statements, store } = availabilityController({ options: [DELAY_OFF] });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   statements();
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
@@ -3301,13 +3338,13 @@ test("a device removed while running states one offline, and no later session re
 
 test("an orphan's retirement states one retained offline, once its delay is served, and no later session repeats it", async (t) => {
 
-  const { harness, newSession, statements } = availabilityController({ recordless: true });
+  const { harness, login, newSession, statements } = availabilityController({ recordless: true });
 
   t.after(() => harness.shutdown.abort());
 
   harness.restore(restoredHub());
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(0);
 
   assert.deepEqual(statements(), [], "serving the delay states nothing");
@@ -3324,13 +3361,13 @@ test("an orphan's retirement states one retained offline, once its delay is serv
 
 test("an accessory recording no identity retires with a broker client and states nothing, because there is no topic to state it on", async (t) => {
 
-  const { harness, statements } = availabilityController({ options: [DELAY_OFF], recordless: true });
+  const { harness, login, statements } = availabilityController({ options: [DELAY_OFF], recordless: true });
 
   t.after(() => harness.shutdown.abort());
 
   harness.restore(accessory("AABBCCDDEE01", { controller: CONTROLLER_MAC, mac: "AABBCCDDEE01" }, "Restored Hub"));
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(0);
 
   assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the accessory is retired at the gate's sweep");
@@ -3339,14 +3376,14 @@ test("an accessory recording no identity retires with a broker client and states
 
 test("an orphan retired with no broker session states nothing, then or on the next session, which is the ruled limit of a statement with no session", async (t) => {
 
-  const { harness, mqtt, statements } = availabilityController({ options: [DELAY_OFF], recordless: true });
+  const { harness, login, statements } = availabilityController({ connected: false, options: [DELAY_OFF], recordless: true });
 
   t.after(() => harness.shutdown.abort());
 
   harness.restore(restoredHub());
-  mqtt.connected = false;
 
-  await harness.controller.login();
+  const mqtt = await login();
+
   harness.clock.advance(0);
 
   assert.deepEqual(harness.unregistered, [accessoryUuid("AABBCCDDEE01")], "the orphan is retired at the gate's sweep");
@@ -3486,11 +3523,11 @@ for(const { edges, isLost, label } of [
   test(label + " drops an armed removal, which returns through the sweep a full window after the recovery", async (t) => {
 
     const monitor = connectionDouble();
-    const { harness, store } = availabilityController({ connection: monitor.connection });
+    const { harness, login, store } = availabilityController({ connection: monitor.connection });
 
     t.after(() => harness.shutdown.abort());
 
-    await harness.controller.login();
+    await login();
 
     // The adopted hub's own save window shares the timeline, so it is spent first and the removal timers below are what is left on it.
     harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
@@ -3545,11 +3582,11 @@ for(const { edges, isLost, label } of [
 test("a recovery ending throttled starts its window only when the throttle ends", async (t) => {
 
   const monitor = connectionDouble();
-  const { harness } = availabilityController({ connection: monitor.connection });
+  const { harness, login } = availabilityController({ connection: monitor.connection });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
 
   monitor.connection.isHealthy = false;
@@ -3568,12 +3605,12 @@ test("a recovery ending throttled starts its window only when the throttle ends"
 test("a device added while the gate is closed is adopted at once", async (t) => {
 
   const monitor = connectionDouble();
-  const { harness, store } = availabilityController({ connection: monitor.connection, recordless: true });
+  const { harness, login, store } = availabilityController({ connection: monitor.connection, recordless: true });
   const late = plainHubRecord();
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
 
   monitor.connection.isHealthy = false;
   await monitor.drive("healthy", "degraded");
@@ -3589,12 +3626,12 @@ test("a device added while the gate is closed is adopted at once", async (t) => 
 // A configured device that returns sits in neither half of the delta, so nothing cancels its timer and the fire's own re-read of membership is all that spares it.
 test("a configured device that returns during its delay stays configured, and the fire no-ops", async (t) => {
 
-  const { harness, store } = availabilityController({});
+  const { harness, login, store } = availabilityController({});
   const record = store.snapshot().devices.get("plain");
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(0);
 
   store.applyRefreshDocuments({ controller: null, topology: buildingTopology([]) });
@@ -3617,11 +3654,11 @@ test("a configured device that returns during its delay stays configured, and th
 test("a departure landing while the connection is recovering is held silently, and with the delay off leaves on the sweep itself", async (t) => {
 
   const monitor = connectionDouble();
-  const { harness, store } = availabilityController({ connection: monitor.connection, options: [DELAY_OFF] });
+  const { harness, login, store } = availabilityController({ connection: monitor.connection, options: [DELAY_OFF] });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(0);
 
   monitor.connection.isHealthy = false;
@@ -3694,11 +3731,11 @@ test("a throw out of the orphan pass is said once and goes no further", async (t
 test("a recovery sweep whose timer fires a millisecond short still re-derives the departure", async (t) => {
 
   const monitor = connectionDouble();
-  const { harness, store } = availabilityController({ connection: monitor.connection });
+  const { harness, login, store } = availabilityController({ connection: monitor.connection });
 
   t.after(() => harness.shutdown.abort());
 
-  await harness.controller.login();
+  await login();
   harness.clock.advance(ACCESSORY_SAVE_WINDOW_MS);
 
   monitor.connection.isHealthy = false;
@@ -3758,17 +3795,18 @@ for(const { label, stopFirst } of [ { label: "a stop and then the plugin's shutd
 }
 
 /* A controller up past the window has its sweep armed and due the moment it reaches running, on a macrotask the held end gives it. Only the reset ahead of the end keeps
- * it out, because the transition's own push waits behind the same hold. The word held mid-flight is what holds the end, and the advances land inside that hold.
+ * it out, because the transition's own push waits behind the same hold. The word held mid-flight is what holds the end, and the advances land inside that hold. The
+ * reads inside the hold come once the turns an end nothing holds takes to finish have passed, so they read what the hold keeps back.
  */
 test("a long-up controller stopped with an orphan, its end held and the clock advanced, fires no sweep and removes nothing", async (t) => {
 
-  const { harness, mqtt } = availabilityController({ recordless: true });
+  const { harness, login } = availabilityController({ recordless: true });
 
   t.after(() => harness.shutdown.abort());
 
   harness.restore(restoredHub());
 
-  await harness.controller.login();
+  const mqtt = await login();
 
   assert.equal(harness.controller.removals.removalStable, true, "the controller is past the window");
   assert.equal(harness.clock.nextDeadline, 0, "so its sweep is armed and due");
@@ -3782,7 +3820,7 @@ test("a long-up controller stopped with an orphan, its end held and the clock ad
   harness.clock.advance(0);
   harness.clock.advance(DEVICE_REMOVAL_DELAY_MS);
 
-  await settle();
+  await settlePastMqttEnd();
 
   assert.equal(harness.controller.signal.aborted, false, "the end still holds");
   assert.equal(delayLines(harness), 0, "the sweep did not run inside the hold");
@@ -3797,6 +3835,29 @@ test("a long-up controller stopped with an orphan, its end held and the clock ad
   assert.equal(harness.controller.signal.aborted, true, "the stop finished");
   assert.equal(delayLines(harness), 0, "with no sweep behind it");
   assert.deepEqual(harness.unregistered, [], "and the orphan still stays");
+});
+
+/* The control for the held stop above: with nothing holding it, the end a stop begins has finished once settlePastMqttEnd resolves, so the held row's reads measure
+ * its hold. The settle starts ahead of the stop, in the same turn, so its turns count from the moment the stop is asked for: a sequence that waited a turn before
+ * beginning the end would leave it unfinished when the settle resolves, a delay that a settle started after the stop would absorb.
+ */
+test("a stop with nothing holding its MQTT end finishes the end within the turns an unheld end takes", async (t) => {
+
+  const harness = makeController({ mqtt: {} });
+
+  t.after(() => harness.shutdown.abort());
+
+  await harness.controller.login();
+
+  const mqtt = harness.mqtt();
+  const past = settlePastMqttEnd();
+  const stopping = harness.controller.shutdown();
+
+  await past;
+
+  assert.equal(mqtt.signal.aborted, true, "the client's end has finished");
+
+  await stopping;
 });
 
 // A disposed client's connection goes on reading healthy, so the signal is the one fact left telling an accessory its controller is gone. No device exists on the stop's
