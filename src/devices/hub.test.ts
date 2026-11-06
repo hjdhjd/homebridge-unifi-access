@@ -3802,6 +3802,47 @@ test("a gate whose side door preference is off still trusts a good pair, and its
   assert.deepEqual(resolutionLines(gate), [resolutionOfCapture("none")]);
 });
 
+test("a gate whose port bindings settle its roles names each door once at adoption, at info level, and a guessed gate names none", () => {
+
+  const adoption = "The gate's main door is Pedestrian Gate and its side door is Vehicle Gate.";
+
+  // Every line in the adoption's form, which a later pass's "is now" line shares an opening with and is told apart from by the word that follows.
+  const adoptionLines = (harness: HubHarness): string[] => harness.lines.filter(line => line.startsWith(LOG_PREFIX + "The gate's main door is ") &&
+    !line.startsWith(LOG_PREFIX + "The gate's main door is now "));
+  const gate = makeGate({ doors: CAPTURE_DOORS, keepAdoptionLines: true, options: ["Enable.Log.Debug"],
+    record: testHub({ device_type: "UGT", extensions: CAPTURE_PORTS }) });
+
+  // Each door is named as the topology carries it, while the bindings evidence stays beside it at debug level, which is also where a demoted line would land.
+  assert.equal(lineCount(gate, adoption), 1, "a trusted adoption names each door once");
+  assert.deepEqual(gate.debugs.filter(line => line.includes("The gate's main door is")), [], "at info level alone");
+  assert.deepEqual(resolutionLines(gate), [resolutionOfCapture(SIDE_DOOR)], "beside the bindings evidence");
+
+  // A rebind moving both roles is a pass past adoption, so it says each move through its own line and no adoption line, for the doors it left or those it took.
+  addReboundDoors(gate);
+  restateRecord(gate, { extensions: [ mainPort(NEW_MAIN), sidePort(NEW_SIDE) ] });
+
+  assert.equal(lineCount(gate, "The gate's main door is now New Main Gate."), 1, "the rebind moves the main role");
+  assert.equal(lineCount(gate, "The gate's side door is now New Side Gate."), 1, "and the side role");
+  assert.deepEqual(adoptionLines(gate), [LOG_PREFIX + adoption], "and says no adoption line for the doors it moved to");
+
+  const mainOnly = makeGate({ doors: CAPTURE_DOORS, keepAdoptionLines: true, options: ["Disable.Hub.SideDoor"],
+    record: testHub({ device_type: "UGT", extensions: CAPTURE_PORTS }) });
+
+  assert.deepEqual(adoptionLines(mainOnly), [LOG_PREFIX + "The gate's main door is Pedestrian Gate."], "a side door out of scope leaves the main door alone to name");
+
+  // The default gate binds nothing, so its roles are a guess, and the guess's warning is what names its doors.
+  const guessed = makeGate({ keepAdoptionLines: true });
+
+  assert.equal(guessLines(guessed).length, 1, "the default gate guesses its roles");
+  assert.deepEqual(guessed.lines.filter(line => line.includes("The gate's main door is")), [], "and a guessed adoption names no door at info level");
+
+  // A single-door hub and a reader resolve no gate doors at all.
+  for(const harness of [ makeHub({ keepAdoptionLines: true }), makeHub({ keepAdoptionLines: true, record: testHub({ capabilities: ["is_reader"] }) }) ]) {
+
+    assert.deepEqual(harness.lines.filter(line => line.includes("The gate's main door is")), [], "a hub that is no gate names no gate door");
+  }
+});
+
 test("a gate whose side role stands vacant fills it from a door a later record with no relay data binds, which warns once, and from nothing else", () => {
 
   const gate = makeGate({ doors: [{ name: "Main Gate", unique_id: MAIN_DOOR }], keepAdoptionLines: true,
@@ -6355,7 +6396,7 @@ test("the side door position sensor announces its creation at adoption and its r
 
   assert.equal(lineCount(created, "Enabling the side door position sensor."), 1, "a gate discovering its side door says so once as it creates the sensor");
   assert.ok(hasContactSensor(created, AccessReservedNames.CONTACT_DPS_SIDE), "and the sensor it announced is the one it carries");
-  assert.deepEqual(created.lines.filter(line => line.includes("The gate's")), [], "the construction pass says nothing about door identities");
+  assert.deepEqual(created.lines.filter(line => line.includes("The gate's")), [], "a construction pass that guessed its doors says nothing about door identities");
 
   const retired = makeGate({ existing: [carried(Service.ContactSensor, AccessReservedNames.CONTACT_DPS_SIDE)], keepAdoptionLines: true,
     options: [listLess("Hub.Sensors", hubSensorChoices(), "SideDoorDPS")] });

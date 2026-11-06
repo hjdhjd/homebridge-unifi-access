@@ -368,11 +368,12 @@ export class AccessHub extends AccessDevice {
    * of ours belongs to the door it was opened for, and one left standing would relock whichever door now holds the role, or services standing at their last
    * reading. The registry's clear does nothing to an unarmed key, so the construction pass retires nothing.
    *
-   * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Construction announces no door: its previous enumeration is the empty
-   * seed, so every door it resolves counts as moved, and an adoption is not a transition anyone observed. A pass that moved a role, adoption included, also says
-   * what the bindings were and what they resolved to, so a field report carries its own evidence. An adoption that resolved no role says the same, because it moved
-   * nothing and would otherwise leave the gate silent until its first refused command. Roles the bindings named are said at debug level. Roles that were guessed
-   * are said as a warning, because a guessed door can be the wrong one and only the user can tell.
+   * A door identity moving mid-run is a lifecycle event, which is what earns each one a line. Adoption says no such move, because its previous enumeration is the empty
+   * seed, so every door it resolves counts as moved, and an adoption is not a transition anyone observed. An adoption whose bindings named its roles says each door once
+   * at info level instead, so a user reads which door each control drives. A pass that moved a role, adoption included, also says what the bindings were and what they
+   * resolved to, so a field report carries its own evidence. An adoption that resolved no role says the same, because it moved nothing and would otherwise leave the gate
+   * silent until its first refused command. Roles the bindings named are said at debug level. Roles that were guessed are said as a warning, because a guessed door can
+   * be the wrong one and only the user can tell.
    *
    * @param options - The pass this discovery is running as.
    *
@@ -391,6 +392,10 @@ export class AccessHub extends AccessDevice {
 
       return [];
     }
+
+    // The name the topology carries for a door, read by every line below that names one. An empty name answers as it stands and only a door the topology lacks
+    // answers undefined, so each line keeps its own fallback for that case rather than this lookup choosing one for all of them.
+    const topologyName = (locationId: string): string | undefined => doors.find(door => door.unique_id === locationId)?.name;
 
     const discovered = discoverDoorLocations({ device: this.uda, doors: doors,
       held: initialized ? { mainDoorLocationId: this.#gateDoor(false), sideDoorLocationId: this.#gateDoor(true) } : undefined,
@@ -442,8 +447,8 @@ export class AccessHub extends AccessDevice {
 
       if(initialized) {
 
-        // Every role names a door the topology carries, so the find always answers here and the identity beside it exists only for the type.
-        this.log.info("The gate's " + role + " is now " + (doors.find(door => door.unique_id === arriving.locationId)?.name ?? arriving.locationId) + ".");
+        // Every role names a door the topology carries, so the lookup always answers here and the identity beside it exists only for the type.
+        this.log.info("The gate's " + role + " is now " + (topologyName(arriving.locationId) ?? arriving.locationId) + ".");
       }
     }
 
@@ -470,7 +475,7 @@ export class AccessHub extends AccessDevice {
             return "no door";
           }
 
-          const name = doors.find(door => door.unique_id === locationId)?.name;
+          const name = topologyName(locationId);
 
           return name ? (name + " (" + locationId + ")") : locationId;
         };
@@ -481,6 +486,20 @@ export class AccessHub extends AccessDevice {
       } else {
 
         this.log.debug("Gate doors resolved from the port bindings (%s) to main door %s and side door %s.", renderedBindings, mainDoor ?? "none", sideDoor ?? "none");
+
+        /* Which door each control drives is a lifecycle fact a user reads at startup, so it is said at info level, and once, on the construction pass: every later
+         * pass that moves a role says so through its own "is now" line. A trusted resolution always names its main door, so the test of it is for the type alone.
+         */
+        if(!initialized && mainDoor) {
+
+          if(sideDoor) {
+
+            this.log.info("The gate's main door is %s and its side door is %s.", topologyName(mainDoor) ?? mainDoor, topologyName(sideDoor) ?? sideDoor);
+          } else {
+
+            this.log.info("The gate's main door is %s.", topologyName(mainDoor) ?? mainDoor);
+          }
+        }
       }
     }
 
