@@ -10,6 +10,7 @@ import { FeatureOptions, buildCatalogIndex, enumerateScopeEntries, scopeSafeId }
 import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./lib/webui/controller-actions.js";
 import { addressListedElsewhere, addressListingForm } from "homebridge-plugin-utils/webui/address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
+import { maskSecrets, mountSecretReveals } from "homebridge-plugin-utils/webUi-secret.mjs";
 import { ACCESS_STATUS_CONTEXT_ROUTE } from "./lib/webui/status-route.js";
 import { PluginConfigSession } from "homebridge-plugin-utils/pluginConfigSession.mjs";
 import { STATUS_VIEW_ROUTE } from "homebridge-plugin-utils/webui/status.js";
@@ -98,10 +99,11 @@ const firstRunOnStart = ({ config }) => {
   return true;
 };
 
-/* The classes the login result line wears in every state. The tone layers on top of this base, so the line's blank, failure, and success states are one layout with
- * one color decision between them rather than a separate class string per state, which is what would let the states drift apart.
+/* The classes the login result line wears in every state, homebridge-plugin-utils' page kit reserving the line's height. The tone layers on top of this base, so the
+ * line's blank, failure, and success states are one layout with one color decision between them rather than a separate class string per state, which is what would
+ * let the states drift apart.
  */
-const LOGIN_RESULT_CLASS = "hbua-result small mt-2";
+const LOGIN_RESULT_CLASS = "fo-result small mt-2";
 
 /* Paint one card's login result line in the tone its outcome calls for - a Bootstrap text color, or an empty string for the blank state. Guidance sentences render
  * as text nodes separated by <br> elements, and the failure detail - when present - renders inside a <code class="text-danger"> via textContent, so a
@@ -769,6 +771,9 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
 
       disarmRemoval();
       renderVerdict({ row });
+
+      // A card describing another controller starts masked, so a secret the user revealed for the last one is never left on screen beside the next.
+      maskSecrets(card);
     },
 
     /* What the user has entered, in the shape a controllers[] item itself carries, so every validation, every probe body, and every write reads one vocabulary all
@@ -785,11 +790,9 @@ const mountConnectionCard = ({ container, heading, helper, noSweepReason = "", o
     verdict
   };
 
-  // Each masked secret's reveal, bound from the markup itself: a toggle declares the field it serves, so the card grows a reveal without this wiring changing.
-  for(const toggle of card.querySelectorAll("[data-reveal]")) {
-
-    toggle.addEventListener("click", () => toggleReveal({ input: fields[toggle.dataset.reveal], toggle }), { signal: cardSignal });
-  }
+  // Each masked secret's reveal, given by homebridge-plugin-utils from the markup itself: a secret field's wrapper names what it holds, so the card grows a reveal
+  // without this wiring changing, and the reveal lasts as long as the card does.
+  mountSecretReveals({ root: card, signal: cardSignal });
 
   // An edit to any field retires the verdict standing beside it, so the line never describes anything but the current input. A checkbox announces its own edits on
   // "change" rather than "input", so each field is bound on the event its kind actually fires.
@@ -950,8 +953,9 @@ const showControllerErrorPanel = ({ controller, panel, signal }) => {
 
   if(errorPanel?.signal !== signal) {
 
-    // The compact-card class keys the page's style block, so this card's controls render at the panel's own type rhythm rather than the full-size card scale.
-    panel.classList.add("hbua-compact-card");
+    // homebridge-plugin-utils' page kit gives a compact card's controls the panel's own type rhythm, so this card's controls render at it rather than at the
+    // full-size card scale.
+    panel.classList.add("fo-compact-card");
 
     errorPanel = { editor: mountControllerEditor({
 
@@ -993,9 +997,9 @@ const showAccessDetails = ({ device, panel, signal }) => {
     const editorRegion = document.createElement("div");
     const noticeRegion = document.createElement("div");
 
-    // The compact-card class keys the page's style block, so the standing editor's controls render at the panel's own type rhythm rather than the full-size
-    // card scale.
-    editorRegion.className = "hbua-compact-card";
+    // homebridge-plugin-utils' page kit gives a compact card's controls the panel's own type rhythm, so the standing editor's controls render at it rather than at
+    // the full-size card scale.
+    editorRegion.className = "fo-compact-card";
 
     panel.replaceChildren(noticeRegion, editorRegion);
 
@@ -1288,25 +1292,6 @@ const onValidateLogin = async ({ button, card }) => {
   }
 };
 
-// A reveal toggle's accessible name, naming what the NEXT click will do rather than what the field is doing now, which is what a control announced as a button
-// wants to say. The subject is the field's own plain name, so each toggle on the page announces which secret it acts on.
-const revealLabel = (subject, revealed) => (revealed ? "Hide the " : "Show the ") + subject + ".";
-
-/* Flip one masked secret between hidden and shown. A toggle names the field it serves and the subject its accessible name uses on its own data attributes, so a
- * field gains a reveal by carrying a button in the markup rather than by growing a handler of its own.
- *
- * The field's type, the toggle's accessible name, and its pressed state describe one state between them, so they are written together and no path can move one and
- * leave the others saying something else. Nothing here touches a value: whether a secret is on screen right now says nothing about the configuration.
- */
-const toggleReveal = ({ input, toggle }) => {
-
-  const revealed = input.type === "password";
-
-  input.type = revealed ? "text" : "password";
-  toggle.setAttribute("aria-label", revealLabel(toggle.dataset.revealSubject, revealed));
-  toggle.setAttribute("aria-pressed", revealed ? "true" : "false");
-};
-
 /* The first-run page's own card, mounted into the slot the template vacated. It is mounted here rather than at first-run start because the page's markup is present
  * before this module loads while the first-run hooks run later, so one mount at load serves every call the framework makes into them afterwards.
  */
@@ -1334,9 +1319,9 @@ const closeControllerEditor = () => {
 
 /* Open a blank card as the whole of the feature-options view's main content.
  *
- * The card is handed to the framework's takeover inside an element of its own, carrying the compact-card class the page's style block keys on, and the framework
- * hides its own regions while the card holds the area and restores them when the takeover ends. The handle's signal is the card's lifetime, so the card's listeners
- * leave with the takeover however it ends.
+ * The card is handed to the framework's takeover inside an element of its own, carrying homebridge-plugin-utils' page kit compact-card class, which renders a
+ * working placement's controls at the panel's own type scale, and the framework hides its own regions while the card holds the area and restores them when the
+ * takeover ends. The handle's signal is the card's lifetime, so the card's listeners leave with the takeover however it ends.
  */
 const openControllerEditor = () => {
 
@@ -1345,7 +1330,7 @@ const openControllerEditor = () => {
 
   const region = document.createElement("div");
 
-  region.className = "hbua-compact-card";
+  region.className = "fo-compact-card";
 
   const takeover = ui.featureOptions.takeover(region);
 
