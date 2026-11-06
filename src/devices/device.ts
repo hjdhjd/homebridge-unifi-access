@@ -139,9 +139,9 @@ export abstract class AccessDevice extends AccessBase {
   public accessory!: AccessAccessory;
   /* This device's Not Responding rule, bound once at construction from the availability verdict below and read afresh on every wrapped read and write, so a device the
    * plugin cannot vouch for refuses on the very next request and one that comes back answers on it. Every handler a subclass wires goes through it, which leaves
-   * exactly one place that decides whether this device can answer at all, while the MQTT statement and the gate the door commands open with read that same verdict, so
-   * what HomeKit is refused, what the broker holds, and what a command refuses on agree by construction. The error class comes from the runtime HAP namespace the plugin
-   * holds, because homebridge-plugin-utils carries no HAP dependency of its own.
+   * exactly one place that decides whether this device answers HomeKit at all, while publishAvailability states that same verdict to the broker and mqttSubscribeSet
+   * refuses an MQTT set on it, so what HomeKit is refused, what the broker holds, and what an MQTT set refuses on agree by construction. The error class comes from the
+   * runtime HAP namespace the plugin holds, because homebridge-plugin-utils carries no HAP dependency of its own.
    */
   protected readonly answering: ReturnType<typeof notResponding>;
   public hints: AccessHints;
@@ -639,10 +639,10 @@ export abstract class AccessDevice extends AccessBase {
    * it is read live from the projection rather than from uda, which keeps its last value through a removal delay, so a device whose record has left the state refuses
    * at once. A controller reboot adds no term of its own: the plugin induces none, and one that happens anyway reads as an ordinary loss.
    *
-   * This is the plugin's single availability verdict. Every handler answers by it through the rule bound above, and so do the MQTT statement and the gate the door
-   * commands open with, so what HomeKit is refused, what the broker holds, and what an operation refuses on answer one question. unifi-access deliberately ships no
-   * composition of its own, because last-known device state is all it can honestly own...composing the verdict is the consumer's business, and this is where the
-   * consumer does it.
+   * This is the plugin's single availability verdict. Every handler answers by it through the rule bound above, publishAvailability states it to the broker, and
+   * mqttSubscribeSet refuses an MQTT set on it, so what HomeKit is refused, what the broker holds, and what an MQTT set refuses on answer one question. A door command
+   * reads no verdict of its own, because it arrives through a HomeKit handler or an MQTT set and is refused there. unifi-access deliberately ships no composition of
+   * its own, because last-known device state is all it can honestly own...composing the verdict is the consumer's business, and this is where the consumer does it.
    */
   public get isAvailable(): boolean {
 

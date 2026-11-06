@@ -884,8 +884,7 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   assert.deepEqual(parent.map((frame) => frame.kind), [ "snapshot", "availability" ]);
   assert.deepEqual(idValues(frameOf(parent, 0, "snapshot").rows), []);
 
-  // A view holding no record answers the serving connection's own liveness - the same recordless path a token-only client's views take, exercised here through
-  // the Enterprise parent.
+  // A view holding no record answers the serving connection's own liveness, exercised here through the Enterprise parent.
   assert.equal(frameOf(parent, 1, "availability").online, true);
 });
 

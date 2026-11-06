@@ -170,17 +170,17 @@ export const makeControllerActions = ({ commitConfig, controllerListedElsewhere,
   platformConfig, processDeviceList, requestControllerProbe, sendStatusContext, toast }: ControllerActionsDependencies): ControllerActions => {
 
   /* Each controller address's probe answer, as this session last received it and already processed for the framework to render. What is kept is the whole answer -
-   * its outcome tag alongside its device list - rather than the list alone, because a healthy controller with nothing to list and a controller that could not be
-   * reached both answer an empty list and the page must go on telling them apart on every later re-entry.
+   * its outcome tag, message and token verdict alongside its device list - rather than the list alone, because a re-entry renders its list and message from it
+   * (deviceListResult), and the tag alone tells a token-only controller from a connected one, which the details panel's token-only notice reads.
    *
    * One answer serves every reader that needs it: the device view returns it on every re-entry, a removal derives from it the scoping identities a settings sweep
    * would strip, and the sidebar reads the controller's own name from it. A controller connection costs a user real dead air, and almost nothing about a controller
    * changes between one re-entry and the next, so that price is paid once per address per session and the Refresh control is how a user asks to pay it again.
    *
-   * Only an answer that actually arrived is ever kept, and the gate is the outcome tag rather than the list's length: a token-only controller's empty answer is a
-   * real answer and caches like any other, while a failure writes nothing here so the connection-error view and the framework's own retry cycle always act on a
-   * live attempt rather than on a hopeful memory of one. The map lives as long as the actions the page built, which is the page's own lifetime, so a reopened
-   * panel connects afresh.
+   * Only an answer that actually arrived is ever kept, and the gate is the outcome tag. No successful answer's list is empty, since a token-only answer and a
+   * connected one each lead with the controller's own row, while a failure's verdict carries an empty list and is never kept, so the connection-error view and the
+   * framework's own retry cycle always act on a live attempt rather than on a hopeful memory of one. The map lives as long as the actions the page built, which is
+   * the page's own lifetime, so a reopened panel connects afresh.
    */
   const byAddress = new Map<unknown, AccessProbeSuccess>();
 

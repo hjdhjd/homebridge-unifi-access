@@ -64,7 +64,8 @@ export interface RemovalStabilityGateOptions {
   actions: RemovalGateActions;
   // The time source the gate reads each good-state instant from and arms its sweep and its delayed removals on.
   clock: Clock;
-  // The user's configured removal delay, in seconds, resolved per request rather than captured, so a live configuration change governs the next removal.
+  // The user's configured removal delay, in seconds, resolved per request rather than captured, because the gate is built in the controller's constructor, before
+  // the first connect, while the controller answers by its address, and a per-controller entry naming the controller's serial applies only once its document arrives.
   graceSeconds: () => number;
   log: HomebridgePluginLogging;
   // The controller's lifetime signal. The gate's timers bind to it, so teardown drains whatever is armed and a registration after it is inert.

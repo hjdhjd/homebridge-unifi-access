@@ -92,9 +92,9 @@ export type WebhookRegistrationPlan = { endpoint?: never; kind: "create"; stale:
 
 /* Who opened a door and how, as one unlock delivery reports it.
  *
- * The nullable members are the ones the wire carries as an empty string when it has nothing to say. Reading empty as absent is this plugin's own presentation
- * rule rather than the library's: the library carries the wire's values verbatim by its documented stance, and deciding that a blank policy name means no policy
- * is a judgment about how to show it to a person.
+ * The policy and the reader are null where the wire carries an empty string for them, and the actor and its type are null where the delivery's actor is null.
+ * Reading empty as absent is this plugin's own presentation rule rather than the library's: the library carries the wire's values verbatim by its documented
+ * stance, and deciding that a blank policy name means no policy is a judgment about how to show it to a person.
  */
 export interface AccessUnlockAttribution {
 
@@ -1206,9 +1206,9 @@ export function resolveDoorService(options: { choice: Nullable<string | undefine
  * against the library's vocabulary while `as const` keeps the literal inference each column's readers rely on.
  *
  * The catalog lives in this leaf rather than beside the switches it drives because every consumer of the access method vocabulary reads this one catalog rather
- * than restating it: the hub's access method switches, and the webUI status feed's access methods row. The feed runs inside the Config UI X child process, where
- * the HomeKit device graph cannot be loaded at all, so a catalog that lived beside the switches would have to be restated for the feed - and a restated catalog is
- * exactly the divergence a device's switches and its status row must never have between them.
+ * than restating it: the hub's access method switches, and the webUI status feed's access methods row. The feed runs inside the Config UI X child process and
+ * keeps out of the HomeKit device graph, so a catalog that lived beside the switches would have to be restated for the feed - and a restated catalog is exactly
+ * the divergence a device's switches and its status row must never have between them.
  */
 export const accessMethods = [
 

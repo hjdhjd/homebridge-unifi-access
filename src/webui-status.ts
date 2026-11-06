@@ -423,14 +423,16 @@ export interface ResolvedDoorEntries {
  *
  * The `kind` member splits the options rather than merely selecting an arm: a controller-as-device view carries the connection's capability map and no door
  * entries, a device view carries its record and entries and no capabilities, and neither arm can be spelled with the other's members. The tag is explicit because
- * a token-only device view carries no record either - overloading absence would put the controller's rows on a device.
+ * a device view can carry no record either - overloading absence would put the controller's rows on a device. A view holds none for an Enterprise parent, a
+ * token-only device the census cannot address, an unmanaged device, every device of a token-only client whose device listing was refused, and a device inside a
+ * removal window.
  *
  * The rows report the DEVICE's truth, never the HomeKit projection: hardware eligibility gates the door row through the shared eligibility statement, and no user
  * preference is consulted - a user who disabled a HomeKit sensor still sees the door's real position in this admin surface. An empty value is the
  * degrade-by-absence rule: the row renders the placeholder dash, matching the library's absent-member semantics.
  *
  * @param options - The view kind and what that kind carries: the connection's capability map for a controller view, or the viewed device's record (absent for
- * a token-only view or a removal window) and the resolved entries for a device view, beside the state either arm projects.
+ * each recordless view named above) and the resolved entries for a device view, beside the state each arm projects.
  *
  * @returns The composed row set.
  */
@@ -445,8 +447,8 @@ export function composeStatusRows(options: { capabilities: Pick<AccessCapabiliti
 
   const { device, entries } = options;
 
-  // A device the state holds no record for has no facts to project: a token-only client derives no device records, and a device inside a removal window has left
-  // them. The panel's identity rows and status label carry the view.
+  // A device the state holds no record for, in any of the recordless views the doc comment above names, has no facts to project. The panel's identity rows and
+  // status label carry the view.
   if(device === undefined) {
 
     return [];
@@ -823,8 +825,9 @@ export class AccessStatusFeed {
     let lastRows = this.#composeViewRows(client, subject);
 
     /* The viewed device's liveness, as the feed can honestly state it. A record in state answers by the rule HomeKit refuses on and MQTT states, so the label and the
-     * accessory read one record one way. The controller-as-device and a view with no record - a token-only client derives none, and a removal window has dropped one -
-     * answer through the one fact in hand: the serving connection is live at establishment by construction, and the connection wiring below reports its loss.
+     * accessory read one record one way, and a record that leaves mid-view reads offline through that same rule. The controller-as-device and a view whose record was
+     * absent when the view was established answer through the one fact in hand: the serving connection is live at establishment by construction, and the connection
+     * wiring below reports its loss.
      */
     const currentOnline = (): boolean => {
 
@@ -971,8 +974,8 @@ export class AccessStatusFeed {
     /* The connection wiring goes through the monitor's purpose-built events rather than a hand-rolled read of generic state transitions. A lost controller makes the
      * device's liveness unknown, so offline is the honest render - and only the availability frame, because a state re-push would claim knowledge the feed does
      * not have. Recovery and a detected reboot both re-push the snapshot plus the truth frame, since state may have moved while the connection was down - and
-     * recovered fires specifically on the return to healthy after lost, so a degraded-to-healthy wobble never triggers a spurious re-push. The subscriptions are
-     * Disposable and die with the view's signal.
+     * controllerRecovered fires into healthy or into throttled after a loss, so a degraded-to-healthy wobble fires nothing and never triggers a spurious re-push. The
+     * subscriptions are Disposable and die with the view's signal.
      */
     const repushView = (): void => {
 
@@ -1026,8 +1029,8 @@ export class AccessStatusFeed {
    * by the library's construction - and that handle's doorId getter is read inside a try/catch that absorbs a ReferenceError as the removal-window shape, exactly
    * as the plugin's own guarded door-state read does: an absorbed throw resolves to no door ids, and anything else is a real fault that must surface. A UA Gate
    * resolves main and side through the shared discovery heuristic, on the hardware class alone - the panel reports device truth, never the HomeKit projection, so
-   * no user preference gates the side arm here. A token-only client derives no projections and no device records, so it resolves no door ids and the door and
-   * lock rows degrade to absence.
+   * no user preference gates the side arm here. A token-only client has hub handles and census records, so a hub resolves its door from the location its record
+   * names and the door and lock rows render from the official door state.
    */
   #resolveView(client: StatusFeedClient, entry: RegistryEntry, serial: DecoratedSerial): ViewSubject {
 

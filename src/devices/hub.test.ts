@@ -2479,7 +2479,7 @@ test("a UA Hub Door Mini, a UA Ultra with tamper detection, and an Enterprise hu
   assert.deepEqual(restatedIn(restoreSession(makeHub({ record: familyRecord("UAH-Ent") }).mqtt)), [[ "lock", "true", false ]]);
 });
 
-test("a reader restates its availability and no state topic, since none of a hub's topics are its to publish", () => {
+test("a reader restates its availability and no state topic, since it carries no door, so no lock, position or unlock topic is its own", () => {
 
   const reader = makeHub({ record: READER_RECORD });
   const session = restoreSession(reader.mqtt);
@@ -4622,8 +4622,9 @@ test("a door hub announces one remote unlock once, whichever of its two rails re
 
 test("a remote unlock is settled by the identity it names: the hub that performed it, one of its doors, or another device altogether", () => {
 
-  /* The controller reports this notification in two identity spaces - hub-class hardware names the device that performed the unlock, and a gate names the door - and
-   * every hub on the controller sees every one of them under the event name, so what a hub applies is settled by the identity the packet names and nothing else.
+  /* The controller reports this notification in two identity spaces - hub-class hardware names the device that performed the unlock, confirmed against captures, and
+   * a gate is reported to name the door, which no capture settles - and every hub on the controller sees every one of them under the event name, so what a hub
+   * applies is settled by the identity the packet names and nothing else.
    */
   const foreign = makeHub();
 
@@ -5062,7 +5063,7 @@ test("the opener reports no obstruction, and a door is presented as one accessor
   assert.equal(lock.services.filter(entry => entry.UUID === Service.LockMechanism.UUID).length, 1);
 });
 
-test("the travel time is read at the write, so a door reconfigured while it runs travels for its new duration", async () => {
+test("the travel time is read at the write rather than captured when the hub is built", async () => {
 
   const opener = makeTravellingOpener();
   const service = openerService(opener);

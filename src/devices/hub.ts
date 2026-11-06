@@ -190,9 +190,9 @@ export class AccessHub extends AccessDevice {
   // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
   // rows we have already folded be told from one carrying news.
   #foldedConfigValues: Map<AccessMethod, boolean> | undefined;
-  /* The doors a UA Gate drives, as discovery last resolved them - the one value every reader of a gate's identities takes. Discovery alone writes it and every
-   * reader reaches it through #drivenDoors, and it is held as the enumeration itself rather than as the two identities behind it so the door-state delivery every
-   * hub on the controller receives reads it without building one.
+  /* The doors a UA Gate drives, as discovery last resolved them - the one value every reader of a gate's identities takes. Discovery alone writes it, and it also
+   * reads it directly, as the enumeration a pass compares against; every other reader reaches it through #drivenDoors. It is held as the enumeration itself rather
+   * than as the two identities behind it so the door-state delivery every hub on the controller receives reads it without building one.
    */
   #gateDoors: readonly DrivenDoor[];
   /* Which pass the next switch loop runs as. The loop's first seeded run is the switches' adoption whatever call reached it, because a record carrying configuration
@@ -684,10 +684,10 @@ export class AccessHub extends AccessDevice {
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorUnlock, (delivery) => this.handleUnlockDelivery(delivery));
     this.registerDeliveryListener(ACCESS_WEBHOOK_EVENTS.doorbellCompleted, (delivery) => this.handleDoorbellOutcome(delivery));
 
-    /* Every hub subscribes to remote unlocks by event name. The controller delivers them under the identity of the door for a gate and under the identity of the hub
-     * that performed the unlock for everything else, and the rail emits each packet under its event name and under that identity alike - so the subscription is by
-     * name for every family, ownership is settled at delivery from the identity the packet names, and the general packet handler leaves this event alone, which is
-     * what keeps the rail's second emission under this hub's own identity from being a second delivery.
+    /* Every hub subscribes to remote unlocks by event name. Hub-class hardware names the device that performed the unlock, confirmed against captures, and a gate is
+     * reported to name the door instead, which no capture settles (unifi-access, src/protocol/events.ts). The rail emits each packet under its event name and under
+     * that identity alike - so the subscription is by name for every family, ownership is settled at delivery from the identity the packet names, and the general
+     * packet handler leaves this event alone, which is what keeps the rail's second emission under this hub's own identity from being a second delivery.
      */
     this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, (packet) => this.handleRemoteUnlock(packet));
 
@@ -715,8 +715,8 @@ export class AccessHub extends AccessDevice {
       return;
     }
 
-    // The methods the user selected switches for, read afresh on every pass so a changed selection is what the next pass materializes or retires, and read
-    // against the catalog's own spellings so a hand-written entry selects a method in whatever case it named it.
+    // The methods the user selected switches for, read on every pass and against the catalog's own spellings, so a hand-written entry selects a method in whatever
+    // case it named it.
     const selected = this.getFeatureValueList("AccessMethod.Switches", accessMethodChoices().map(choice => choice.value));
     const { initialized } = this.#switchPass;
 
@@ -1272,8 +1272,9 @@ export class AccessHub extends AccessDevice {
 
   /* Dress a sensor the first time this hub holds it: its reading. The reading's handler answers the stored reading through the device's Not Responding rule, so a sensor
    * the plugin cannot vouch for refuses its reading rather than showing the last one, and that refusal is all an outage shows on a sensor. The tamper status is written
-   * by the settling helper above, where the presence reconcile left the characteristic standing, which is what lets the tamper sweep reach every sensor without the hub
-   * keeping a roster, because HomeKit carries an optional characteristic only once something has written it.
+   * by the settling helper above, where the presence reconcile left the characteristic standing. The attach rather than a write is what lets the tamper sweep reach
+   * each sensor without the hub keeping a roster: validCharacteristic attaches the characteristic through getCharacteristic, and updateServices, which the sweep
+   * runs, writes only where testCharacteristic finds the characteristic.
    */
   #dressSensor(service: Service, reading: CharacteristicValue): void {
 
@@ -2136,7 +2137,8 @@ export class AccessHub extends AccessDevice {
      * publish, which drops a topic whose control does not exist and reads the payload the get topics answer through. The client publishes nothing across an outage
      * and replays nothing after it, so this is how a subscriber that missed a statement hears the current one, and the client clears its change-gated memory ahead
      * of every session, which is what lets an unchanged availability go out again. The momentary topics are never restated, since a replayed event is the event
-     * happening a second time. Every device states its availability, a reader as much as a hub, and a reader carries no control any hub topic describes.
+     * happening a second time. Every device states its availability, a reader as much as a hub. A reader carries no door, so no lock, position or unlock topic is its
+     * own, and a doorbell it carries answers doorbell as a hub's does.
      */
     this.mqttOnConnect(() => {
 
@@ -2234,9 +2236,10 @@ export class AccessHub extends AccessDevice {
 
   /* Which of this hub's doors a remote unlock names, or null when it names none of them.
    *
-   * The controller reports this notification in two identity spaces: hub-class hardware names the device that performed the unlock, and a gate names the door. So the
-   * read tolerates both - the performing device is this hub's main door, and anything else is either a door this hub drives or nothing of this hub's at all. A hub
-   * inside its removal grace drives no doors, so it answers null through the ownership read above exactly as every other path does.
+   * The controller reports this notification in two identity spaces: hub-class hardware names the device that performed the unlock, confirmed against captures, and a
+   * gate is reported to name the door, which no capture settles (unifi-access, src/protocol/events.ts). So the read tolerates both - the performing device is this
+   * hub's main door, and anything else is either a door this hub drives or nothing of this hub's at all. A packet naming this hub's own identity answers main ahead of
+   * the ownership read, which answers null for every door identity while this hub is inside its removal grace, because it drives no doors then.
    *
    * @param packet - The remote unlock as the controller reported it.
    *
@@ -2480,9 +2483,10 @@ export class AccessHub extends AccessDevice {
     this.log.error("Unable to %s the %s. %s", options.action, options.doorName, options.reason);
   }
 
-  /* The preamble every door command shares: name the door, resolve the control surface the command dispatches through, and refuse outright when the device cannot
-   * be vouched for or carries no such surface. The surface travels in the answer rather than being re-checked by each caller, because TypeScript cannot carry a
-   * narrowing of the optional handle across a function boundary...holding it in the target is what makes it non-optional where the command dispatches.
+  /* The preamble every door command shares: name the door, resolve the control surface the command dispatches through, and refuse outright when the device carries
+   * no such surface, the one refusal here. Reachability is refused before a command reaches this, at the HomeKit handler or the MQTT set it arrived through. The
+   * surface travels in the answer rather than being re-checked by each caller, because TypeScript cannot carry a narrowing of the optional handle across a function
+   * boundary...holding it in the target is what makes it non-optional where the command dispatches.
    *
    * @param options - The verb a refusal names, and whether the side door of a UA Gate is the target.
    *
@@ -2792,8 +2796,8 @@ export class AccessHub extends AccessDevice {
     }
   }
 
-  /* How long this door's travel is modeled as taking, in milliseconds, or zero for a door whose travel is not modeled at all. It is read afresh at every write, so
-   * a duration the user changes applies from the next transition; a transition already running keeps the timer it armed.
+  /* How long this door's travel is modeled as taking, in milliseconds, or zero for a door whose travel is not modeled at all. It is read at every write, and a
+   * transition already running keeps the timer it armed.
    *
    * A UA Gate with nothing configured falls back to the window that hardware is given, because its motion is short and much the same everywhere. Every other
    * family renders instantly until a duration has been configured for it, which is the setting's whole purpose.
@@ -2998,8 +3002,8 @@ export class AccessHub extends AccessDevice {
   /* What a UA Gate's relay says about one of its locks. Only that hardware answers from its record here: every other family's lock reading comes from the door-state
    * model, and answering secured for them is the same safe reading an unrecognized lock value gets.
    *
-   * A lock's own port names its relay, and a lock whose port names none has nothing to read, so it takes that safe reading too. A relay reads off while the lock is
-   * engaged, so off is secured and anything else, an absent row included, is not.
+   * A lock's own port names its relay, and a lock whose port names none has nothing to read, so it takes that safe reading too. The polarity, off read as secured and
+   * anything else, an absent row included, as not, is an assumption no capture confirms: the gate specimens on record read off with no lock state beside them.
    *
    * @param isSideDoor - Whether the side door's lock is the one being read.
    *
