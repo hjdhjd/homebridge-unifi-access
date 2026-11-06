@@ -405,6 +405,11 @@ test("the connection observer states availability on every transition and restor
   await monitor.drive("throttled", "healthy");
 
   assert.deepEqual(stub.calls.slice(5), ["publish"]);
+
+  // A recovery that gives up at lost restates availability, and no recovery completed, so there is nothing to refresh behind it.
+  await monitor.drive("reconnecting", "lost");
+
+  assert.deepEqual(stub.calls.slice(6), ["publish"]);
 });
 
 test("one device's fault on either of the observer's walks costs its siblings nothing", async (t) => {

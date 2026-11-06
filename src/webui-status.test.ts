@@ -889,6 +889,51 @@ test("one port of an Enterprise hub gets a view of its own, and the hub that hos
   assert.equal(frameOf(parent, 1, "availability").online, true);
 });
 
+test("a token-only device view renders its census record's door and lock rows, and an Enterprise hub's view renders none", async () => {
+
+  /* A client holding an API token alone reads the controller through the official API's listings, so its store is seeded by a census rather than a topology. The
+   * records are written as unifi-access projects an inventory entry (officialDeviceRecord in its census module, which the package does not export): the members
+   * the listing carries, the hardware address derived from the identity, and nothing else. The census places nothing under a topology root, so the Enterprise
+   * hub reads as building-hosted and the plugin projects no device for it.
+   */
+  const censusHub = (uniqueId: string, overrides: Partial<AccessStateDevice> = {}): AccessStateDevice => ({ alias: "", capabilities: ["is_hub"],
+    connected_uah_id: "", device_type: "UAH", is_adopted: true, is_connected: true, is_managed: true, is_online: true, location_id: "door1",
+    mac: uniqueId.toUpperCase(), name: "Hub " + uniqueId, unique_id: uniqueId, ...overrides });
+
+  const store = createStateStore({});
+
+  store.applyCensus({
+
+    devices: [ censusHub("aabbccddee01"), censusHub("aabbccddee02", { device_type: "UAH-Ent", location_id: ROOT_ID }) ],
+    doorStates: [{ dps: "open", location_id: "door1", lock: "unlocked" }],
+    doors: [{ full_name: "Door door1", location_type: "door", name: "Door door1", unique_id: "door1", up_id: "floor1" }]
+  });
+
+  // A token-only client answers hub handles over its census records, and the hub's handle resolves its door from the location the record names.
+  const { client } = makeClient(store, [{ doorId: "door1", record: store.snapshot().devices.get("aabbccddee01") }], { mode: "token", official: true });
+  const frames: StatusEvent[] = [];
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => client, log: noopLog, push: (event): void => void frames.push(event) });
+
+  feed.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
+
+  await feed.view(SERIAL_ONE);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  const hub = forSerial(frames, SERIAL_ONE);
+
+  assert.deepEqual(hub.map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+  assert.deepEqual(idValues(frameOf(hub, 1, "snapshot").rows), [ [ "lock", "Unlocked" ], [ "door", "Open" ] ], "the rows render the official door state");
+
+  frames.length = 0;
+  await feed.view(SERIAL_TWO);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  const parent = forSerial(frames, SERIAL_TWO);
+
+  assert.deepEqual(parent.map((frame) => frame.kind), [ "snapshot", "availability" ]);
+  assert.deepEqual(idValues(frameOf(parent, 0, "snapshot").rows), []);
+});
+
 test("the truth frame reports both liveness polarities the moment the snapshot lands", async () => {
 
   // The offline polarity: a device already offline at selection must read offline at once rather than resting on a Connected label.
@@ -1153,6 +1198,95 @@ test("the view contract answers not-found for an unregistered serial and auth-mi
   assert.equal(frameOf(refused, 1, "error").reason, "auth-missing");
 });
 
+test("a rejected connect answers one classified error for its session and leaves nothing to reuse, and a superseded one answers nothing and leaves its " +
+  "successor standing", async () => {
+
+  const store = createStateStore({});
+
+  store.applyRefreshDocuments({ controller: null, topology: doorsTopology([
+    { devices: [wiredHub("device1", MAC_ONE)], id: "door1" },
+    { devices: [wiredHub("device2", MAC_TWO)], id: "door2" }
+  ]) });
+
+  const one = store.snapshot().devices.get("device1");
+  const two = store.snapshot().devices.get("device2");
+  const { client } = makeClient(store, [ { doorId: "door1", record: one }, { doorId: "door2", record: two } ]);
+  const frames: StatusEvent[] = [];
+
+  let connects = 0;
+
+  // The first connect is refused the way a controller refuses a sign-in, and every later one answers the client.
+  const feed = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => {
+
+    connects++;
+
+    if(connects === 1) {
+
+      throw new AccessAuthError("Bad credentials.");
+    }
+
+    return client;
+  }, log: noopLog, push: (event): void => void frames.push(event) });
+
+  feed.context(contextRequest([SERIAL_ONE]));
+
+  await assert.doesNotReject(feed.view(SERIAL_ONE), "a refused connect is answered on the wire, never thrown at the view request");
+
+  const refused = forSerial(frames, SERIAL_ONE);
+
+  assert.deepEqual(refused.map((frame) => frame.kind), [ "connecting", "error" ]);
+  assert.equal(frameOf(refused, 1, "error").reason, "auth-invalid");
+
+  // The refusal left no target standing, so the next view of the same controller connects again and establishes.
+  frames.length = 0;
+  await feed.view(SERIAL_ONE);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.equal(connects, 2);
+  assert.deepEqual(forSerial(frames, SERIAL_ONE).map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+
+  /* The superseded half. The first serial's connect parks at the gate, a view of the controller's second serial supersedes it and connects a live client, and
+   * the gate then rejects the stale connect. The emit chokepoint drops the stale session's error frame whatever its catch does, so what shows the catch left
+   * the successor's target standing is the third view, which reuses the successor's client only while that target stands.
+   */
+  const successor = makeClient(store, [ { doorId: "door1", record: one }, { doorId: "door2", record: two } ]);
+  const gate = Promise.withResolvers<StatusFeedClient>();
+  const gatedFrames: StatusEvent[] = [];
+
+  let gatedConnects = 0;
+
+  const gated = new AccessStatusFeed({ connect: async (): Promise<StatusFeedClient> => {
+
+    gatedConnects++;
+
+    return (gatedConnects === 1) ? gate.promise : successor.client;
+  }, log: noopLog, push: (event): void => void gatedFrames.push(event) });
+
+  gated.context(contextRequest([ SERIAL_ONE, SERIAL_TWO ]));
+
+  const first = gated.view(SERIAL_ONE);
+
+  await settle(DISPATCH_SETTLE_TURNS);
+  await gated.view(SERIAL_TWO);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(forSerial(gatedFrames, SERIAL_TWO).map((frame) => frame.kind), [ "connecting", "snapshot", "availability" ]);
+
+  gate.reject(new AccessAuthError("Bad credentials."));
+  await first;
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.deepEqual(forSerial(gatedFrames, SERIAL_ONE).map((frame) => frame.kind), ["connecting"], "the superseded session answers nothing past its connecting frame");
+
+  gatedFrames.length = 0;
+  await gated.view(SERIAL_ONE);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.equal(gatedConnects, 2, "the third view reuses the successor's client rather than connecting again");
+  assert.deepEqual(forSerial(gatedFrames, SERIAL_ONE).map((frame) => frame.kind), [ "snapshot", "availability" ]);
+  assert.equal(successor.disposeCount(), 0);
+});
+
 test("every frame carries the decorated serial whatever spelling the boundary received", async () => {
 
   const store = createStateStore({});
@@ -1277,9 +1411,19 @@ test("a lost connection is never reused: the next view connects fresh and releas
   await feed.view(SERIAL_ONE);
   await settle(DISPATCH_SETTLE_TURNS);
 
+  // A connection still recovering has not been given up on, so a view of the controller's other serial reuses it and establishes without connecting.
+  first.connection.state = "reconnecting";
+  frames.length = 0;
+  await feed.view(SERIAL_TWO);
+  await settle(DISPATCH_SETTLE_TURNS);
+
+  assert.equal(connects, 1);
+  assert.deepEqual(forSerial(frames, SERIAL_TWO).map((frame) => frame.kind), [ "snapshot", "availability" ]);
+  assert.equal(first.disposeCount(), 0);
+
   // The standing connection dies; the next view of the same controller must connect fresh rather than reuse the husk.
   first.connection.state = "lost";
-  await feed.view(SERIAL_TWO);
+  await feed.view(SERIAL_ONE);
   await settle(DISPATCH_SETTLE_TURNS);
 
   assert.equal(connects, 2);
