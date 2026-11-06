@@ -20,7 +20,7 @@ import type { AccessDeviceEntryConfig, AccessDevice as AccessDeviceProjection, A
 import { Characteristic, GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, RESTORED_LINE, Service, configRows, doorsTopology, eventsFrom, gatePort, gatePorts, hubRecord,
   makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
 import { EventEmitter, getEventListeners, on } from "node:events";
-import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry } from "homebridge-plugin-utils";
+import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry, RetiredTranslation } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
@@ -33,6 +33,7 @@ import assert from "node:assert/strict";
 import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
 import test from "node:test";
+import { translateRetiredOptions } from "../options-retired.ts";
 
 // The hub's own identities, the doors it drives, and the reader hanging off it. The hub's identifier, its main door, and the reader carry the identities the live
 // captures use; the hub's MAC address and its side door are synthetic.
@@ -399,6 +400,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
   // The Homebridge API double the platform saves through, held here so the saves an arm reads are the ones this hub's persistence made.
   const api = makeTestApi();
+
+  // The user's settings as the platform reads them: the entries run through the retired-option translation and the engine is built on its boot view, so a list read
+  // consults the overlay exactly as it does in the field.
+  const retiredTranslation = translateRetiredOptions(options.options ?? []);
   const platform = makePlatformDouble({
 
     api,
@@ -406,19 +411,21 @@ function makeHub(options: HubOptions = {}): HubHarness {
      * a hub whose relocks and travels an advance would never reach.
      */
     clock,
-    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, options.options ?? []),
+    featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, [...retiredTranslation.configuredOptions]),
     /* The lines are captured formatted, because what a user reads is the composed sentence rather than the format string and its arguments. The plugin's debug
      * output arrives on the warn sink, which is how the shared logger surfaces it without Homebridge's own debug flag, so that is where an arm reads it.
      */
     log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
       info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)) }
+      warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)) },
+    retiredTranslation
   });
 
-  /* The engine a reconfiguration swaps in, written through a view of the one member it replaces. The platform declares its engine read-only because the real one
-   * reads its own once and keeps it, so this is the harness stating that restating a user's settings under a running hub is the test's own hand on the double.
+  /* The engine and the translation a reconfiguration swaps in, written through a view of the members it replaces. The platform declares them read-only because the
+   * real one reads its own once and keeps them, so this is the harness stating that restating a user's settings under a running hub is the test's own hand on the
+   * double.
    */
-  const settings = platform as { featureOptions: FeatureOptions };
+  const settings = platform as { featureOptions: FeatureOptions; retiredTranslation: RetiredTranslation };
 
   const doors = new Map((options.doors ?? []).map(door => [ door.unique_id, door ]));
   const accessory = options.accessory ?? makeAccessory(options.existing ?? []);
@@ -563,12 +570,15 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     publishes,
     /* Restate the user's settings under a hub that is already running, which is how a setting read afresh at each write is told apart from one cached at
-     * construction. The engine is swapped whole rather than mutated, so every read after the swap answers from the new entries alone, and the hub meets the new
-     * engine on its next read because it reaches the engine through the platform each time.
+     * construction. The translation and the engine built on its boot view are swapped whole rather than mutated, so every read after the swap answers from the new
+     * entries alone, and the hub meets them on its next read because it reaches them through the platform each time.
      */
     reconfigure: (entries: string[]): void => {
 
-      settings.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, entries);
+      const translation = translateRetiredOptions(entries);
+
+      settings.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, [...translation.configuredOptions]);
+      settings.retiredTranslation = translation;
     },
     release: (): void => {
 
@@ -5717,6 +5727,24 @@ test("a hub enabled for the sensor list with nothing named keeps every sensor it
 
     assert.ok(!hasContactSensor(emptied, subtype), "while a list emptied on purpose withholds " + subtype);
   }
+});
+
+/* A configuration written for an earlier version of this plugin, turning the position sensor off for the whole controller and back on for this hub alone. The boot
+ * view composes each scope without knowing which controller a hub sits under, so the engine alone reads the controller's composition at this hub and loses the
+ * sensor; the overlay the hub's list read consults first knows the hub's controller as well as the hub, and keeps it. The same entries naming another device leave
+ * this hub to its controller's Disable.
+ */
+test("a position sensor turned off at the controller in the retired grammar and back on at this hub is carried by this hub alone", () => {
+
+  // The identity the harness's controller answers by: its configured address, repaired into a scope identifier.
+  const controller = "1-2-3-4";
+  const reEnabled = everySensorHub({ options: [ "Disable.Hub.DPS." + controller, "Enable.Hub.DPS." + HUB_SERIAL ] });
+
+  assert.ok(hasContactSensor(reEnabled, AccessReservedNames.CONTACT_DPS), "the hub's own re-enable outranks its controller's disable");
+
+  const elsewhere = everySensorHub({ options: [ "Disable.Hub.DPS." + controller, "Enable.Hub.DPS.0123456789AB" ] });
+
+  assert.ok(!hasContactSensor(elsewhere, AccessReservedNames.CONTACT_DPS), "while a re-enable naming another device leaves this hub to its controller's disable");
 });
 
 test("a hub whose sensor selection is emptied says so once at adoption and says it no second time on a later update", () => {

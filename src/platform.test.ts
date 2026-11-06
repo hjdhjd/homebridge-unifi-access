@@ -1,9 +1,10 @@
 /* Copyright(C) 2017-2026, HJD (https://github.com/hjdhjd). All rights reserved.
  *
- * platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, and its reclaim of accessories nothing answers for.
+ * platform.test.ts: Tests for the platform's own debug gate, its controller identity gate, its translation of retired feature options at construction, and its
+ * reclaim of accessories nothing answers for.
  */
 import type { API, Logging } from "homebridge";
-import { APIEvent, HAPStatus, createMqttClient, onAbort } from "homebridge-plugin-utils";
+import { APIEvent, FeatureOptions, HAPStatus, createMqttClient, onAbort } from "homebridge-plugin-utils";
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
 import { AccessApiError, AccessClient, AccessNetworkError, createStateStore } from "unifi-access";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
@@ -13,7 +14,9 @@ import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
 import { TestMqttClient, TestMqttClientFactory, assertNoUnhandledRejections, expectAt, hapStatus, settle, settlePastMqttEnd, settleUntil, stopListening,
   triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
-import { mock, test } from "node:test";
+import { describe, mock, test } from "node:test";
+import { featureOptionCategories, featureOptions } from "./options.ts";
+import { hubSensorChoices, serialForm } from "./policy.ts";
 import { AccessController } from "./controller/controller.ts";
 import { AccessPlatform } from "./platform.ts";
 import type { TestContext } from "node:test";
@@ -21,7 +24,6 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { format } from "node:util";
 import { once } from "node:events";
-import { serialForm } from "./policy.ts";
 
 interface Harness {
 
@@ -181,6 +183,65 @@ test("a platform built with three arguments holds createMqttClient as its factor
   const platform = makeHarness().make({ options: [], platform: "UniFi Access" });
 
   assert.equal(platform.mqttFactory, createMqttClient, "the controllers build their clients through homebridge-plugin-utils' own factory");
+});
+
+describe("platform construction and the retired feature-option translation", () => {
+
+  // The controller and the device beneath it the overlay row resolves at, and the domain every sensor list here is read against.
+  const CONTROLLER = "AABBCCDDEEFF";
+  const DEVICE = "0123456789AB";
+  const SENSORS = hubSensorChoices().map((choice) => choice.value);
+
+  // The line a translated configuration writes, transcribed rather than referenced so a sentence that drifts by a character in its one home reddens a row.
+  const TRANSLATED_LINE = "warn: Feature option entries from an earlier version of this plugin were translated automatically at startup. Open the plugin " +
+    "settings in the Homebridge UI to migrate your configuration permanently.";
+
+  /* The wiring row: a retired switch turned off reaches the engine as the list of every other member once the platform has built its engine. The control builds the
+   * same engine on the RAW array, which reads no retired name and keeps every sensor, so this row is red against a platform that forgot to route its options
+   * through the translation.
+   */
+  test("construction routes the configured options through the translation into the engine", () => {
+
+    const options = ["Disable.Hub.DPS"];
+    const platform = makeHarness().make({ options, platform: "UniFi Access" });
+
+    assert.deepEqual(platform.featureOptions.valueList({ defaultWhenUnset: true, domain: SENSORS, option: "Hub.Sensors" }), [ "REL", "REN", "REX", "SideDoorDPS" ],
+      "the translated list reaches the engine without the sensor the user turned off");
+    assert.deepEqual(new FeatureOptions(featureOptionCategories, featureOptions, [...options]).valueList({ defaultWhenUnset: true, domain: SENSORS,
+      option: "Hub.Sensors" }), SENSORS, "the same engine built on the raw array keeps every sensor, which is what the translation is there to prevent");
+  });
+
+  // The translation is retained where the device layer reads it, so a family still needing the overlay answers every reader that resolves a selection.
+  test("construction retains the translation where the device layer reads it", () => {
+
+    const options = [ "Disable.Hub.DPS." + CONTROLLER, "Enable.Hub.DPS." + DEVICE ];
+    const platform = makeHarness().make({ options, platform: "UniFi Access" });
+
+    assert.deepEqual(platform.retiredTranslation.selection({ controller: CONTROLLER, device: DEVICE, domain: SENSORS, option: "Hub.Sensors" }), SENSORS,
+      "the device's own re-enable answers through the overlay beneath its controller's disable");
+    assert.deepEqual(platform.config.options, [ "Disable.Hub.DPS." + CONTROLLER, "Enable.Hub.DPS." + DEVICE ], "the raw entries stay as they were configured");
+  });
+
+  // A translated configuration says so exactly once, at warn, and names the entries it acted on so a user can see what was read and where to make it permanent.
+  test("a translated configuration narrates once at warn with the entries it translated", () => {
+
+    const harness = makeHarness();
+
+    harness.make({ options: ["Disable.Hub.DPS"], platform: "UniFi Access" });
+
+    assert.deepEqual(harness.lines.filter((line) => line.startsWith("warn: ")), [TRANSLATED_LINE + " { entries: [ 'Disable.Hub.DPS' ] }"],
+      "the translation is narrated once, as a warning, with the entries it acted on as its context");
+  });
+
+  // A configuration already speaking the current grammar has nothing to say, so the line stays out of the log entirely rather than reporting an empty translation.
+  test("a canonical configuration narrates nothing", () => {
+
+    const harness = makeHarness();
+
+    harness.make({ options: ["Enable.Hub.Sensors=REL,REN"], platform: "UniFi Access" });
+
+    assert.deepEqual(harness.lines.filter((line) => line.startsWith("warn: ")), [], "nothing was translated, so nothing is said");
+  });
 });
 
 // A controller as the restore sweep reads one: the devices it holds, keyed by accessory, each standing in for the verdict a real device reads.

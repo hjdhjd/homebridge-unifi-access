@@ -15,11 +15,11 @@
  * namer at the row's serialNumber, the decorated serial the live page addresses a row by, over rows shaped as the UI server answers them, the name it composed
  * beside the controller's own.
  */
-import { ALL_CHOICES, FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName, enumerateConfiguredEntries, enumerateScopeEntries,
-  formatValueList, mqttConnectionSettings, normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import type { AccessConfig, AccessConfigPatch, AccessControllerConfig } from "./access-config.ts";
 import { CONNECTION_FAILURE_HEADLINE, CONTROLLER_KEYS, CONTROLLER_LISTED_WARNING, SERVER_FAILURE_GUIDANCE, SERVER_FAILURE_HEADLINE, classifyProbeResponse,
   deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection, staleSelectionVerdict } from "./access-config.ts";
+import { FeatureOptions, addressListedElsewhere, addressListingForm, buildCatalogIndex, displayedName, enumerateScopeEntries, mqttConnectionSettings,
+  normalizeConfiguredOptions, scopeSafeId } from "homebridge-plugin-utils";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { ACCESS_MQTT_TOPIC } from "../settings.ts";
 import type { AccessControllerOptions } from "../options.ts";
@@ -77,11 +77,9 @@ const catalog = buildCatalogIndex(featureOptionCategories, featureOptions);
 const { controllerListedElsewhere, controllers, controllersWithSave, primaryController, primaryListedElsewhere, withPrimaryIdentity } =
   makeControllerList({ addressListedElsewhere, addressListingForm });
 
-// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index and the builder that makes one, the
-// controller list's reader and save composer above, homebridge-plugin-utils' display-name rule, the framework's own entry enumerators, its list formatter, and
-// its scope-identifier repair.
-const accessConfig = makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog, controllers, controllersWithSave, displayedName, enumerateConfiguredEntries,
-  enumerateScopeEntries, formatValueList, scopeSafeId });
+// The interpreters under test, built exactly the way the webUI builds them: the real engine class, the real catalog index, the controller list's reader and save
+// composer above, homebridge-plugin-utils' display-name rule, the framework's own scope entry enumerator, and its scope-identifier repair.
+const accessConfig = makeAccessConfig({ FeatureOptions, catalog, controllers, controllersWithSave, displayedName, enumerateScopeEntries, scopeSafeId });
 
 // The interpreters the suite reads off that holder, named here once so every arm below reads them as plain functions.
 const { controllersAwaitingMigration, withControllerSaved } = accessConfig;
@@ -557,98 +555,6 @@ test("a save that carries no token writes no tokens member at all, in every shap
     assert.ok(!Object.hasOwn(item, "tokens"), "the tokens member deletes by omission for " + JSON.stringify(tokens ?? null) + " rather than being written empty");
     assert.deepEqual(item, CREDENTIALS, "and what is left is the item exactly as it reads with no token configured");
   }
-});
-
-// The members each list carries, in the order a composed list reads, and the domain every assertion below resolves a composed list against.
-const SENSOR_MEMBERS = [ "DPS", "REL", "REN", "REX", "SideDoorDPS" ];
-const EVENT_MEMBERS = [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ];
-
-/* What a list resolves to at a scope, read through the served engine exactly as the plugin's own device read takes it: the same domain, and the same
- * default-when-unset reading, so what these assertions prove is what a hub would carry.
- *
- * @param options - The configured entries the patch produced.
- * @param option  - The list to resolve.
- * @param id      - The device or controller scope to resolve at, or undefined for the global reading.
- *
- * @returns The members the list selects there.
- */
-function selects(options: string[] | undefined, option: string, id?: string): readonly string[] {
-
-  return engineWith(options).valueList({ defaultWhenUnset: true, device: id, domain: (option === "Hub.Sensors") ? SENSOR_MEMBERS : EVENT_MEMBERS, option });
-}
-
-test("a globally disabled sensor composes the list of everything else, and the retired entry leaves", () => {
-
-  const patch = migrated({ options: ["Disable.Hub.DPS"] });
-
-  assert.deepEqual(patch.options, ["Enable.Hub.Sensors=REL,REN,REX,SideDoorDPS"],
-    "one member's switch turned off composes the family's list carrying every other member");
-  assert.deepEqual(selects(patch.options, "Hub.Sensors"), [ "REL", "REN", "REX", "SideDoorDPS" ], "and the composed list resolves to exactly those members");
-  assert.deepEqual(selects(patch.options, "Log.Events"), EVENT_MEMBERS, "while the family nothing was configured for composes nothing and still reads whole");
-});
-
-test("a scoped logging category turned off composes that scope's list alone", () => {
-
-  const patch = migrated({ options: ["Disable.Log.Lock." + CONTROLLER_MAC] });
-
-  assert.deepEqual(selects(patch.options, "Log.Events", CONTROLLER_MAC), [ "Doorbell", "DPS", "REL", "REN", "REX" ],
-    "the scope the entry named composes a list less the category it turned off");
-  assert.deepEqual(selects(patch.options, "Log.Events"), EVENT_MEMBERS, "and the global reading is untouched, because nothing was configured there");
-  assert.deepEqual(selects(patch.options, "Log.Events", OTHER_MAC), EVENT_MEMBERS, "as is every other scope's");
-});
-
-test("a member re-enabled at one scope over a global disable keeps that scope every member", () => {
-
-  const patch = migrated({ options: [ "Disable.Hub.DPS", "Enable.Hub.DPS." + DEVICE_MAC ] });
-
-  assert.ok(patch.options?.includes("Enable.Hub.Sensors." + DEVICE_MAC.toLowerCase() + "=" + ALL_CHOICES),
-    "a scope whose composition is every member stores the all-members form the catalog registers, rather than restating the whole list");
-  assert.deepEqual(selects(patch.options, "Hub.Sensors", DEVICE_MAC), SENSOR_MEMBERS, "so the device keeps the sensor the global entry took away");
-  assert.deepEqual(selects(patch.options, "Hub.Sensors"), [ "REL", "REN", "REX", "SideDoorDPS" ], "while every other hub reads the global composition");
-});
-
-test("a retired entry is read and dropped in any spelling the grammar accepts", () => {
-
-  // The lower-cased dotted spelling is one a hand-authored 1.x file carries, and the drop reads through the framework's own enumerator rather than by matching
-  // text, so it is caught by the same reading that composed from it.
-  const patch = migrated({ options: [("Disable.Hub.REX." + CONTROLLER_MAC).toLowerCase()] });
-
-  assert.deepEqual(selects(patch.options, "Hub.Sensors", CONTROLLER_MAC), [ "DPS", "REL", "REN", "SideDoorDPS" ], "the entry is read at the scope it names");
-
-  for(const entry of patch.options ?? []) {
-
-    assert.ok(!entry.toLowerCase().includes("hub.rex"), "and no retired entry survives the pass: " + entry);
-  }
-});
-
-test("a configuration carrying no retired entry composes nothing at all", () => {
-
-  assert.equal(accessConfig.migrate({ options: ["Enable.Hub.Sensors=REL,REN"] }, UNRESOLVED), null,
-    "a configuration already carrying its lists has nothing left to find, so a later open stages no patch");
-  assert.equal(accessConfig.migrate({ options: [] }, UNRESOLVED), null, "and neither does one carrying no entries at all");
-});
-
-test("a scope restating what it would inherit composes no entry of its own", () => {
-
-  const patch = migrated({ options: [ "Disable.Hub.DPS", "Disable.Hub.DPS." + DEVICE_MAC ] });
-
-  assert.deepEqual(patch.options, ["Enable.Hub.Sensors=REL,REN,REX,SideDoorDPS"],
-    "the scoped entry composes the same members the global one does, so emitting a scoped list would churn the file for nothing");
-  assert.deepEqual(selects(patch.options, "Hub.Sensors", DEVICE_MAC), [ "REL", "REN", "REX", "SideDoorDPS" ], "and the device still reads what it read before");
-});
-
-test("the side door's sensor and the doorbell category compose onto their own families", () => {
-
-  const sensors = migrated({ options: ["Disable.Hub.SideDoor.DPS"] });
-
-  assert.deepEqual(selects(sensors.options, "Hub.Sensors"), [ "DPS", "REL", "REN", "REX" ],
-    "a name whose own prefix is another catalog option is still read as the option it is");
-
-  const events = migrated({ options: ["Disable.Log.Doorbell"] });
-
-  // The raw entry is read as well as its resolved reading, because the engine resolves members in its own domain order and only the entry shows the order composed.
-  assert.deepEqual(events.options, ["Enable.Log.Events=DPS,Lock,REL,REN,REX"], "and the doorbell category composes onto the logging list in the order it lists them");
-  assert.deepEqual(selects(events.options, "Log.Events"), [ "DPS", "Lock", "REL", "REN", "REX" ], "which resolves to exactly those categories");
 });
 
 test("an address change edits that item rather than adding a second one beside it, and an add appends", () => {

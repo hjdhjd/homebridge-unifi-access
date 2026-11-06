@@ -9,11 +9,12 @@ import { APIEvent, AccessoryPersistence, FeatureOptions, HttpListener, Perms, Ti
 import type { AccessAccessory, AccessPlatformConfig } from "./types.ts";
 import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessLoginOutcome, ControllerOwnershipKeys, MembershipClaims } from "./policy.ts";
-import type { Clock, HomebridgePluginLogging, Nullable } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, Nullable, RetiredTranslation } from "homebridge-plugin-utils";
 import { accessoryStranded, composeConnectIdentity, reclaimFenceOpen, resolveWebhookPort } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { AccessController } from "./controller/controller.ts";
 import { isPlainObject } from "unifi-access";
+import { translateRetiredOptions } from "./options-retired.ts";
 
 /* What one controller's startup settled: the controller itself, and what its login established about its identity. The two are paired at the moment the login is
  * started, so nothing downstream has to match an outcome back to a controller by its position in an array.
@@ -38,6 +39,7 @@ export class AccessPlatform implements DynamicPlatformPlugin {
   public readonly log: Logging;
   public readonly mqttFactory: typeof createMqttClient;
   public readonly persistence: AccessoryPersistence;
+  public readonly retiredTranslation: RetiredTranslation;
   /* The accessories this plugin carries, restored by Homebridge or minted by a controller. The restore path and the registration methods below are its only
    * writers, and everyone else reads it through the view beside them.
    */
@@ -71,9 +73,28 @@ export class AccessPlatform implements DynamicPlatformPlugin {
     this.api = api;
     this.clock = systemClock;
     this.controllers = [];
-    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, config?.options ?? []);
+
+    /* The configured options as the engine should see them. A configuration written for an earlier version of this plugin can name options the current catalog does
+     * not declare, and read through that catalog such an entry answers nothing the user meant by it, so a sensor or an event category the user turned off would come
+     * back. The translation rewrites each such shape into the current grammar before the engine is built, and carries the runtime overlay that gives each family
+     * still needing it its exact historic meaning. The overlay reads the translation it was built with, not this.config.options, which keeps the raw entries as they
+     * were written.
+     */
+    const retiredTranslation = translateRetiredOptions(config?.options ?? []);
+
+    this.featureOptions = new FeatureOptions(featureOptionCategories, featureOptions, [...retiredTranslation.configuredOptions]);
     this.log = log;
     this.mqttFactory = mqttFactory;
+    this.retiredTranslation = retiredTranslation;
+
+    // Say once that a translation happened, and where the permanent fix is. It is a warning rather than an informational line because the translation is exact but
+    // in-memory: the configuration on disk still speaks the older grammar until the settings page rewrites it.
+    if(retiredTranslation.translated.length) {
+
+      this.log.warn("Feature option entries from an earlier version of this plugin were translated automatically at startup. Open the plugin settings in the " +
+        "Homebridge UI to migrate your configuration permanently.", { entries: retiredTranslation.translated });
+    }
+
     this.#debugLog = debugGatedLog(log, () => this.featureOptions.test("Log.Debug"));
     this.#shutdownController = new AbortController();
     this.#shutdownRun = null;

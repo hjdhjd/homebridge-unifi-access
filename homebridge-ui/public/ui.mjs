@@ -6,8 +6,7 @@
 
 import { CONTROLLER_LISTED_WARNING, classifyProbeResponse, deviceListResult, hasValidIdentity, makeAccessConfig, makeControllerList, readProbeRejection,
   staleSelectionVerdict } from "./lib/webui/access-config.js";
-import { FeatureOptions, buildCatalogIndex, enumerateConfiguredEntries, enumerateScopeEntries, formatValueList,
-  scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
+import { FeatureOptions, buildCatalogIndex, enumerateScopeEntries, scopeSafeId } from "homebridge-plugin-utils/featureOptions.js";
 import { TOKEN_REFUSED_WARNING, makeControllerActions, makeControllerProbe } from "./lib/webui/controller-actions.js";
 import { addressListedElsewhere, addressListingForm } from "homebridge-plugin-utils/webui/address.js";
 import { createActionGuard, withDeadline } from "homebridge-plugin-utils/webUi-liveness.mjs";
@@ -35,10 +34,10 @@ const PROBE_DEADLINE = 5;
  * page's parse, while WIRING_DEADLINE starts only once the loader has imported this module, so the envelope settles inside that watchdog whenever the loader's own
  * startup fits in the margin between the two...and then a wiring step that hangs against an unresponsive host is not what makes the settings panel look broken.
  *
- * The catalog read carries the bound homebridge-plugin-utils gives it and each migration probe carries PROBE_DEADLINE, but the session open and its write carry
- * none, and the bounded steps run one after another, so their bounds add up rather than overlap. This outer guard covers the unbounded steps and caps the sum. An
- * expiry stops the pass at its next cancellation point, and the whole pass retries at the next open. A configuration that has already converged never comes near
- * this guard, because its envelope is the catalog fetch and the session open and nothing else.
+ * The catalog read carries the bound homebridge-plugin-utils gives it, and each migration probe and each feature-option translate round trip carries PROBE_DEADLINE,
+ * but the session open and its write carry none, and the bounded steps run one after another, so their bounds add up rather than overlap. This outer guard covers
+ * the unbounded steps and caps the sum. An expiry stops the pass at its next cancellation point, and the whole pass retries at the next open. A configuration that
+ * has already converged never comes near this guard, because its envelope is the catalog fetch, the session open and one translate round trip, and nothing else.
  */
 const WIRING_DEADLINE = 8;
 
@@ -67,8 +66,8 @@ const accessConfig = async () => {
 
   const { categories, options } = await ui.featureOptions.catalog();
 
-  return makeAccessConfig({ FeatureOptions, buildCatalogIndex, catalog: buildCatalogIndex(categories, options), controllers, controllersWithSave, displayedName,
-    enumerateConfiguredEntries, enumerateScopeEntries, formatValueList, scopeSafeId });
+  return makeAccessConfig({ FeatureOptions, catalog: buildCatalogIndex(categories, options), controllers, controllersWithSave, displayedName, enumerateScopeEntries,
+    scopeSafeId });
 };
 
 /* Execute our first run screen until the primary controller carries both of the things the plugin needs of it. The two are asked separately because the plugin's own
@@ -1461,7 +1460,46 @@ const wireAccessConfig = async () => {
     }
   }));
 
-  const patch = migrate(session.platform, macByAddress);
+  const migratePatch = migrate(session.platform, macByAddress);
+
+  /* Fold the feature-option translation into the same envelope, as a second writer over the first one's output. The composition is a sequence rather than a merge: the
+   * UI server composes the final patch from the controller migration's own and the translation it then runs, so exactly one options array is ever written.
+   *
+   * The first call carries no topology at all, so it is the cheap detector and, for every family that needs none, the rewrite as well. A converged configuration
+   * answers here with nothing remaining and nothing to write, and the flow stops - it never probes a controller and never touches the disk.
+   */
+  const composed = await withDeadline({ promise: homebridge.request("/translateOptions", { migratePatch, platformOptions: session.platform?.options ?? [] }),
+    seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null);
+
+  let patch = composed ? composed.patch : migratePatch;
+
+  /* A family that still carries retired entries is one whose exact rewrite needs to know which controller its scopes sit under, so the flow widens its probes past the
+   * controllers that were awaiting a MAC address and asks every configured controller for its devices. This is the only path that pays for the wider probe, and a
+   * configuration with nothing left to place never reaches it.
+   *
+   * Each probe is bounded exactly as the pass above bounds its own, and a controller that does not answer simply contributes no topology: the families whose scopes it
+   * would have placed keep their entries for a later open, and the runtime overlay keeps honoring them meanwhile. A controller reached with an API token alone answers
+   * under the address identity its row carries, so its devices place exactly as a credentialed controller's do.
+   */
+  if(composed?.remaining && !wiringSignal.aborted) {
+
+    const topology = (await Promise.all(controllers(session.platform).map(async ({ address, password, tokens, username, verifyTls }) => {
+
+      const answer = classifyProbeResponse(await withDeadline({ promise: homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }),
+        seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null));
+      const id = controllerSerial(answer);
+
+      return id ? { devices: answer.devices.filter((device) => !isController(device) && device.serialNumber).map((device) => device.serialNumber), id } : null;
+    }))).filter((entry) => entry);
+
+    const widened = await withDeadline({ promise: homebridge.request("/translateOptions", { migratePatch, platformOptions: session.platform?.options ?? [], topology }),
+      seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null);
+
+    if(widened) {
+
+      patch = widened.patch;
+    }
+  }
 
   // The signal is read immediately before the write, so an envelope that expired while the probes were still running cannot stage a patch after the fact.
   if(wiringSignal.aborted) {

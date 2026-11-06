@@ -272,8 +272,8 @@ test("the hub's sensors and its logging categories are each one all-members sele
 
 test("no per-sensor or per-category boolean survives in the catalog", () => {
 
-  // Each name a 1.x configuration addressed a single sensor or a single logged category by. The lists supersede all of them, and the settings migration is what
-  // carries a user's choices across, so a name still declared here would be a second home for a setting that has one.
+  // Each name a 1.x configuration addressed a single sensor or a single logged category by. The lists supersede all of them, and the startup translation and the
+  // settings migration are what carry a user's choices across, so a name still declared here would be a second home for a setting that has one.
   const retired = { Hub: [ "DPS", "REL", "REN", "REX", "SideDoor.DPS" ], Log: [ "Doorbell", "DPS", "Lock", "REL", "REN", "REX" ] };
 
   for(const [ category, names ] of Object.entries(retired)) {

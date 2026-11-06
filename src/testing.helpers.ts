@@ -34,13 +34,14 @@ import type { AccessControllerOptions, AccessOptions } from "./options.ts";
 import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
 import { AccessoryPersistence, ChangeReason, FeatureOptions } from "homebridge-plugin-utils";
-import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable, createMqttClient } from "homebridge-plugin-utils";
+import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable, RetiredTranslation, createMqttClient } from "homebridge-plugin-utils";
 import { TestClock, TestMqttClientFactory, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
 import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { AccessController } from "./controller/controller.ts";
 import type { AccessPlatform } from "./platform.ts";
+import { translateRetiredOptions } from "./options-retired.ts";
 
 /**
  * The Homebridge runtime every suite runs on: the hap-nodejs copy and the classes Homebridge loads from this repository's tree, resolved once for the whole process.
@@ -327,7 +328,7 @@ export function readerRecord(overrides: Record<string, unknown> = {}): AccessSta
  * place rather than a silent fallback at every site that stands one up.
  */
 type PlatformSurface = Pick<AccessPlatform, "accessories" | "api" | "clock" | "config" | "featureOptions" | "localAddressFor" | "log" | "mqttFactory" |
-  "persistence" | "registerAccessory" | "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
+  "persistence" | "registerAccessory" | "retiredTranslation" | "signal" | "stopping" | "unregisterAccessory" | "webhookListener" | "webhookPort">;
 
 // What an arm varies about the platform it stands up. Every member has a default, so an arm names only what it reads or records.
 export interface PlatformDoubleOptions {
@@ -337,13 +338,15 @@ export interface PlatformDoubleOptions {
   api?: TestHomebridgeApi;
   clock?: Clock;
   config?: AccessOptions;
-  // The feature-option entries an engine is built from, when the arm does not hand over an engine of its own.
+  // The feature-option entries the retired-option translation and the engine are built from, when the arm hands over neither of its own.
   entries?: string[];
   featureOptions?: FeatureOptions;
   localAddressFor?: (host: string) => Promise<string>;
   log?: Pick<Logging, "error" | "info" | "warn">;
   // The factory a real controller over the double builds its MQTT client through. An arm handing none gets a fresh TestMqttClientFactory's, so no suite reaches a broker.
   mqttFactory?: typeof createMqttClient;
+  // The retired-option translation the device layer's list reads consult ahead of the engine, when the arm builds its own rather than handing over entries.
+  retiredTranslation?: RetiredTranslation;
   signal?: AbortSignal;
   webhookListener?: () => HttpListener;
   webhookPort?: number;
@@ -370,13 +373,19 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
    * as it is.
    */
   const persistence = new AccessoryPersistence({ api, clock, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
+
+  /* The retired-option translation and the engine travel together as they do in the platform constructor: the entries run through the translation, and the engine
+   * is built on the translation's boot view, so the engine and the overlay always come from one entry list. A double that built its engine on the raw entries would
+   * let a row about the retired grammar pass or fail for the wrong reason, because the engine would see the shapes the translation exists to keep away from it.
+   */
+  const retiredTranslation = options.retiredTranslation ?? translateRetiredOptions(options.entries ?? []);
   const surface: PlatformSurface = {
 
     accessories,
     api: api as unknown as API,
     clock,
     config: options.config ?? { controllers: [], options: [] },
-    featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, options.entries ?? []),
+    featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, [...retiredTranslation.configuredOptions]),
     localAddressFor: options.localAddressFor ?? (async (): Promise<string> => "10.0.0.7"),
     log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
     mqttFactory: options.mqttFactory ?? new TestMqttClientFactory().create,
@@ -386,6 +395,7 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
       api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       accessories.push(accessory);
     },
+    retiredTranslation,
     signal: options.signal ?? new AbortController().signal,
     // A double never begins a shutdown of its own, so an arm ends the platform it stands up by aborting the signal it handed over.
     stopping: false,

@@ -616,10 +616,16 @@ export abstract class AccessDevice extends AccessBase {
    * An option enabled at an explicit scope with nothing stored reads as its registered default rather than as the empty list. That is what a hand-written
    * `Enable.Hub.Sensors.<device>` means - the user turned the list on for that hub and named nothing - and reading it as an empty selection would silently
    * withhold every member. A selection the user emptied on purpose is a different reading and still answers empty.
+   *
+   * A retired family's overlay answers ahead of the engine, at this device's own device and controller, while the configuration still carries entries the boot view
+   * could only approximate, and it answers nothing once the configuration has converged, which costs one map lookup. Every family's selection is expressed in a
+   * domain, so a read with no domain names no family and goes to the engine alone.
    */
   public getFeatureValueList(option: string, domain?: readonly string[]): readonly string[] {
 
-    return this.platform.featureOptions.valueList({ controller: this.controller.id, defaultWhenUnset: true, device: this.id, domain, option });
+    const overlay = (domain === undefined) ? undefined : this.platform.retiredTranslation.selection({ controller: this.controller.id, device: this.id, domain, option });
+
+    return overlay ?? this.platform.featureOptions.valueList({ controller: this.controller.id, defaultWhenUnset: true, device: this.id, domain, option });
   }
 
   // Utility for checking whether a feature option is enabled on a device.
