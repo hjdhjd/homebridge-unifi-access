@@ -8,7 +8,7 @@ import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions, HAPStatus, MqttOfflineError, 
 import type { AccessDevice as AccessDeviceProjection, AccessEventPacket, AccessStateDevice } from "unifi-access";
 import { Characteristic, RESTORED_LINE, Service, hap, hubRecord, makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, savesOn,
   writesOn } from "../testing.helpers.ts";
-import { TestClock, TestMqttClient, settle, triggerSet } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, capturingLog, linesAt, settle, triggerSet } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceName, deviceSerial } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
@@ -18,7 +18,6 @@ import { AccessDevice } from "./device.ts";
 import type { DecoratedSerial } from "../policy.ts";
 import type { TestAccessAccessory } from "../testing.helpers.ts";
 import assert from "node:assert/strict";
-import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
 import test from "node:test";
 
@@ -127,9 +126,9 @@ interface Harness {
   // The engine this harness seeded, so an arm can ask it the same question the device asks it.
   featureOptions: FeatureOptions;
   // The lines the deviation log lands on, rendered as the logger would render them. It speaks at info, which is the channel a user reads at startup.
-  infoLines: string[];
+  readonly infoLines: readonly string[];
   // What the device wrote to the accessory's information service, the identity stamp and a rename's names among them.
-  readonly infoWrites: { characteristic: string; value: unknown }[];
+  readonly infoWrites: readonly { characteristic: string; value: unknown }[];
   // The record the projection answers from, which an arm moves to read the verdict, undefined standing for a record that has left the state.
   live: { record: AccessStateDevice | undefined };
   loop: () => Promise<void>;
@@ -138,8 +137,8 @@ interface Harness {
   registrations: string[];
   removals: string[];
   // The UUIDs each save Homebridge accepted named, in the order it accepted them, which only an arm that put the accessory on the bridge can see.
-  readonly saves: string[][];
-  warnings: string[];
+  readonly saves: readonly string[][];
+  readonly warnings: readonly string[];
 }
 
 /* Build the harness around one scripted observation. The projection answers peek() live, as the library's does: it starts at the construction record and each scripted
@@ -167,8 +166,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
   const emissions: AccessEventPacket[] = [];
   const registrations: string[] = [];
   const removals: string[] = [];
-  const infoLines: string[] = [];
-  const warnings: string[] = [];
+  const log = capturingLog();
   const stood = makeAccessory({ name: init.accessoryName });
   const construction = init.construction ?? record();
   const engine = new FeatureOptions(featureOptionCategories, featureOptions, init.options ?? []);
@@ -199,8 +197,7 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     api,
     clock,
     featureOptions: engine,
-    log: { error: (): void => undefined, info: (message: string, ...parameters: unknown[]): void => { infoLines.push(format(message, ...parameters)); },
-      warn: (message: string, ...parameters: unknown[]): void => { warnings.push(format(message, ...parameters)); } }
+    log
   });
 
   // The persistence saves only an accessory the bridge holds, so an arm about what reaches Homebridge's accessory cache registers the accessory first, as adoption does.
@@ -238,8 +235,11 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     controller,
     emissions,
     featureOptions: engine,
-    infoLines,
-    get infoWrites(): { characteristic: string; value: unknown }[] {
+    get infoLines(): readonly string[] {
+
+      return linesAt(log.entries, "info");
+    },
+    get infoWrites(): readonly { characteristic: string; value: unknown }[] {
 
       return writesOn(stood.accessory, stood.information);
     },
@@ -248,11 +248,14 @@ function makeHarness(script: (AccessStateDevice | undefined)[], init: { accessor
     projection: projection as unknown as AccessDeviceProjection,
     registrations,
     removals,
-    get saves(): string[][] {
+    get saves(): readonly string[][] {
 
       return savesOn(api);
     },
-    warnings
+    get warnings(): readonly string[] {
+
+      return linesAt(log.entries, "warn");
+    }
   };
 }
 

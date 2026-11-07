@@ -8,12 +8,12 @@ import { APIEvent, FeatureOptions, HAPStatus, createMqttClient, onAbort } from "
 import type { AccessAccessory, AccessAccessoryContext, AccessPlatformConfig } from "./types.ts";
 import { AccessApiError, AccessClient, AccessNetworkError, createStateStore } from "unifi-access";
 import type { AccessLoginOutcome, MembershipClaims } from "./policy.ts";
-import { Characteristic, Service, accessoryUuid, makeClientDouble, makeControllerDouble, makeTestAccessory, makeTestApi, platformInternals,
-  savesOn } from "./testing.helpers.ts";
+import { Characteristic, Service, accessoryUuid, labeledLines, makeClientDouble, makeControllerDouble, makeTestAccessory, makeTestApi,
+  platformInternals, savesOn } from "./testing.helpers.ts";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { TestHomebridgeApi, TestMqttPublish } from "homebridge-plugin-utils/testing";
-import { TestMqttClient, TestMqttClientFactory, assertNoUnhandledRejections, expectAt, hapStatus, settle, settlePastMqttEnd, settleUntil, stopListening,
-  triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
+import { TestMqttClient, TestMqttClientFactory, assertNoUnhandledRejections, capturingLog, expectAt, hapStatus, linesAt, settle, settlePastMqttEnd, settleUntil,
+  stopListening, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { describe, mock, test } from "node:test";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import { hubSensorChoices, serialForm } from "./policy.ts";
@@ -22,7 +22,6 @@ import { AccessPlatform } from "./platform.ts";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { format } from "node:util";
 import { once } from "node:events";
 
 interface Harness {
@@ -31,35 +30,27 @@ interface Harness {
    * platform's own abort controller, which is hard-private.
    */
   api: TestHomebridgeApi;
-  lines: string[];
+  // Every line the platform said, led by its level and rendered as the user reads it, so an arm asserts a removal's own sentence rather than the format string behind it.
+  readonly lines: readonly string[];
   // Construct the platform over this harness's log and API double. The MQTT factory a row names is handed over as the fourth argument, and only then, so every other
   // row builds the platform with the three arguments Homebridge passes.
   make: (config: AccessPlatformConfig, injected?: { mqttFactory?: typeof createMqttClient }) => AccessPlatform;
   // The accessories each registration Homebridge accepted named, in the order it accepted them.
-  readonly registered: string[];
+  readonly registered: readonly string[];
   // Hand cached accessories to a platform through Homebridge's own restore loop, which calls the platform's configureAccessory for each and bridges it.
   restore: (platform: AccessPlatform, ...accessories: AccessAccessory[]) => void;
   // The accessories each unregister Homebridge accepted named, in the order it accepted them.
-  readonly unregistered: string[];
+  readonly unregistered: readonly string[];
   /* How many accessories each save Homebridge accepted was handed, in the order the saves happened. The platform makes no save of its own, so each entry is one its
    * accessory persistence made, and what an arm reads here is whether a save had gone out by a given moment, which the count answers as well as the list would.
    */
-  readonly updated: number[];
+  readonly updated: readonly number[];
 }
 
 function makeHarness(): Harness {
 
   const api = makeTestApi();
-  const lines: string[] = [];
-
-  // Every line rendered exactly as the user reads it, which is what lets an arm assert a removal's own sentence rather than the format string behind it.
-  const log = {
-
-    debug: (message: string, ...parameters: unknown[]): void => { lines.push("debug: " + format(message, ...parameters)); },
-    error: (message: string, ...parameters: unknown[]): void => { lines.push("error: " + format(message, ...parameters)); },
-    info: (message: string, ...parameters: unknown[]): void => { lines.push("info: " + format(message, ...parameters)); },
-    warn: (message: string, ...parameters: unknown[]): void => { lines.push("warn: " + format(message, ...parameters)); }
-  };
+  const log = capturingLog();
 
   // The UUIDs the accepted calls of one kind named, in the order Homebridge accepted them.
   const targets = (kind: "register" | "unregister"): string[] => api.calls.flatMap((call) => (call.kind === kind) ? call.accessories.map((target) => target.UUID) : []);
@@ -67,14 +58,17 @@ function makeHarness(): Harness {
   return {
 
     api,
-    lines,
+    get lines(): readonly string[] {
+
+      return labeledLines(log.entries);
+    },
     make: (config: AccessPlatformConfig, { mqttFactory }: { mqttFactory?: typeof createMqttClient } = {}): AccessPlatform => {
 
       const homebridgeArguments = [ log as unknown as Logging, config, api as unknown as API ] as const;
 
       return (mqttFactory === undefined) ? new AccessPlatform(...homebridgeArguments) : new AccessPlatform(...homebridgeArguments, { mqttFactory });
     },
-    get registered(): string[] {
+    get registered(): readonly string[] {
 
       return targets("register");
     },
@@ -82,11 +76,11 @@ function makeHarness(): Harness {
 
       api.restorePlatformAccessories({ accessories, platform, platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
     },
-    get unregistered(): string[] {
+    get unregistered(): readonly string[] {
 
       return targets("unregister");
     },
-    get updated(): number[] {
+    get updated(): readonly number[] {
 
       return api.calls.flatMap((call) => (call.kind === "update") ? [call.accessories.length] : []);
     }
@@ -118,34 +112,33 @@ test("a line that speaks for the plugin as a whole answers the global debug entr
 
   const enabled = makeHarness();
   const platform = enabled.make({ options: ["Enable.Log.Debug"], platform: "UniFi Access" });
-
-  // Construction narrates itself, and this test is about the gate rather than the constructor.
-  enabled.lines.length = 0;
+  // Construction narrates itself, and this test is about the gate rather than the constructor, so each arm reads only what follows it.
+  const enabledConstruction = enabled.lines.length;
 
   platform.debug("Plugin wide.");
 
   /* The line goes out on the warn channel, which Homebridge prints whether or not its own debug switch is set, and it carries no owner name...a line speaking for the
    * plugin as a whole has neither a device nor a controller to attribute it to.
    */
-  assert.deepEqual(enabled.lines, ["warn: Plugin wide."]);
+  assert.deepEqual(enabled.lines.slice(enabledConstruction), ["warn: Plugin wide."]);
 
   // A device-suffixed entry turns on that one device, so a line with no owner to name is not what the user asked for and stays silent.
   const scoped = makeHarness();
   const scopedPlatform = scoped.make({ options: ["Enable.Log.Debug.DEVICE1"], platform: "UniFi Access" });
+  const scopedConstruction = scoped.lines.length;
 
-  scoped.lines.length = 0;
   scopedPlatform.debug("Plugin wide.");
 
-  assert.deepEqual(scoped.lines, []);
+  assert.deepEqual(scoped.lines.slice(scopedConstruction), []);
 
   // With nothing configured anywhere, the gate is closed: debug output happens because a user asked for it and for no other reason.
   const quiet = makeHarness();
   const quietPlatform = quiet.make({ options: [], platform: "UniFi Access" });
+  const quietConstruction = quiet.lines.length;
 
-  quiet.lines.length = 0;
   quietPlatform.debug("Plugin wide.");
 
-  assert.deepEqual(quiet.lines, []);
+  assert.deepEqual(quiet.lines.slice(quietConstruction), []);
 });
 
 test("a controller with a whole identity is configured and a half identity is refused", () => {
@@ -651,14 +644,13 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   /* The wired half, driven through the real launch: a login that rejects outright is absorbed at its own pair, said once against the controller it happened to,
    * and read as an identity nobody can attribute - so the pass stands down for the session instead of the rejection escaping unhandled.
    */
-  const failures: string[] = [];
+  const failingLog = capturingLog();
   const wired = makeHarness();
   const wiredPlatform = wired.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }],
     options: ["Disable.Controller.DelayDeviceRemoval"], platform: "UniFi Access" });
 
   const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
-    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
-    login: async (): Promise<never> => { throw new Error("Connection refused."); } });
+    log: failingLog, login: async (): Promise<never> => { throw new Error("Connection refused."); } });
 
   wired.restore(wiredPlatform, cachedAccessory("stranded", "Stranded", { controller: "AA:BB:CC:DD:EE:99", mac: "aa:bb:cc:dd:ee:42" }));
 
@@ -674,7 +666,8 @@ test("an unavailable identity fences the reclaim off, and a rejecting login maps
   const refused = "Unable to finish starting the UniFi Access controller: Connection refused. Stopping it until Homebridge is restarted. " +
     "Accessories left behind by a controller that was removed or replaced will not be cleaned up until the next restart.";
 
-  assert.ok(failures.includes(refused), "the failure must be said against the controller it belongs to, naming the refusal and what it costs the session");
+  assert.ok(linesAt(failingLog.entries, "error").includes(refused),
+    "the failure must be said against the controller it belongs to, naming the refusal and what it costs the session");
   assert.deepEqual(wired.unregistered, [], "and the pass must stand down for the session");
 });
 
@@ -1140,13 +1133,12 @@ test("a login rejected past connect says so once, stops that controller once, an
 
   const harness = makeHarness();
   const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Enable.Log.Debug"], platform: "UniFi Access" });
-  const failures: string[] = [];
+  const failingLog = capturingLog();
 
   let stops = 0;
 
   const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
-    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
-    login: async (): Promise<never> => { throw new Error("The record is gone."); },
+    log: failingLog, login: async (): Promise<never> => { throw new Error("The record is gone."); },
     shutdown: async (): Promise<void> => { stops++; } });
   const inner = platformInternals(platform);
 
@@ -1155,7 +1147,7 @@ test("a login rejected past connect says so once, stops that controller once, an
 
   await settle();
 
-  assert.deepEqual(failures, [loginRejectedLine("The record is gone")], "the line is said once against the controller it happened to");
+  assert.deepEqual(linesAt(failingLog.entries, "error"), [loginRejectedLine("The record is gone")], "the line is said once against the controller it happened to");
   assert.equal(stops, 1, "that controller is stopped once");
   assert.ok(harness.lines.some((line) => line.endsWith("their logins reported unavailable.")), "and its report reads unavailable, so the reclaim stands down");
 });
@@ -1165,13 +1157,12 @@ test("a login rejected once its controller's signal has aborted writes nothing a
 
   const harness = makeHarness();
   const platform = harness.make({ controllers: [{ address: "1.2.3.4", tokens: { access: "token" } }], options: ["Enable.Log.Debug"], platform: "UniFi Access" });
-  const failures: string[] = [];
+  const failingLog = capturingLog();
 
   let stops = 0;
 
   const failing = makeControllerDouble({ config: { address: "1.2.3.4" },
-    log: { error: (message: string, ...parameters: unknown[]): void => void failures.push(format(message, ...parameters)) },
-    login: async (): Promise<never> => { throw new Error("The record is gone."); },
+    log: failingLog, login: async (): Promise<never> => { throw new Error("The record is gone."); },
     shutdown: async (): Promise<void> => { stops++; }, signal: AbortSignal.abort() });
   const inner = platformInternals(platform);
 
@@ -1180,7 +1171,7 @@ test("a login rejected once its controller's signal has aborted writes nothing a
 
   await settle();
 
-  assert.deepEqual(failures, [], "the rejection is read, and nothing is said about it");
+  assert.deepEqual(linesAt(failingLog.entries, "error"), [], "the rejection is read, and nothing is said about it");
   assert.equal(stops, 0, "and the stop already under way is not asked for again");
   assert.ok(harness.lines.some((line) => line.endsWith("their logins reported unavailable.")), "while its report still reads unavailable");
 });

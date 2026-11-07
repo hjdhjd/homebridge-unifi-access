@@ -21,7 +21,7 @@ import { Characteristic, GATE_DOOR_LOCK_RELAY, GATE_OPERATOR_RELAY, RESTORED_LIN
   makeControllerDouble, makePlatformDouble, makeTestAccessory, makeTestApi, runtime, savesOn, writesOn } from "../testing.helpers.ts";
 import { EventEmitter, getEventListeners, on } from "node:events";
 import type { FeatureOptionChoice, MqttPublishInit, MqttTopicEntry, RetiredTranslation } from "homebridge-plugin-utils";
-import { TestClock, TestMqttClient, hapStatus, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClient, capturingLog, formatLogEntry, hapStatus, linesAt, settle, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { accessMethods, hubSensorChoices, logEventChoices, officialDeviceModel } from "../policy.ts";
 import { featureOptionCategories, featureOptions } from "../options.ts";
 import { AccessHub } from "./hub.ts";
@@ -30,7 +30,6 @@ import type { Mock } from "node:test";
 import type { TestAccessAccessory } from "../testing.helpers.ts";
 import type { TestMqttPublish } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
-import { format } from "node:util";
 import { mqttTopics } from "../mqtt.ts";
 import test from "node:test";
 import { translateRetiredOptions } from "../options-retired.ts";
@@ -166,15 +165,17 @@ interface HubHarness {
   // What the controller's connection answers about itself, in a holder the client double reads live so an arm can move it under a hub that is already running: the first
   // fault's flag, which only a blip's arm sets false, and the verdict the library reaches once it has concluded the connection lost.
   connection: { isHealthy: boolean; isLost: boolean };
-  debugs: string[];
+  // Every line said at debug or warning level, in the order said, because the plugin's debug output arrives at warning level with Log.Debug on.
+  readonly debugs: readonly string[];
   deliver: (event: string, delivery: unknown) => void;
   // The topology's doors, the map the client double's snapshot answers from, so an arm can teach a running gate a door or lose one under it.
   doors: Map<string, { name: string; unique_id: string }>;
   emit: (event: string, packet: unknown) => void;
-  errors: string[];
+  readonly errors: readonly string[];
   fetches: string[];
   hub: AccessHub;
-  lines: string[];
+  // Every line said at info level, the controller's own behind the prefix its logger composes.
+  readonly lines: readonly string[];
   // The record the hub's projection answers from, which an arm moves to read the verdict, undefined standing for a record that has left the state. An arm over a store
   // moves the store instead.
   live: { record: AccessStateDevice | undefined };
@@ -191,7 +192,7 @@ interface HubHarness {
   // Every doorbell ring or cancel the hub dispatched through the official API, in the order it dispatched them.
   rings: { cancel: boolean; readerId: string }[];
   // The UUIDs each save Homebridge accepted named, in the order it accepted them, which only an arm that put the accessory on the bridge can see.
-  readonly saves: string[][];
+  readonly saves: readonly string[][];
   // The accessory's own service list, HAP's array, so a creation or a retirement the hub makes is read here as it happens.
   services: Service[];
   setDoorState: (entry: AccessDoorStateEntry) => void;
@@ -263,10 +264,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const accessMethodWrites: RecordedAccessMethodWrite[] = [];
   const clock = new TestClock();
   const commands: RecordedCommand[] = [];
-  const debugs: string[] = [];
-  const errors: string[] = [];
   const fetches: string[] = [];
-  const lines: string[] = [];
+  // Every line the run said, the hub's, the platform's, the controller's and the broker double's alike, which the harness views read by level.
+  const log = capturingLog();
   const publishes: { init: MqttPublishInit | undefined; payload: string; topic: string }[] = [];
   const releases: (() => void)[] = [];
   const requests: string[] = [];
@@ -345,16 +345,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const mode = options.official ? (options.credentials ? "dual" : "token") : "credential";
 
   /* The broker the hub registers against: the shipped recording double, which keeps every registration with the signal it was registered under and releases
-   * it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker. It reports into the harness's own sinks, so what the
+   * it when that signal aborts, so an arm can read what the hub asked for and drive it without a broker. It reports into the harness's own log, so what the
    * double says about a publish it refused is read exactly where an arm reads everything else the run said.
    */
-  const mqtt = new TestMqttClient({ log: {
-
-    debug: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)),
-    error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
-    warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters))
-  } });
+  const mqtt = new TestMqttClient({ log });
 
   /* The hub's own observation yields once per scripted record and answers peek() live, as the library's projection does: it starts at the construction record and each
    * scripted record takes its place ahead of the yield, so an arm naming no script observes nothing and an arm moving the holder moves what every later read finds. An
@@ -412,12 +406,8 @@ function makeHub(options: HubOptions = {}): HubHarness {
      */
     clock,
     featureOptions: new FeatureOptions(featureOptionCategories, featureOptions, [...retiredTranslation.configuredOptions]),
-    /* The lines are captured formatted, because what a user reads is the composed sentence rather than the format string and its arguments. The plugin's debug
-     * output arrives on the warn sink, which is how the shared logger surfaces it without Homebridge's own debug flag, so that is where an arm reads it.
-     */
-    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => void debugs.push(format(message, ...parameters)) },
+    // The plugin's debug output arrives at warning level, which is how the shared logger surfaces it without Homebridge's own debug flag.
+    log,
     retiredTranslation
   });
 
@@ -495,7 +485,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
         handlers.set(event, registered);
       }
     },
-    log: { info: (message: string, ...parameters: unknown[]): void => void lines.push(CONTROLLER_PREFIX + format(message, ...parameters)) },
+    log: { info: (message: string, ...parameters: unknown[]): void => log.info(CONTROLLER_PREFIX + message, ...parameters) },
     mqtt,
     mqttPublish: (topic: string, payload: string, init?: MqttPublishInit): void => {
 
@@ -512,13 +502,9 @@ function makeHub(options: HubOptions = {}): HubHarness {
   const hub = new AccessHub(controller, projection as unknown as AccessDeviceProjection, accessory, record,
     options.hubless ? undefined : hubProjection as unknown as AccessHubProjection);
 
-  // Construction narrates itself, and every arm but the ones about adoption reads from a clean slate rather than from what adoption said.
-  if(!options.keepAdoptionLines) {
-
-    debugs.length = 0;
-    errors.length = 0;
-    lines.length = 0;
-  }
+  // Construction narrates itself, and every arm but the ones about adoption reads from a clean slate rather than from what adoption said, so the views read the log
+  // from past what adoption said.
+  const adopted = options.keepAdoptionLines ? 0 : log.entries.length;
 
   return {
 
@@ -527,7 +513,10 @@ function makeHub(options: HubOptions = {}): HubHarness {
     clock,
     commands,
     connection,
-    debugs,
+    get debugs(): readonly string[] {
+
+      return log.entries.slice(adopted).filter((entry) => [ "debug", "warn" ].includes(entry.level)).map(formatLogEntry);
+    },
     deliver: (event: string, delivery: unknown): void => {
 
       const registered = handlers.get(ACCESS_WEBHOOK_EVENT_PREFIX + event) ?? [];
@@ -552,10 +541,16 @@ function makeHub(options: HubOptions = {}): HubHarness {
         handler(packet);
       }
     },
-    errors,
+    get errors(): readonly string[] {
+
+      return linesAt(log.entries.slice(adopted), "error");
+    },
     fetches,
     hub,
-    lines,
+    get lines(): readonly string[] {
+
+      return linesAt(log.entries.slice(adopted), "info");
+    },
     live,
     loop: (): Promise<void> => loop(),
     mqtt,
@@ -589,7 +584,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
     },
     requests,
     rings,
-    get saves(): string[][] {
+    get saves(): readonly string[][] {
 
       return savesOn(api);
     },
@@ -3541,8 +3536,9 @@ test("a gate whose record has left the state drives no doors through its removal
   assert.deepEqual(lockPayloads(gate), ["false"], "an offline record's door still answers");
 
   deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
-  gate.lines.length = 0;
   gate.publishes.length = 0;
+
+  const linesBefore = gate.lines.length;
 
   gate.live.record = undefined;
 
@@ -3552,12 +3548,12 @@ test("a gate whose record has left the state drives no doors through its removal
 
   assert.deepEqual([ lockPayloads(gate), lockPayloads(gate, "sidedoor/lock"), topicPayloads(gate, "dps"), topicPayloads(gate, "unlock") ], [ [], [], [], [] ],
     "no door-state delivery, remote unlock or webhook delivery reaches a topic");
-  assert.deepEqual(gate.lines, [], "or the log");
+  assert.deepEqual(gate.lines.slice(linesBefore), [], "or the log");
 
   gate.live.record = record;
   restateRecord(gate, {});
 
-  assert.deepEqual(gate.lines, [], "the returning record moves no role");
+  assert.deepEqual(gate.lines.slice(linesBefore), [], "the returning record moves no role");
   assert.deepEqual(guessLines(gate), [], "and guesses none");
 
   deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
@@ -4123,8 +4119,7 @@ test("a gate binding port 2 alone adopts with no main door, and says so", () => 
 test("a gate with no main door refuses both lock commands and sends the library nothing", async () => {
 
   const gate = vacantGate();
-
-  gate.errors.length = 0;
+  const errorsBefore = gate.errors.length;
 
   await gate.mqttSet("lock", "false");
   await settle();
@@ -4133,7 +4128,7 @@ test("a gate with no main door refuses both lock commands and sends the library 
 
   assert.deepEqual(gate.commands, []);
   assert.deepEqual(gate.requests, []);
-  assert.deepEqual(gate.errors, [ LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it.",
+  assert.deepEqual(gate.errors.slice(errorsBefore), [ LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it.",
     LOG_PREFIX + "Unable to close the gate. The controller reports no door for it." ]);
 });
 
@@ -4251,8 +4246,8 @@ test("a gate with no main door takes the door a record with no relay data binds,
 test("a gate with no main door stays without one through a record binding nothing, and its lock still refuses", async () => {
 
   const gate = vacantGate();
+  const errorsBefore = gate.errors.length;
 
-  gate.errors.length = 0;
   restateRecord(gate, { extensions: [] });
 
   assert.equal(lineCount(gate, "The gate's main door is now Pedestrian Gate."), 0);
@@ -4262,7 +4257,7 @@ test("a gate with no main door stays without one through a record binding nothin
   await settle();
 
   assert.deepEqual(gate.commands, []);
-  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+  assert.deepEqual(gate.errors.slice(errorsBefore), [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
 });
 
 // Another hub's door, listed first and named as the arm of the role under test would prefer it, beside the capture's doors.
@@ -4273,8 +4268,8 @@ test("a gate whose port 1 lost its door stays without a main door through a refr
 
   const doors = [ OTHER_HUB_MAIN, PEDESTRIAN_GATE, VEHICLE_GATE ];
   const { gate, store } = storedGate(doors);
+  const errorsBefore = gate.errors.length;
 
-  gate.errors.length = 0;
   deliverDeviceUpdate(store, { extensions: [ portBinding("port1", "lost-door", GATE_OPERATOR_RELAY, "Pedestrian Gate"),
     portBinding("port2", SIDE_DOOR, GATE_DOOR_LOCK_RELAY, "Vehicle Gate") ] });
 
@@ -4291,7 +4286,7 @@ test("a gate whose port 1 lost its door stays without a main door through a refr
   await settle();
 
   assert.deepEqual(gate.commands, [], "and the lock refuses rather than reaching the other hub's door");
-  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+  assert.deepEqual(gate.errors.slice(errorsBefore), [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
 });
 
 test("a gate whose port 2 lost its door stays without a side door through a refresh with no bindings, though another hub's door reads as a side door", async () => {
@@ -4320,8 +4315,8 @@ test("a gate that adopted with no doors stays without a role through a record sa
 
   const gate = makeGate({ doors: [], keepAdoptionLines: true, options: ["Enable.Hub.Door.Service=Lock"],
     record: testHub({ device_type: "UGT", location_id: MAIN_DOOR }) });
+  const errorsBefore = gate.errors.length;
 
-  gate.errors.length = 0;
   gate.doors.set(MAIN_DOOR, PEDESTRIAN_GATE);
   gate.doors.set(SIDE_DOOR, VEHICLE_GATE);
   restateRecord(gate, { extensions: [] });
@@ -4333,7 +4328,7 @@ test("a gate that adopted with no doors stays without a role through a record sa
   await settle();
 
   assert.deepEqual(gate.commands, []);
-  assert.deepEqual(gate.errors, [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
+  assert.deepEqual(gate.errors.slice(errorsBefore), [LOG_PREFIX + "Unable to unlock the gate. The controller reports no door for it."]);
 
   restateRecord(gate, { extensions: CAPTURE_PORTS });
 

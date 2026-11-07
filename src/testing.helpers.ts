@@ -35,8 +35,8 @@ import type { AccessEvents, AccessListener } from "./controller/events.ts";
 import type { AccessLoginOutcome, ControllerIdentity, ControllerOwnershipKeys, DecoratedSerial, MembershipClaims } from "./policy.ts";
 import { AccessoryPersistence, ChangeReason, FeatureOptions } from "homebridge-plugin-utils";
 import type { Clock, HomebridgePluginLogging, HttpListener, MqttClient, Nullable, RetiredTranslation, createMqttClient } from "homebridge-plugin-utils";
-import { TestClock, TestMqttClientFactory, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
-import type { TestHomebridgeApi, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
+import { TestClock, TestMqttClientFactory, formatLogEntry, loadHomebridge, silentLog, watchServerWarnings } from "homebridge-plugin-utils/testing";
+import type { TestHomebridgeApi, TestLogEntry, TestMqttClient, TestPlatformAccessory } from "homebridge-plugin-utils/testing";
 import { controllerIdentity, deviceModel } from "./policy.ts";
 import { featureOptionCategories, featureOptions } from "./options.ts";
 import type { AccessController } from "./controller/controller.ts";
@@ -160,6 +160,19 @@ export function writesOn(accessory: TestPlatformAccessory, service: Service): { 
 
   return accessory.changes.filter((change) => (change.service === service) && (change.reason === ChangeReason.UPDATE))
     .map((change) => ({ characteristic: change.characteristic.UUID, value: change.newValue }));
+}
+
+/**
+ * Render every captured line led by the level it was said at, in the order the lines were said. The linesAt finder homebridge-plugin-utils ships answers one level's
+ * lines, which is what most assertions want; this answers a whole run as one list, for an arm whose assertion spans levels and reads the order they came in.
+ *
+ * @param entries - The captured entries to render, a capturing log's whole list or a slice of it.
+ *
+ * @returns Each line as its level, a colon, and the line as the user reads it.
+ */
+export function labeledLines(entries: readonly TestLogEntry[]): string[] {
+
+  return entries.map((entry) => entry.level + ": " + formatLogEntry(entry));
 }
 
 /**
@@ -387,7 +400,7 @@ export function makePlatformDouble(options: PlatformDoubleOptions = {}): AccessP
     config: options.config ?? { controllers: [], options: [] },
     featureOptions: options.featureOptions ?? new FeatureOptions(featureOptionCategories, featureOptions, [...retiredTranslation.configuredOptions]),
     localAddressFor: options.localAddressFor ?? (async (): Promise<string> => "10.0.0.7"),
-    log: (options.log ?? { error: (): void => undefined, info: (): void => undefined, warn: (): void => undefined }) as Logging,
+    log: (options.log ?? silentLog()) as Logging,
     mqttFactory: options.mqttFactory ?? new TestMqttClientFactory().create,
     persistence,
     registerAccessory: (accessory: AccessAccessory): void => {

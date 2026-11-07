@@ -6,13 +6,12 @@
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT, ACCESS_WEBHOOK_EVENT_PREFIX, AccessEvents } from "./events.ts";
 import { ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST } from "../settings.ts";
 import type { AccessEventPacket, AccessWebhookEvent } from "unifi-access";
+import { capturingLog, linesAt, settle } from "homebridge-plugin-utils/testing";
 import { makeControllerDouble, makePlatformDouble } from "../testing.helpers.ts";
 import type { AccessController } from "./controller.ts";
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "../policy.ts";
-import { format } from "node:util";
-import { settle } from "homebridge-plugin-utils/testing";
 import test from "node:test";
 
 // The controller's own MAC in the normalized form an identity carries, which is the identity every telemetry topic here opens with.
@@ -149,13 +148,14 @@ test("the telemetry line is said once at the level that set it, and a default sa
 
   for(const { entries, expected, level } of levels) {
 
-    const lines: string[] = [];
-    const taking = (prefix: string) => (message: string, ...parameters: unknown[]): void => void lines.push(prefix + format(message, ...parameters));
-    const platform = makePlatformDouble({ entries, log: { error: (): void => undefined, info: taking(""), warn: (): void => undefined } });
+    const log = capturingLog();
+    const platform = makePlatformDouble({ entries, log });
 
-    new AccessEvents(makeControllerDouble({ log: { info: taking("Controller: ") }, platform }));
+    // The controller's lines reach the same log behind the prefix the controller's own logger composes, so a line the controller wrote reads apart from the plugin's.
+    new AccessEvents(makeControllerDouble({ log: { info: (message: string, ...parameters: unknown[]): void => log.info("Controller: " + message, ...parameters) },
+      platform }));
 
-    assert.deepEqual(lines, expected, "the line reads as " + level + " wrote it");
+    assert.deepEqual(linesAt(log.entries, "info"), expected, "the line reads as " + level + " wrote it");
   }
 });
 

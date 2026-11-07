@@ -15,12 +15,12 @@
  * stateful class those functions serve and does not restate them. What runSweep does in production, the controller's own sweep, is the controller suite's to walk: the
  * recorder here proves only that the gate calls it, and at which instants.
  */
+import { TestClock, capturingLog, formatLogEntry } from "homebridge-plugin-utils/testing";
 import { ACCESS_REMOVAL_STABILITY_WINDOW } from "../settings.ts";
 import type { AccessAccessory } from "../types.ts";
+import type { CapturingLog } from "homebridge-plugin-utils/testing";
 import { RemovalStabilityGate } from "./removal.ts";
-import { TestClock } from "homebridge-plugin-utils/testing";
 import assert from "node:assert/strict";
-import { format } from "node:util";
 import { makeTestAccessory } from "../testing.helpers.ts";
 import test from "node:test";
 
@@ -29,7 +29,7 @@ import test from "node:test";
 interface GateRecorder {
 
   grace: number;
-  logLines: string[];
+  log: CapturingLog;
   removals: AccessAccessory[];
   sweeps: number;
 }
@@ -42,11 +42,7 @@ function buildGate(options: { graceSeconds?: number } = {}): { accessory: Return
 
   const clock = new TestClock();
   const controller = new AbortController();
-  const recorder: GateRecorder = { grace: options.graceSeconds ?? 60, logLines: [], removals: [], sweeps: 0 };
-  const sink = (message: string, ...parameters: unknown[]): void => {
-
-    recorder.logLines.push(format(message, ...parameters));
-  };
+  const recorder: GateRecorder = { grace: options.graceSeconds ?? 60, log: capturingLog(), removals: [], sweeps: 0 };
 
   const gate = new RemovalStabilityGate({
 
@@ -57,7 +53,7 @@ function buildGate(options: { graceSeconds?: number } = {}): { accessory: Return
     },
     clock,
     graceSeconds: (): number => recorder.grace,
-    log: { debug: sink, error: sink, info: sink, warn: sink },
+    log: recorder.log,
     signal: controller.signal
   });
 
@@ -68,10 +64,16 @@ function buildGate(options: { graceSeconds?: number } = {}): { accessory: Return
   return { accessory: makeTestAccessory("Victim", "74ACB9000201"), clock, controller, gate, pushGood, recorder };
 }
 
+// Every line the gate wrote, at any level, rendered as the user reads it.
+function gateLines(recorder: GateRecorder): string[] {
+
+  return recorder.log.entries.map(formatLogEntry);
+}
+
 // The delay lines the gate emitted, which are the only lines it writes unless a fire faults.
 function delayingLines(recorder: GateRecorder): string[] {
 
-  return recorder.logLines.filter((line) => line.includes("Delaying device removal"));
+  return gateLines(recorder).filter((line) => line.includes("Delaying device removal"));
 }
 
 test("a partial uptime is trusted only as far as it goes - stability arrives when the remainder of the window elapses", (t) => {
@@ -387,7 +389,7 @@ test("an unstable controller schedules nothing at all - no timer, no removal, an
   // Never stabilized: the gate is in the state a plugin start against an unreachable controller leaves it in.
   gate.schedule({ accessory: accessory, stillGone: () => true });
 
-  assert.deepEqual(recorder.logLines, [], "the stability gate returns ahead of any logging, so a suppressed schedule is entirely silent");
+  assert.deepEqual(gateLines(recorder), [], "the stability gate returns ahead of any logging, so a suppressed schedule is entirely silent");
 
   clock.advance(ACCESS_REMOVAL_STABILITY_WINDOW);
 
@@ -410,11 +412,11 @@ test("the delay line carries the resolved interval, and the fire itself says not
   pushGood(ACCESS_REMOVAL_STABILITY_WINDOW);
   gate.schedule({ accessory: accessory, stillGone: () => true });
 
-  assert.deepEqual(recorder.logLines, ["Victim: Delaying device removal for at least 60 seconds."], "the delay line carries the resolved interval");
+  assert.deepEqual(gateLines(recorder), ["Victim: Delaying device removal for at least 60 seconds."], "the delay line carries the resolved interval");
 
   clock.advance(60000);
 
-  assert.equal(recorder.logLines.length, 1, "the fire itself says nothing");
+  assert.equal(recorder.log.entries.length, 1, "the fire itself says nothing");
 });
 
 test("a one-second delay is stated in the singular", (t) => {
@@ -444,7 +446,7 @@ test("a fire's fault is said once on the gate's log, naming the accessory, and g
   } });
 
   assert.doesNotThrow(() => clock.advance(60000), "the fault stops at the fire's own catch");
-  assert.deepEqual(recorder.logLines.slice(1), ["Unable to remove Victim from HomeKit: the record cannot be read."], "and is said once, naming the accessory");
+  assert.deepEqual(gateLines(recorder).slice(1), ["Unable to remove Victim from HomeKit: the record cannot be read."], "and is said once, naming the accessory");
 });
 
 test("teardown drains a pending delay and a pending sweep, and a schedule after teardown arms nothing", () => {

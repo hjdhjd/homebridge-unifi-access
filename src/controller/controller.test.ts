@@ -12,12 +12,12 @@ import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
 import type { AccessControllerConfig, AccessEventPacket, AccessLogging, AccessOfficialWebhookEndpoint, AccessOfficialWebhookEndpointWrite, ConnectOptions,
   OfficialApi } from "unifi-access";
-import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, makeClientDouble, makePlatformDouble, makeTestAccessory, makeTestApi,
-  platformInternals, readerRecord, savesOn } from "../testing.helpers.ts";
+import type { CapturingLog, TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
+import { Characteristic, ROOT_ID, Service, accessoryUuid, buildingTopology, hubRecord, labeledLines, makeClientDouble, makePlatformDouble, makeTestAccessory,
+  makeTestApi, platformInternals, readerRecord, savesOn } from "../testing.helpers.ts";
 import { EventEmitter, on } from "node:events";
-import { TestClock, TestHttpListener, TestMqttClientFactory, drainClock, expectAt, hapStatus, settle, settlePastMqttEnd, triggerGet,
-  triggerSet } from "homebridge-plugin-utils/testing";
-import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
+import { TestClock, TestHttpListener, TestMqttClientFactory, capturingLog, drainClock, expectAt, formatLogEntry, hapStatus, linesAt, settle, settlePastMqttEnd,
+  silentLog, triggerGet, triggerSet } from "homebridge-plugin-utils/testing";
 import { createMembershipIdsSelector, deviceModel, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
@@ -30,7 +30,6 @@ import { Buffer } from "node:buffer";
 import type { HttpListener } from "homebridge-plugin-utils";
 import type { PlatformDoubleOptions } from "../testing.helpers.ts";
 import assert from "node:assert/strict";
-import { format } from "node:util";
 import { signWebhookDelivery } from "unifi-access/testing";
 import test from "node:test";
 
@@ -170,41 +169,42 @@ function faultingHandle(record: Record<string, unknown>, fault: HandleFault): un
   };
 }
 
-// A platform double as an arm stands one up: the lines said over it at each level, each rendered as the user reads it, the clock its waits are armed on, and the
-// plugin lifetime the arm ends it by.
+// A platform double as an arm stands one up: the log every line said over it lands in, the clock its waits are armed on, and the plugin lifetime the arm ends it by.
 interface CapturingPlatform {
 
   // The time source every removal, connect backoff and other wait over this platform is armed on, so an arm advances time here rather than waiting any of it out.
   clock: TestClock;
-  // Every line said at error level, the controller's own and its devices' alike.
-  errors: string[];
-  // Every line said at info level, which is what lets an arm assert on a removal's own sentence.
-  logged: string[];
+  // Every line said over this platform, the controller's own and its devices' alike, which an arm reads by level.
+  log: CapturingLog;
   platform: AccessPlatform;
   // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from, so aborting it ends whatever the arm stood up.
   shutdown: AbortController;
-  // Every line said at warning level, which is also the channel the controller's debug lines reach with Log.Debug on.
-  warnings: string[];
 }
 
-// What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, and, from its platform, the
-// lines it said and the plugin lifetime its own terminal signal composes from.
-interface ControllerHarness extends Omit<CapturingPlatform, "platform"> {
+// What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, the lines it said, and, from its
+// platform, the clock its waits are armed on and the plugin lifetime its own terminal signal composes from.
+interface ControllerHarness extends Omit<CapturingPlatform, "log" | "platform"> {
 
   accessories: AccessAccessory[];
   controller: AccessController;
+  // Every line said at error level, the controller's own and its devices' alike, rendered as the user reads it.
+  readonly errors: readonly string[];
+  // Every line said at info level, rendered as the user reads it, which is what lets an arm assert on a removal's own sentence.
+  readonly logged: readonly string[];
   // The MQTT client the controller's login built through the platform's factory, which every reading of the double is taken from.
   mqtt: () => TestMqttClient;
   // Every call the controller made to the platform's MQTT factory, with the double each one answered.
   mqttCalls: TestMqttClientFactory["createCalls"];
   // The UUIDs each registration Homebridge accepted named, in the order it accepted them.
-  readonly registered: string[];
+  readonly registered: readonly string[];
   // Hand cached accessories to the accessory list through Homebridge's own restore loop, which bridges each, so a later exit or save reaches one Homebridge holds.
   restore: (...cached: AccessAccessory[]) => void;
   // The UUIDs each save Homebridge accepted named, in the order it accepted them.
-  readonly saves: string[][];
+  readonly saves: readonly string[][];
   // The UUIDs each unregister Homebridge accepted named, in the order it accepted them.
-  readonly unregistered: string[];
+  readonly unregistered: readonly string[];
+  // Every line said at warning level, rendered as the user reads it, which is also the channel the controller's debug lines reach with Log.Debug on.
+  readonly warnings: readonly string[];
 }
 
 /* Stand up a platform double whose every line is captured and whose lifetime the arm owns. Its waits are armed on the clock this returns rather than the fresh one the
@@ -212,21 +212,15 @@ interface ControllerHarness extends Omit<CapturingPlatform, "platform"> {
  *
  * @param options - What the arm varies beyond the clock, the log and the lifetime this fixture owns; see {@link PlatformDoubleOptions}.
  *
- * @returns The platform with its clock, its lifetime and the lines said over it at each level.
+ * @returns The platform with its clock, its lifetime and the log every line said over it lands in.
  */
 function capturingPlatform(options: Omit<PlatformDoubleOptions, "clock" | "log" | "signal"> = {}): CapturingPlatform {
 
   const clock = new TestClock();
-  const errors: string[] = [];
-  const logged: string[] = [];
+  const log = capturingLog();
   const shutdown = new AbortController();
-  const warnings: string[] = [];
 
-  // One level's lines, each rendered with its parameters, so an arm asserts on the sentence the user reads rather than on a format string.
-  const capture = (lines: string[]): Logging["info"] => (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters));
-  const platform = makePlatformDouble({ ...options, clock, log: { error: capture(errors), info: capture(logged), warn: capture(warnings) }, signal: shutdown.signal });
-
-  return { clock, errors, logged, platform, shutdown, warnings };
+  return { clock, log, platform: makePlatformDouble({ ...options, clock, log, signal: shutdown.signal }), shutdown };
 }
 
 /* Stand up a real AccessController over a platform double and a stubbed client, so an arm reads what the controller actually did to HomeKit rather than what a
@@ -252,7 +246,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
   const targets = (kind: "register" | "unregister"): string[] => api.calls.flatMap((call) => (call.kind === kind) ? call.accessories.map((target) => target.UUID) : []);
 
   // The double's accessory entry and exit reach this arm's own API double and its own list, which is what lets an adoption and a retirement be read here.
-  const { clock, errors, logged, platform, shutdown, warnings } = capturingPlatform({ accessories, api, entries: options.options ?? [], mqttFactory: factory.create });
+  const { clock, log, platform, shutdown } = capturingPlatform({ accessories, api, entries: options.options ?? [], mqttFactory: factory.create });
 
   // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
   const client = makeClientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, controllerName: options.controllerName,
@@ -271,8 +265,14 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
     accessories,
     clock,
     controller,
-    errors,
-    logged,
+    get errors(): readonly string[] {
+
+      return linesAt(log.entries, "error");
+    },
+    get logged(): readonly string[] {
+
+      return linesAt(log.entries, "info");
+    },
     mqtt: (): TestMqttClient => {
 
       const { client: mqtt } = expectAt(factory.createCalls, 0, "the controller's MQTT client");
@@ -282,7 +282,7 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
       return mqtt;
     },
     mqttCalls: factory.createCalls,
-    get registered(): string[] {
+    get registered(): readonly string[] {
 
       return targets("register");
     },
@@ -291,16 +291,19 @@ function makeController(options: { config?: Partial<AccessControllerOptions>; co
       api.restorePlatformAccessories({ accessories: cached, platform: { configureAccessory: (restored): void => void accessories.push(restored) },
         platformName: PLATFORM_NAME, pluginIdentifier: PLUGIN_NAME });
     },
-    get saves(): string[][] {
+    get saves(): readonly string[][] {
 
       return savesOn(api);
     },
     shutdown,
-    get unregistered(): string[] {
+    get unregistered(): readonly string[] {
 
       return targets("unregister");
     },
-    warnings
+    get warnings(): readonly string[] {
+
+      return linesAt(log.entries, "warn");
+    }
   };
 }
 
@@ -360,14 +363,14 @@ function connectionDouble(): { connection: { isHealthy: boolean; isLost: boolean
 /* A configured device as the connection observer sees it: the calls its walks make, recorded in the order they arrive, and the log a fault is reported through. A
  * device an arm names as faulting throws from both, which is what lets each walk's isolation be read separately rather than as one combined verdict.
  */
-function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; device: AccessDevice; errors: string[] } {
+function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; device: AccessDevice; readonly errors: readonly string[] } {
 
   const calls: string[] = [];
-  const errors: string[] = [];
+  const log = capturingLog();
 
   const device = {
 
-    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)) },
+    log,
     onConnectionRestored: (): void => {
 
       calls.push("restore");
@@ -388,7 +391,15 @@ function stubDevice(options: { faults?: boolean } = {}): { calls: string[]; devi
     }
   };
 
-  return { calls, device: device as unknown as AccessDevice, errors };
+  return {
+
+    calls,
+    device: device as unknown as AccessDevice,
+    get errors(): readonly string[] {
+
+      return linesAt(log.entries, "error");
+    }
+  };
 }
 
 test("the connection observer states availability on every transition and restores only where a recovery completed", async (t) => {
@@ -483,8 +494,7 @@ test("a controller's verdict follows the library's conclusion that the connectio
 test("a restored characteristic refuses ahead of the login, follows the hub a real controller holds for it, and refuses again past its removal", async (t) => {
 
   const api = makeTestApi();
-  const quiet = (): void => undefined;
-  const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+  const log = silentLog();
   const platform = new AccessPlatform(log as unknown as Logging, { controllers: [], options: [], platform: "UniFi Access" }, api as unknown as API);
   const reader = readerRecord({ alias: "", capabilities: [ "is_reader", "pin_code" ], is_adopted: true, is_connected: true, is_online: false });
   const store = createStateStore({});
@@ -545,8 +555,7 @@ for(const { failure, label } of [
   test("a restored characteristic refuses and stays registered under " + label, async (t) => {
 
     const api = makeTestApi();
-    const quiet = (): void => undefined;
-    const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+    const log = silentLog();
     const platform = new AccessPlatform(log as unknown as Logging, { controllers: [], options: [], platform: "UniFi Access" }, api as unknown as API);
 
     t.after(() => void api.emit(APIEvent.SHUTDOWN));
@@ -1684,7 +1693,7 @@ test("login reports the identity outcome its exit took", async (t) => {
 
 test("a login whose connect is refused on every attempt keeps retrying on the library's refusal schedule until shutdown ends it", async (t) => {
 
-  const { clock, errors, platform, shutdown } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
   const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
   // Every staged delay, then more than one wait at the floor, so the run is seen settling onto the floor and carrying on there rather than stopping.
   const waits = [ ...backoff, steady, steady, steady ];
@@ -1719,7 +1728,7 @@ test("a login whose connect is refused on every attempt keeps retrying on the li
   assert.deepEqual(clock.requested, waits, "every wait follows the refusal schedule onto its floor, the one the shutdown cut short included");
   assert.equal(steps, waits.length - 1, "one wait came due between each pair of attempts, and the one after the shutdown never did");
   assert.equal(clock.now(), waits.slice(0, -1).reduce((total, wait) => total + wait, 0), "and the platform clock moved by exactly the waits that came due");
-  assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Bad credentials."],
+  assert.deepEqual(linesAt(log.entries, "error"), ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Bad credentials."],
     "the refusal is reported once, and the shutdown that ends the run adds no line");
 });
 
@@ -1737,7 +1746,7 @@ function addressRefused(prefix: string, reason: string): string {
 
 test("a login whose connect is refused as an address no URL can carry stops after its first attempt, waits for nothing, and says so once", async (t) => {
 
-  const { clock, errors, platform, shutdown } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   let attempts = 0;
 
@@ -1762,13 +1771,14 @@ test("a login whose connect is refused as an address no URL can carry stops afte
   assert.equal(attempts, 1, "the address is refused on the first attempt and never asked about again");
   assert.deepEqual(clock.requested, [], "so no wait is armed behind the refusal");
   assert.equal(steps, 0, "and nothing comes due afterwards");
-  assert.deepEqual(errors, [addressRefused("access.local/path", "The controller address \"access.local/path\" carries more than a host and a port.")],
+  assert.deepEqual(linesAt(log.entries, "error"),
+    [addressRefused("access.local/path", "The controller address \"access.local/path\" carries more than a host and a port.")],
     "the refusal is said once, in the line that says the retry stopped, with no retrying line ahead of it");
 });
 
 test("the line a refused address earns quotes the address as unifi-access masks it, so the credentials it carried reach no line", async (t) => {
 
-  const { clock, errors, platform, shutdown } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   /* The real connect, which refuses an address carrying credentials before it sends anything. The configured name is the line's prefix, so what this arm reads is
    * the message the controller composes around the library's refusal rather than the prefix a controller that never connected takes from its configuration.
@@ -1782,9 +1792,9 @@ test("the line a refused address earns quotes the address as unifi-access masks 
   await drainClock(clock);
 
   assert.equal(await login, "unavailable");
-  assert.deepEqual(errors, [addressRefused("Front Office", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+  assert.deepEqual(linesAt(log.entries, "error"), [addressRefused("Front Office", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
     "the line carries the library's own message, the address in it masked through its last @");
-  assert.equal(errors.filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line");
+  assert.equal(log.entries.map(formatLogEntry).filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line");
 });
 
 test("a controller with no name that never connects prefixes its lines with its address as unifi-access masks it, so the credentials reach no line", async (t) => {
@@ -1792,7 +1802,7 @@ test("a controller with no name that never connects prefixes its lines with its 
   /* Every level is read, debug included: the gate is turned on and a debug line arrives on the warn channel, so a line of any level that named the address raw
    * would land among the lines the last assertion reads.
    */
-  const { clock, errors, logged, platform, shutdown, warnings } = capturingPlatform({ entries: ["Enable.Log.Debug"] });
+  const { clock, log, platform, shutdown } = capturingPlatform({ entries: ["Enable.Log.Debug"] });
 
   // The real connect, as in the named arm above, with no name configured, so the prefix every line carries is the one this controller takes from its address.
   const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", tokens: { access: "t" } });
@@ -1804,14 +1814,14 @@ test("a controller with no name that never connects prefixes its lines with its 
   await drainClock(clock);
 
   assert.equal(await login, "unavailable");
-  assert.deepEqual(errors, [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+  assert.deepEqual(linesAt(log.entries, "error"), [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
     "the prefix names the address masked through its last @, as the library's message does");
-  assert.equal([ ...errors, ...logged, ...warnings ].filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
+  assert.equal(log.entries.map(formatLogEntry).filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
 });
 
 test("a controller whose configured name is empty prefixes its lines with its masked address, as one with no name does", async (t) => {
 
-  const { clock, errors, platform, shutdown } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   // This is the real connect, as in the unnamed arm above, with a name configured but empty, which names nothing and so falls through to the address as no name does.
   const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", name: "", tokens: { access: "t" } });
@@ -1825,13 +1835,13 @@ test("a controller whose configured name is empty prefixes its lines with its ma
   await drainClock(clock);
 
   assert.equal(await login, "unavailable");
-  assert.deepEqual(errors, [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+  assert.deepEqual(linesAt(log.entries, "error"), [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
     "and the line the refused address earns opens on that prefix");
 });
 
 test("a connect that keeps failing says why once per type, and a shutdown landing mid-attempt says nothing", async (t) => {
 
-  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   let attempts = 0;
 
@@ -1869,11 +1879,12 @@ test("a connect that keeps failing says why once per type, and a shutdown landin
 
   assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
   assert.equal(attempts, 6, "every attempt the fixture scripts is made, so the silence below is not an attempt that never ran");
-  assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors')."],
+  assert.deepEqual(linesAt(log.entries, "error"),
+    ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: Cannot read properties of undefined (reading 'doors')."],
     "the fault a person must act on is said once at error");
-  assert.deepEqual(warnings, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: The controller did not respond before the request " +
-    "deadline elapsed: The operation timed out."], "the one that should fix itself is said once at warn, and neither the interrupted attempt nor the ended retry adds " +
-    "a line");
+  assert.deepEqual(linesAt(log.entries, "warn"), ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: The controller did not " +
+    "respond before the request deadline elapsed: The operation timed out."], "the one that should fix itself is said once at warn, and neither the interrupted " +
+    "attempt nor the ended retry adds a line");
 });
 
 // The line a connect the controller rate limits is said with, transcribed rather than referenced so a wording that drifts by a character reddens an arm.
@@ -1898,7 +1909,7 @@ const WRAPPED_RATE_LIMIT = new AccessBootstrapError("Unable to fetch the UniFi A
 async function loginFailing(failures: readonly Error[], { attemptCount = 3, entries = [] }: { attemptCount?: number; entries?: string[] } = {}):
 Promise<{ errors: string[]; warnings: string[] }> {
 
-  const { clock, errors, platform, shutdown, warnings } = capturingPlatform({ entries });
+  const { clock, log, platform, shutdown } = capturingPlatform({ entries });
 
   let attempts = 0;
 
@@ -1929,7 +1940,7 @@ Promise<{ errors: string[]; warnings: string[] }> {
     assert.equal(await login, "unavailable", "a connect the shutdown ended leaves this controller's identity unknown");
     assert.equal(attempts, attemptCount, "every attempt the fixture scripts is made, so a line said once was said across repeated attempts");
 
-    return { errors, warnings };
+    return { errors: linesAt(log.entries, "error"), warnings: linesAt(log.entries, "warn") };
   } finally {
 
     shutdown.abort();
@@ -2046,7 +2057,7 @@ test("a rate limit returning after a turn to another fault is said again at warn
 
 test("a controller that refuses a connection and then offers no API to a token alone warns the retried fault and stops on the attempt that meets it", async (t) => {
 
-  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   let attempts = 0;
 
@@ -2070,13 +2081,13 @@ test("a controller that refuses a connection and then offers no API to a token a
 
   assert.equal(await login, "unavailable", "the run ends with this controller's identity unknown");
   assert.equal(attempts, 2, "on the attempt past the retried fault");
-  assert.deepEqual(warnings, [retrying("The controller refused the connection")], "the retried fault is said at warn");
-  assert.deepEqual(errors, [NOT_OFFERED_LINE], "and the stop once at error");
+  assert.deepEqual(linesAt(log.entries, "warn"), [retrying("The controller refused the connection")], "the retried fault is said at warn");
+  assert.deepEqual(linesAt(log.entries, "error"), [NOT_OFFERED_LINE], "and the stop once at error");
 });
 
 test("a controller that does not offer its API to a token alone stops the connect after its first attempt, waits for nothing, and says so once at error", async (t) => {
 
-  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
+  const { clock, log, platform, shutdown } = capturingPlatform();
 
   let attempts = 0;
 
@@ -2098,8 +2109,8 @@ test("a controller that does not offer its API to a token alone stops the connec
   assert.equal(attempts, 1, "no second attempt is made");
   assert.deepEqual(clock.requested, [], "so no wait is armed behind the stop");
   assert.equal(steps, 0, "and nothing comes due afterwards");
-  assert.deepEqual(errors, [NOT_OFFERED_LINE], "the person who must fix it reads why at error");
-  assert.deepEqual(warnings, [], "and nothing is said at warn");
+  assert.deepEqual(linesAt(log.entries, "error"), [NOT_OFFERED_LINE], "the person who must fix it reads why at error");
+  assert.deepEqual(linesAt(log.entries, "warn"), [], "and nothing is said at warn");
 });
 
 test("a connect whose document read answers a status says that status at warning, reading through the wrapper that carries it", async () => {
@@ -2262,7 +2273,8 @@ interface WebhookHarness {
   clock: TestClock;
   controller: AccessController;
   deliveries: unknown[];
-  lines: string[];
+  // Every line said over the platform, led by its level, in the order said.
+  readonly lines: readonly string[];
   listener: TestHttpListener;
   listenerRequests: number;
   run: () => Promise<void>;
@@ -2286,7 +2298,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
   const calls: string[] = [];
   const clock = new TestClock();
   const deliveries: unknown[] = [];
-  const lines: string[] = [];
+  const log = capturingLog();
   const shutdown = new AbortController();
   /* The registrations this controller currently holds. The double keeps them the way the controller would, because an arm that creates one and then tears down
    * has to find it listed back or the teardown it is testing has nothing to retire.
@@ -2398,12 +2410,7 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     config: { controllers: options.controllers ?? [{ address: "1.2.3.4" }], options: [] },
     entries,
     localAddressFor: options.hostResolution ?? (async (): Promise<string> => "10.0.0.7"),
-    log: {
-
-      error: (message: string, ...parameters: unknown[]): void => void lines.push("error: " + format(message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => void lines.push("info: " + format(message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => void lines.push("warn: " + format(message, ...parameters))
-    },
+    log,
     signal: shutdown.signal,
     // The double stands in for the listener, cast at the injection site exactly as the double's own documentation states: both classes carry private fields, so
     // nothing structural assigns one to the other and the cast is this file's own statement that the substitution is deliberate.
@@ -2445,7 +2452,10 @@ function makeWebhookController(options: WebhookOptions = {}): WebhookHarness {
     clock,
     controller,
     deliveries,
-    lines,
+    get lines(): readonly string[] {
+
+      return labeledLines(log.entries);
+    },
     listener,
     get listenerRequests(): number {
 
@@ -2631,8 +2641,7 @@ test("the sweep reads the platform's list, so a repeated spelling's registration
    * path only the skipped spelling would claim is claimed by nothing, and nothing in the list is read as an address that is not there.
    */
   const api = makeTestApi();
-  const quiet = (): void => undefined;
-  const log = { debug: quiet, error: quiet, info: quiet, warn: quiet };
+  const log = silentLog();
   const platform = new AccessPlatform(log as unknown as Logging, { controllers: [ null, { address: "1.2.3.4", tokens: { access: "t" } },
     { address: " 1.2.3.4 ", tokens: { access: "t" } } ] as unknown as AccessControllerOptions[], platform: "UniFi Access" }, api as unknown as API);
 
@@ -2768,7 +2777,7 @@ test("a shutdown arriving mid-configuration removes the registration the attempt
 
 test("a token that cannot manage endpoints is told what to grant, whichever way the controller refuses", async (t) => {
 
-  const refused = async (failure: Error): Promise<string[]> => {
+  const refused = async (failure: Error): Promise<readonly string[]> => {
 
     const harness = makeWebhookController({ failures: { fetch: failure } });
 

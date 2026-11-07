@@ -10,9 +10,9 @@
 import { ACCESSORY_SAVE_WINDOW_MS, FeatureOptions } from "homebridge-plugin-utils";
 import { ACCESS_WEBHOOK_PORT, PLATFORM_NAME, PLUGIN_NAME } from "./settings.ts";
 import type { AccessBootstrapConfig, AccessDoorConfig, OfficialApi } from "unifi-access";
-import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, makeClientDouble, makeControllerDouble, makePlatformDouble, makeTestAccessory,
-  makeTestApi, readerRecord, savesOn } from "./testing.helpers.ts";
-import { TestClock, TestMqttClient, TestMqttClientFactory, silentLog } from "homebridge-plugin-utils/testing";
+import { ROOT_ID, buildingTopology, configRows, doorsTopology, hubRecord, labeledLines, makeClientDouble, makeControllerDouble, makePlatformDouble,
+  makeTestAccessory, makeTestApi, readerRecord, savesOn } from "./testing.helpers.ts";
+import { TestClock, TestMqttClient, TestMqttClientFactory, capturingLog, silentLog } from "homebridge-plugin-utils/testing";
 import type { AccessAccessory } from "./types.ts";
 import assert from "node:assert/strict";
 import { controllerIdentity } from "./policy.ts";
@@ -196,11 +196,11 @@ test("every option given to makePlatformDouble reaches the member it names, over
   const engine = makePlatformDouble().featureOptions;
   const handed = makeTestApi();
   const held: AccessAccessory[] = [makeTestAccessory("Held")];
-  const lines: string[] = [];
   const listener = (): never => {
 
     throw new Error("This arm's listener.");
   };
+  const log = capturingLog();
   const mqttFactory = new TestMqttClientFactory().create;
 
   aborted.abort();
@@ -210,10 +210,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
    */
   const platform = makePlatformDouble({ accessories: held, api: handed, clock,
     config: { controllers: [{ address: "5.6.7.8" }], options: ["Enable.Device.SyncName"] }, entries: ["Enable.Device.SyncName"], featureOptions: engine,
-    localAddressFor: async (): Promise<string> => "192.0.2.9",
-    log: { error: (message: string): void => void lines.push("error " + message), info: (message: string): void => void lines.push("info " + message),
-      warn: (message: string): void => void lines.push("warn " + message) },
-    mqttFactory, signal: aborted.signal, webhookListener: listener, webhookPort: 4242 });
+    localAddressFor: async (): Promise<string> => "192.0.2.9", log, mqttFactory, signal: aborted.signal, webhookListener: listener, webhookPort: 4242 });
 
   platform.log.warn("w");
 
@@ -227,7 +224,7 @@ test("every option given to makePlatformDouble reaches the member it names, over
   assert.equal(makePlatformDouble({ entries: ["Enable.Device.SyncName"] }).featureOptions.test("Device.SyncName"), true,
     "while entries with no engine beside them reach the engine the factory builds");
   assert.equal(await platform.localAddressFor("any host"), "192.0.2.9", "the local address answers what the arm resolves rather than the default one");
-  assert.deepEqual(lines, ["warn w"], "a line said at warning level reaches the arm's recorder, on the channel it was said on");
+  assert.deepEqual(log.entries, [{ level: "warn", message: "w", params: [] }], "a line said at warning level reaches the arm's logger, on the channel it was said on");
   assert.equal(platform.mqttFactory, mqttFactory, "the MQTT factory is the arm's own, so the controllers over this double build their clients through it");
   assert.equal(platform.signal, aborted.signal, "the lifetime is the arm's own signal");
   assert.equal(platform.signal.aborted, true, "torn down already, which no freshly built default could answer");
@@ -430,4 +427,18 @@ test("makeClientDouble answers a healthy client over the store it is handed, ine
   await handed[Symbol.asyncDispose]();
 
   assert.equal(disposals, 1, "and a disposal reaches the arm's own count, once");
+});
+
+test("labeledLines renders every captured line after the level it was said at, in the order the lines were said", () => {
+
+  const log = capturingLog();
+
+  log.warn("Retrying in %d seconds.", 30);
+  log.error("Unable to reach %s.", "the controller");
+  log.debug("Raw.");
+
+  assert.deepEqual(labeledLines(log.entries), [ "warn: Retrying in 30 seconds.", "error: Unable to reach the controller.", "debug: Raw." ],
+    "each line carries its level and its rendered parameters, and the levels interleave as they were said");
+  assert.deepEqual(labeledLines(log.entries.slice(1)), [ "error: Unable to reach the controller.", "debug: Raw." ], "and a slice renders only what it holds");
+  assert.deepEqual(labeledLines([]), [], "while nothing captured renders nothing");
 });
