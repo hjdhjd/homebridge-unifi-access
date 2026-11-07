@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.1.0 (2026-11-06)
+  * **Note for UA Gate owners: I'd love your help finishing UA Gate support.** I don't have a UA Gate to test with, so please share what you see on the #unifi-access channel on the Homebridge Discord, or open an issue if you prefer: whether the main and side doors HBUA names at startup match your gate, whether HomeKit shows your gate's lock state and its opening and closing correctly (including when you use a remote), roughly how long your gate takes to fully open, and, on a double driveway gate, whether opening it from HomeKit moves both sides.
+  * **Behavior change: HBUA now tells a UA Gate's main and side doors apart by the port each one is connected to: port 1 is the main door and port 2 is the side door.** On some gates the two doors trade places after you upgrade. Your accessories keep their names and places in the Home app, but each one controls the other door, and the same goes for the `lock` and `sidedoor` MQTT topics. HBUA names each door in the log at startup and warns you if it has to guess...if you have a UA Gate, please check its controls, scenes, and automations after upgrading.
+  * Behavior change: MQTT now follows what you've enabled. A feature you've turned off in HBUA no longer publishes, answers, or accepts commands over MQTT, so `dps` and `tamper` go quiet once you turn off their sensors...if an automation relies on one of those topics, turn that sensor back on.
+  * New feature: give any device its own HomeKit name with the new `Device.Name` feature option. The name carries through to the device's parts, like its side door lock or contact sensors, and `Device.SyncName` now does the same using the device's Access name, with a custom name taking precedence. While either is set, HBUA puts back a rename made in the Home app. The settings webUI now lists each device by its HomeKit name.
+  * Improvement: HomeKit now shows No Response whenever HBUA can't vouch for an accessory...its controller is lost, the device is offline, or it's on its way out after you removed it from Access. A brief blip no longer counts, so door commands keep working through one. A restored accessory refuses commands until HBUA has finished setting it up, so HomeKit no longer tells you something worked when nothing happened.
+  * Improvement: devices you remove from Access now leave HomeKit only once the controller has been healthy for 10 minutes, followed by your removal delay, so a controller recovering from an outage can't take your accessories with it.
+  * Improvement: the settings webUI is more forgiving with controllers. It tells you clearly when a controller doesn't accept your API token or can't be checked, a save you've pressed always completes, your selection survives an address change, an address another controller already uses is refused, and a connection check gives up after 30 seconds instead of spinning forever. A controller listed twice in your configuration is used once.
+  * Improvement: quieter, clearer logs. Each feature option you've set is stated once rather than once for every device, problems that should fix themselves are logged as warnings rather than errors, and a recurring problem is logged once rather than on every retry.
+  * Fix: a UA Gate no longer picks up another hub's door, its side door lock no longer reconfigures itself repeatedly, and turning off the side door now removes its position sensor too. A gate you've removed from Access also stops reacting to door events while your removal delay runs.
+  * Fix: changes you make in HomeKit are now saved right away...a crash or power loss no longer brings back a sensor you turned off or forgets a setting you changed.
+  * Fix: a hub with a doorbell now keeps its door as the main control in the Home app.
+  * Fix: for a door with no guards assigned, the doorbell's door guard filter now offers every active user.
+  * Fix: controllers with more than ten devices no longer log a MaxListenersExceededWarning.
+  * Fix: feature options from earlier versions of HBUA now carry over at startup, and the settings webUI no longer overwrites a hub sensor selection you've made yourself when it updates older settings. If you've customized your hub sensors, please double-check them after upgrading.
+  * Housekeeping.
+
 ## 2.0.1 (2026-09-22)
   * Fix: HBUA now connects to controllers that have a floor with no doors on it, which failed in 2.0.0 with "doors is not iterable".
   * Improvement: when HBUA cannot complete a connection to a controller, the log now tells you why - once when the failures begin, and again if the reason changes - instead of retrying silently.
