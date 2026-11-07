@@ -18,7 +18,7 @@ import { EventEmitter, on } from "node:events";
 import { TestClock, TestHttpListener, TestMqttClientFactory, drainClock, expectAt, hapStatus, settle, settlePastMqttEnd, triggerGet,
   triggerSet } from "homebridge-plugin-utils/testing";
 import type { TestMqttClient, TestMqttPublish } from "homebridge-plugin-utils/testing";
-import { createMembershipIdsSelector, serialForm } from "../policy.ts";
+import { createMembershipIdsSelector, deviceModel, serialForm } from "../policy.ts";
 import { ACCESS_WEBHOOK_EVENT_PREFIX } from "./events.ts";
 import { AccessController } from "./controller.ts";
 import type { AccessControllerConnect } from "./controller.ts";
@@ -28,6 +28,7 @@ import { AccessPlatform } from "../platform.ts";
 import { AccessReservedNames } from "../types.ts";
 import { Buffer } from "node:buffer";
 import type { HttpListener } from "homebridge-plugin-utils";
+import type { PlatformDoubleOptions } from "../testing.helpers.ts";
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { signWebhookDelivery } from "unifi-access/testing";
@@ -169,17 +170,29 @@ function faultingHandle(record: Record<string, unknown>, fault: HandleFault): un
   };
 }
 
-// What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, the lines it said, and the
-// plugin lifetime its own terminal signal composes from.
-interface ControllerHarness {
+// A platform double as an arm stands one up: the lines said over it at each level, each rendered as the user reads it, the clock its waits are armed on, and the
+// plugin lifetime the arm ends it by.
+interface CapturingPlatform {
+
+  // The time source every removal, connect backoff and other wait over this platform is armed on, so an arm advances time here rather than waiting any of it out.
+  clock: TestClock;
+  // Every line said at error level, the controller's own and its devices' alike.
+  errors: string[];
+  // Every line said at info level, which is what lets an arm assert on a removal's own sentence.
+  logged: string[];
+  platform: AccessPlatform;
+  // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from, so aborting it ends whatever the arm stood up.
+  shutdown: AbortController;
+  // Every line said at warning level, which is also the channel the controller's debug lines reach with Log.Debug on.
+  warnings: string[];
+}
+
+// What a stood-up controller looks like from a test's side: the HomeKit accessory list it acts on, the registration traffic it produced, and, from its platform, the
+// lines it said and the plugin lifetime its own terminal signal composes from.
+interface ControllerHarness extends Omit<CapturingPlatform, "platform"> {
 
   accessories: AccessAccessory[];
-  // The time source this controller's removals and its connect backoff are armed on, so an arm advances time here rather than waiting any of it out.
-  clock: TestClock;
   controller: AccessController;
-  // Every line said at error level, the controller's own and its devices' alike, rendered as the user reads it.
-  errors: string[];
-  logged: string[];
   // The MQTT client the controller's login built through the platform's factory, which every reading of the double is taken from.
   mqtt: () => TestMqttClient;
   // Every call the controller made to the platform's MQTT factory, with the double each one answered.
@@ -190,11 +203,30 @@ interface ControllerHarness {
   restore: (...cached: AccessAccessory[]) => void;
   // The UUIDs each save Homebridge accepted named, in the order it accepted them.
   readonly saves: string[][];
-  shutdown: AbortController;
   // The UUIDs each unregister Homebridge accepted named, in the order it accepted them.
   readonly unregistered: string[];
-  // Every line said at warning level, rendered as the user reads it, which is also the channel the controller's debug lines reach with Log.Debug on.
-  warnings: string[];
+}
+
+/* Stand up a platform double whose every line is captured and whose lifetime the arm owns. Its waits are armed on the clock this returns rather than the fresh one the
+ * double would otherwise default to, because a controller reading a clock no arm holds is a controller whose timers no drain or advance would ever reach.
+ *
+ * @param options - What the arm varies beyond the clock, the log and the lifetime this fixture owns; see {@link PlatformDoubleOptions}.
+ *
+ * @returns The platform with its clock, its lifetime and the lines said over it at each level.
+ */
+function capturingPlatform(options: Omit<PlatformDoubleOptions, "clock" | "log" | "signal"> = {}): CapturingPlatform {
+
+  const clock = new TestClock();
+  const errors: string[] = [];
+  const logged: string[] = [];
+  const shutdown = new AbortController();
+  const warnings: string[] = [];
+
+  // One level's lines, each rendered with its parameters, so an arm asserts on the sentence the user reads rather than on a format string.
+  const capture = (lines: string[]): Logging["info"] => (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters));
+  const platform = makePlatformDouble({ ...options, clock, log: { error: capture(errors), info: capture(logged), warn: capture(warnings) }, signal: shutdown.signal });
+
+  return { clock, errors, logged, platform, shutdown, warnings };
 }
 
 /* Stand up a real AccessController over a platform double and a stubbed client, so an arm reads what the controller actually did to HomeKit rather than what a
@@ -204,41 +236,27 @@ interface ControllerHarness {
  * refused local broker on the controller's configuration, as a user names theirs, and the factory answers a double standing as the arm asked. The MQTT option
  * leaves out the factory's clock, so each double's end grace runs on the system clock and an arm advancing the harness's clock never expires an end it holds.
  *
- * @param options - The controller's configuration, the controller document its client answers with, the MQTT an arm asks for with how its double stands, and the
- *                  state store behind that client.
+ * @param options - The controller's configuration, the controller document its client answers with and the name it reports, the MQTT an arm asks for with how
+ *                  its double stands, and the state store behind that client.
  */
 function makeController(options: { config?: Partial<AccessControllerOptions>; connection?: unknown;
-  controllerInfo?: { host: { device_type?: string; firmware_version?: string; mac: string; shortname?: string }; version?: string } | null;
+  controllerInfo?: { host: { device_type?: string; firmware_version?: string; mac: string; shortname?: string }; version?: string } | null; controllerName?: string;
   handles?: Map<string, unknown>; mqtt?: { connected?: boolean }; options?: string[]; store?: ReturnType<typeof createStateStore>; } = {}): ControllerHarness {
 
   const accessories: AccessAccessory[] = [];
   // The Homebridge API double the platform hands the controller: the accessory class an adoption builds from, and the calls Homebridge accepted, read below.
   const api = makeTestApi();
-  const clock = new TestClock();
-  const errors: string[] = [];
   const factory = new TestMqttClientFactory(options.mqtt);
-  // Every line the controller said at info level, rendered exactly as the user reads it, which is what lets an arm assert on a removal's own sentence.
-  const logged: string[] = [];
-  // The plugin's own lifetime, which the platform owns and every controller composes its terminal signal from.
-  const shutdown = new AbortController();
-  const warnings: string[] = [];
 
   // The UUIDs the accepted calls of one kind named, in the order Homebridge accepted them.
   const targets = (kind: "register" | "unregister"): string[] => api.calls.flatMap((call) => (call.kind === kind) ? call.accessories.map((target) => target.UUID) : []);
 
-  /* The clock every deadline this controller owns is armed on is the one this arm holds, rather than the fresh one the double would otherwise default to, because a
-   * controller reading a clock no arm holds is a controller whose timers an advance would never reach. The accessory entry and exit the double defaults to reach
-   * this arm's own API double and this arm's own list, which is what lets an adoption and a retirement be read here.
-   */
-  const platform = makePlatformDouble({ accessories, api, clock, entries: options.options ?? [],
-    log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-      info: (message: string, ...parameters: unknown[]): void => void logged.push(format(message, ...parameters)),
-      warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
-    mqttFactory: factory.create, signal: shutdown.signal });
+  // The double's accessory entry and exit reach this arm's own API double and its own list, which is what lets an adoption and a retirement be read here.
+  const { clock, errors, logged, platform, shutdown, warnings } = capturingPlatform({ accessories, api, entries: options.options ?? [], mqttFactory: factory.create });
 
   // The connect port answers with the same double the controller is handed directly, so the arms that never log in and the ones that do read one client.
-  const client = makeClientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, handles: options.handles,
-    store: options.store ?? createStateStore({}) });
+  const client = makeClientDouble({ connection: options.connection, controllerInfo: options.controllerInfo ?? null, controllerName: options.controllerName,
+    handles: options.handles, store: options.store ?? createStateStore({}) });
   /* The token in the default identity is what makes every arm's teardown real rather than decorative: a controller the identity gate turns back never registers
    * its bridge from the plugin's lifetime to its own, so aborting the plugin would leave that controller's terminal signal standing and prove nothing about what
    * the abort reaches. An arm that is about some other identity states one, and its own configuration wins.
@@ -1062,6 +1080,41 @@ test("the discovered line names each device by the identity an option entry and 
   assert.ok(line.includes("Unaddressed Hub"));
 });
 
+test("a device with no name is named in a log line by its model", () => {
+
+  const store = createStateStore({});
+
+  // The wire can omit a device's name as well as send it empty, so one record carries an empty alias and name and the other carries no name at all.
+  store.applyRefreshDocuments({ controller: null, topology: buildingTopology([
+    plainHubRecord(),
+    hubRecord({ alias: "", mac: "aabbccddee04", name: "", unique_id: "empty" }),
+    { alias: "", capabilities: ["is_hub"], device_type: "UAH", is_managed: true, mac: "aabbccddee05", unique_id: "nameless" }
+  ]) });
+
+  const harness = makeController({ controllerInfo: { host: { mac: CONTROLLER_MAC } }, store });
+  const empty = store.snapshot().devices.get("empty");
+  const nameless = store.snapshot().devices.get("nameless");
+  const plain = store.snapshot().devices.get("plain");
+
+  assert.ok(empty);
+  assert.ok(nameless);
+  assert.ok(plain);
+  assert.ok(!Object.hasOwn(nameless, "name"), "the store should hold the record without a name, as the wire sent it");
+
+  const emptyModel = deviceModel(empty);
+  const namelessModel = deviceModel(nameless);
+
+  assert.equal(harness.controller.getDeviceName(empty), emptyModel + " [" + emptyModel + "]", "an empty alias and name must fall through to the model");
+  assert.equal(harness.controller.getDeviceName(nameless), namelessModel + " [" + namelessModel + "]", "an absent name must fall through to the model");
+
+  // The discovered line hands the controller's own name for the device in explicitly, and the fallback reads that name the same way, the details clause intact.
+  assert.equal(harness.controller.getDeviceName(nameless, harness.controller.resolveDeviceName(nameless), true),
+    namelessModel + " [" + namelessModel + "] (id: AABBCCDDEE05)");
+
+  // A named device is the control: the fallback never displaces a name that is there.
+  assert.equal(harness.controller.getDeviceName(plain), "Plain Hub [" + deviceModel(plain) + "]");
+});
+
 test("an abort during the connect retry rejects with the signal's own reason", async () => {
 
   const aborter = new AbortController();
@@ -1137,6 +1190,30 @@ test("the bracket comes from the controller document alone: a host reporting onl
     assert.ok(tokenOnly.logged.includes("Test Controller: Connected to 1.2.3.4."),
       "and its lines carry the undecorated name, with no software parenthetical composed over versions nothing answered");
   });
+
+test("an empty configured name falls through to the name the controller reports, and an empty reported name falls through to the address", async (t) => {
+
+  // The document carries a hardware type, so each name is read whole, its bracket included, rather than by a prefix a composition dropping the bracket would satisfy.
+  const controllerInfo = { host: { device_type: "UNVRAI8", mac: CONTROLLER_MAC } };
+  const configured = makeController({ config: { name: "Front Office" }, controllerInfo });
+  const reported = makeController({ config: { name: "" }, controllerInfo });
+  const unnamed = makeController({ config: { name: "" }, controllerInfo, controllerName: "" });
+
+  t.after(() => {
+
+    configured.shutdown.abort();
+    reported.shutdown.abort();
+    unnamed.shutdown.abort();
+  });
+
+  await configured.controller.login();
+  await reported.controller.login();
+  await unnamed.controller.login();
+
+  assert.equal(reported.controller.name, "Test Controller [UNVRAI8]", "an empty configured name yields to the name the controller reports, as a missing one does");
+  assert.equal(unnamed.controller.name, "1.2.3.4 [UNVRAI8]", "and an empty reported name yields to the address, so the name is never a bare bracket");
+  assert.equal(configured.controller.name, "Front Office [UNVRAI8]", "while a configured name with characters in it still wins");
+});
 
 test("a token-only controller keys ownership by its configured address and reclaims nothing that names another owner", () => {
 
@@ -1607,17 +1684,12 @@ test("login reports the identity outcome its exit took", async (t) => {
 
 test("a login whose connect is refused on every attempt keeps retrying on the library's refusal schedule until shutdown ends it", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
+  const { clock, errors, platform, shutdown } = capturingPlatform();
   const { backoff, steady } = ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS;
   // Every staged delay, then more than one wait at the floor, so the run is seen settling onto the floor and carrying on there rather than stopping.
   const waits = [ ...backoff, steady, steady, steady ];
 
   let attempts = 0;
-
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
 
   /* Credentials the controller refuses on every attempt, until the last attempt the fixture scripts aborts the shutdown signal. That abort is the only thing that
    * ends this run: the retry's own abort check stops it and the drain below finds nothing pending, rather than walking into its step limit. The waits between
@@ -1665,14 +1737,9 @@ function addressRefused(prefix: string, reason: string): string {
 
 test("a login whose connect is refused as an address no URL can carry stops after its first attempt, waits for nothing, and says so once", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
+  const { clock, errors, platform, shutdown } = capturingPlatform();
 
   let attempts = 0;
-
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
 
   /* The library's refusal of an address carrying a path after its host, worded as unifi-access words it. The token in the identity is what registers this
    * controller's teardown against the plugin's lifetime, so the only shutdown that could end this run is one this arm never fires.
@@ -1701,12 +1768,7 @@ test("a login whose connect is refused as an address no URL can carry stops afte
 
 test("the line a refused address earns quotes the address as unifi-access masks it, so the credentials it carried reach no line", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
-
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (): void => undefined }, signal: shutdown.signal });
+  const { clock, errors, platform, shutdown } = capturingPlatform();
 
   /* The real connect, which refuses an address carrying credentials before it sends anything. The configured name is the line's prefix, so what this arm reads is
    * the message the controller composes around the library's refusal rather than the prefix a controller that never connected takes from its configuration.
@@ -1727,26 +1789,10 @@ test("the line a refused address earns quotes the address as unifi-access masks 
 
 test("a controller with no name that never connects prefixes its lines with its address as unifi-access masks it, so the credentials reach no line", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const lines: string[] = [];
-  const shutdown = new AbortController();
-
-  /* Every level is captured, debug included: the gate is turned on and a debug line arrives on the warn channel, so a line of any level that named the address
-   * raw would land here.
+  /* Every level is read, debug included: the gate is turned on and a debug line arrives on the warn channel, so a line of any level that named the address raw
+   * would land among the lines the last assertion reads.
    */
-  const platform = makePlatformDouble({ clock, entries: ["Enable.Log.Debug"], log: {
-
-    error: (message: string, ...parameters: unknown[]): void => {
-
-      const line = format(message, ...parameters);
-
-      errors.push(line);
-      lines.push(line);
-    },
-    info: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters)),
-    warn: (message: string, ...parameters: unknown[]): void => void lines.push(format(message, ...parameters))
-  }, signal: shutdown.signal });
+  const { clock, errors, logged, platform, shutdown, warnings } = capturingPlatform({ entries: ["Enable.Log.Debug"] });
 
   // The real connect, as in the named arm above, with no name configured, so the prefix every line carries is the one this controller takes from its address.
   const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", tokens: { access: "t" } });
@@ -1760,21 +1806,34 @@ test("a controller with no name that never connects prefixes its lines with its 
   assert.equal(await login, "unavailable");
   assert.deepEqual(errors, [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
     "the prefix names the address masked through its last @, as the library's message does");
-  assert.equal(lines.filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
+  assert.equal([ ...errors, ...logged, ...warnings ].filter((line) => line.includes("hunter2")).length, 0, "and the password reaches no line at any level");
+});
+
+test("a controller whose configured name is empty prefixes its lines with its masked address, as one with no name does", async (t) => {
+
+  const { clock, errors, platform, shutdown } = capturingPlatform();
+
+  // This is the real connect, as in the unnamed arm above, with a name configured but empty, which names nothing and so falls through to the address as no name does.
+  const controller = new AccessController(platform, { address: "admin:hunter2@10.0.0.1", name: "", tokens: { access: "t" } });
+
+  t.after(() => shutdown.abort());
+
+  assert.equal(controller.name, "***@10.0.0.1", "before any connect the name is the masked address rather than a blank");
+
+  const login = controller.login();
+
+  await drainClock(clock);
+
+  assert.equal(await login, "unavailable");
+  assert.deepEqual(errors, [addressRefused("***@10.0.0.1", "The controller address \"***@10.0.0.1\" carries more than a host and a port.")],
+    "and the line the refused address earns opens on that prefix");
 });
 
 test("a connect that keeps failing says why once per type, and a shutdown landing mid-attempt says nothing", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
-  const warnings: string[] = [];
+  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
 
   let attempts = 0;
-
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
-  signal: shutdown.signal });
 
   /* A controller that answers every attempt with a fault: the same reducer fault thrown afresh on each early attempt, then a deadline on the ones after, then a
    * shutdown arriving while the next attempt is in flight. The attempt the shutdown interrupts fails with a type no attempt before it gave, so a controller that
@@ -1839,19 +1898,9 @@ const WRAPPED_RATE_LIMIT = new AccessBootstrapError("Unable to fetch the UniFi A
 async function loginFailing(failures: readonly Error[], { attemptCount = 3, entries = [] }: { attemptCount?: number; entries?: string[] } = {}):
 Promise<{ errors: string[]; warnings: string[] }> {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
-  const warnings: string[] = [];
+  const { clock, errors, platform, shutdown, warnings } = capturingPlatform({ entries });
 
   let attempts = 0;
-
-  const platform = makePlatformDouble({ clock, entries, log: {
-
-    error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined,
-    warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters))
-  }, signal: shutdown.signal });
 
   // The token in the identity is what registers this controller's teardown against the plugin's lifetime, so the scripted abort reaches it.
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
@@ -1997,16 +2046,10 @@ test("a rate limit returning after a turn to another fault is said again at warn
 
 test("a controller that refuses a connection and then offers no API to a token alone warns the retried fault and stops on the attempt that meets it", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
-  const warnings: string[] = [];
+  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
 
   let attempts = 0;
 
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
-  signal: shutdown.signal });
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
 
     attempts++;
@@ -2033,16 +2076,10 @@ test("a controller that refuses a connection and then offers no API to a token a
 
 test("a controller that does not offer its API to a token alone stops the connect after its first attempt, waits for nothing, and says so once at error", async (t) => {
 
-  const clock = new TestClock();
-  const errors: string[] = [];
-  const shutdown = new AbortController();
-  const warnings: string[] = [];
+  const { clock, errors, platform, shutdown, warnings } = capturingPlatform();
 
   let attempts = 0;
 
-  const platform = makePlatformDouble({ clock, log: { error: (message: string, ...parameters: unknown[]): void => void errors.push(format(message, ...parameters)),
-    info: (): void => undefined, warn: (message: string, ...parameters: unknown[]): void => void warnings.push(format(message, ...parameters)) },
-  signal: shutdown.signal });
   const controller = new AccessController(platform, { address: "1.2.3.4", tokens: { access: "t" } }, async (): Promise<AccessClient> => {
 
     attempts++;

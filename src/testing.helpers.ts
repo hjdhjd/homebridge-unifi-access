@@ -567,8 +567,8 @@ export function makeControllerDouble(options: ControllerDoubleOptions = {}): Acc
  * between harnesses is injected; everything else is the same inert stub, so an arm that drives a real login() reaches the membership seed and the removal gate
  * over the caller's own store.
  */
-export function makeClientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; handles?: Map<string, unknown>;
-  official?: OfficialApi | null; onDispose?: () => void; store: ReturnType<typeof createStateStore>; }): AccessClient {
+export function makeClientDouble(options: { connection?: unknown; controllerInfo: Record<string, unknown> | null; controllerName?: string;
+  handles?: Map<string, unknown>; official?: OfficialApi | null; onDispose?: () => void; store: ReturnType<typeof createStateStore>; }): AccessClient {
 
   return {
 
@@ -579,7 +579,7 @@ export function makeClientDouble(options: { connection?: unknown; controllerInfo
       // Nothing transitions in these arms.
     } },
     controllerInfo: options.controllerInfo,
-    controllerName: "Test Controller",
+    controllerName: options.controllerName ?? "Test Controller",
     device: (): undefined => undefined,
     /* The handles an arm named, by the record identity each one answers for. An arm naming none answers no handle at all, which is what keeps every other arm's
      * adoption stopping short of a constructed device - the state they are about is the accessory list rather than what hangs off it.

@@ -449,8 +449,9 @@ export function deviceModel(device: AccessStateDevice): string {
 }
 
 /**
- * The name the controller gives a device: the alias an administrator gave the hardware where there is one, and the controller's own name for it otherwise. Every
- * log line naming a device reads it, and the name HomeKit carries below starts from the alias and the record's name in the same order.
+ * The name the controller gives a device: the alias an administrator gave the hardware where there is one, and the controller's own name for it otherwise. The
+ * controller's getDeviceName names a device in a log line by it, or by the device's model where it is empty, unless handed another name, and a device's own lines
+ * hand it another only where a custom name resolves. The name HomeKit carries below starts from the alias and the record's name in the same order.
  *
  * @param device - The device record whose name is wanted.
  *

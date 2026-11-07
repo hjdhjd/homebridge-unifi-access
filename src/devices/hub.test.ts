@@ -6766,15 +6766,17 @@ test("a hub whose alias HomeKit can display nothing of warns once at adoption, n
   assert.equal(fallbackWarnings(synced), 1);
 });
 
-test("a hub whose cached accessory carries another name is not warned about a name it does not carry", () => {
+test("a hub whose cached accessory carries another HomeKit name is not warned about the fallback name, which its display name alone follows", () => {
 
-  /* The accessory carries a name of its own, minted under an earlier alias, and with name synchronization off it keeps that name. A Home app rename is the arm
-   * below, because the Home app writes the information service's configured name and leaves this name alone.
+  /* The accessory carries a name of its own, minted under an earlier alias, and with name synchronization off its HomeKit names stay as the user left them while its
+   * display name follows the name the plugin shows. A Home app rename is the arm below, because the Home app writes the information service's configured name and
+   * leaves the name beside it alone.
    */
   const harness = makeHub({ keepAdoptionLines: true, record: testHub({ alias: "\u{1F6AA}" }) });
 
-  assert.equal(harness.hub.accessoryName, "Test Hub", "the accessory keeps the name it carries");
-  assert.equal(fallbackWarnings(harness), 0, "so the fallback name it does not carry goes unmentioned");
+  assert.equal(harness.hub.accessoryName, "Test Hub", "the HomeKit names stay as the user left them");
+  assert.equal(harness.hub.accessory.displayName, "UA-HUB-5B9C", "while the display name follows the fallback name");
+  assert.equal(fallbackWarnings(harness), 0, "so the fallback name HomeKit does not carry goes unmentioned");
 });
 
 test("a hub whose configured name carries a Home app rename is not warned, though its name still reads the fallback", () => {
@@ -6945,14 +6947,16 @@ test("with neither a custom name nor SyncName a Home app rename stands on the ti
   assert.equal(restoreCount(harness), 0, "and logged no restore");
 });
 
-test("with neither a custom name nor SyncName a part is created from the name the accessory carries, never from the controller's name for the hub", () => {
+test("with neither a custom name nor SyncName a part is created from the HomeKit name the accessory carries, never from the controller's name for the hub " +
+  "its display name follows", () => {
 
-  // The accessory keeps the name it carries while the controller's name for the hub reads otherwise, since nothing renames an accessory whose name the user owns.
+  // The HomeKit names stay as the user left them while the display name follows the controller's name for the hub, since nothing writes a HomeKit name the user owns.
   const harness = makeHub({ options: ["Enable.Hub.Lock.Trigger"], record: testHub({ alias: "Front Door" }) });
 
-  assert.equal(harness.hub.accessoryName, "Test Hub", "precondition: the accessory keeps the name it carries");
+  assert.equal(harness.hub.accessoryName, "Test Hub", "precondition: the HomeKit names stay as the user left them");
+  assert.equal(harness.hub.accessory.displayName, "Front Door", "while the display name follows the controller's name");
   assert.equal(switchService(harness, AccessReservedNames.SWITCH_LOCK_TRIGGER).getCharacteristic(Characteristic.Name).value, "Test Hub Lock Trigger",
-    "the lock trigger is created as that name followed by its suffix");
+    "the lock trigger is created as the HomeKit name followed by its suffix");
 });
 
 test("reconcile passes keep a held part's watch rather than attaching another, and one rename in the Home app after them draws one restore", async () => {

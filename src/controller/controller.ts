@@ -85,6 +85,12 @@ const renderWebhookFailure = (error: unknown): string => {
   return rendered.includes(detail) ? rendered : (rendered + ": " + detail);
 };
 
+// An empty name names nothing, so it answers as absent and a ?? chain falls through it to the next name exactly as it falls through a missing one.
+function nonEmptyName(name: Nullable<string> | undefined): string | undefined {
+
+  return name?.length ? name : undefined;
+}
+
 export class AccessController {
 
   // The unifi-access client - the single owner of protocol truth: the reduced state, the realtime channel, recovery, and door state. Established by #connect() and
@@ -133,7 +139,7 @@ export class AccessController {
     this.configuredDevices = new Map();
     this.mqtt = null;
     // A controller that never connects prefixes every line it writes with this name, so the address it falls back to is named through unifi-access's mask.
-    this.#name = accessOptions.name ?? maskAddressCredentials(accessOptions.address);
+    this.#name = nonEmptyName(accessOptions.name) ?? maskAddressCredentials(accessOptions.address);
     this.#membershipSelector = createMembershipIdsSelector();
     this.#phase = "connecting";
     this.platform = platform;
@@ -462,12 +468,14 @@ export class AccessController {
     const controllerType = controllerInfo?.host.device_type ?? controllerInfo?.host.shortname ?? "";
 
     /* Assign our log-prefix name unless the user stated a preference, falling back to the address when the controller has not named itself, and qualify it with the
-     * host hardware's type so a controller-scoped line names the hardware it came from at a glance. A controller reached with an API token alone never reads a
-     * controller document, so it has no type to render and keeps its bare name rather than bracketing a label over an absent value.
+     * host hardware's type so a controller-scoped line names the hardware it came from at a glance. An empty configured name and an empty reported name fall through
+     * as absent ones do, as an empty device name falls through to its model, so no line opens on a blank where the name belongs. A controller reached with an API
+     * token alone never reads a controller document, so it has no type to render and keeps its bare name rather than bracketing a label over an absent value.
      *
      * The composition runs on every connect, so a controller replaced under the same address carries the new hardware's type from its next session forward.
      */
-    this.#name = (this.config.name ?? this.client.controllerName ?? this.config.address) + (controllerType.length ? " [" + controllerType + "]" : "");
+    this.#name = (nonEmptyName(this.config.name) ?? nonEmptyName(this.client.controllerName) ?? this.config.address) +
+      (controllerType.length ? " [" + controllerType + "]" : "");
 
     this.transition("running");
 
@@ -1438,6 +1446,9 @@ export class AccessController {
 
   /* Utility to generate a nicely formatted device string, in the form: Device Name [Device Type] (address: IP address id: device identity).
    *
+   * An empty or missing name falls back to the model, as the HomeKit name does, so a device carrying no alias and no name, or an empty one, is named by its model
+   * rather than by a blank where the name belongs.
+   *
    * The identity clause establishes the exact string a per-device feature option and an MQTT topic address this device by, an Enterprise port's qualifier
    * included, so a user reading the startup log has the spelling to type. The parenthetical carries what the record actually establishes and nothing more: the
    * official API's inventory reports no address at all, and a device it names by an identifier that is not address-shaped carries no hardware identity either, so
@@ -1446,6 +1457,7 @@ export class AccessController {
   public getDeviceName(device: AccessStateDevice, name = deviceName(device), deviceInfo = false): string {
 
     const details: string[] = [];
+    const model = this.resolveDeviceModel(device);
 
     if(device.ip) {
 
@@ -1457,7 +1469,7 @@ export class AccessController {
       details.push("id: " + deviceSerial(device));
     }
 
-    return name + " [" + this.resolveDeviceModel(device) + "]" + ((deviceInfo && details.length) ? " (" + details.join(" ") + ")" : "");
+    return (nonEmptyName(name) ?? model) + " [" + model + "]" + ((deviceInfo && details.length) ? " (" + details.join(" ") + ")" : "");
   }
 
   // Utility to retrieve a reasonable device name for an Access device: the alias an administrator gave the hardware where there is one, and the controller's own
