@@ -1415,6 +1415,13 @@ const wireAccessConfig = async () => {
   // before the page opened. The name seeds the primary platform entry, and it is read from the same constant the framework is configured with so the two cannot drift.
   const session = await PluginConfigSession.open({ host: homebridge, name: webUiParams.name });
 
+  // One controller's classified device list, the probe each pass below sends. A probe that throws or that its deadline overtakes classifies as a failed answer.
+  const probeController = async ({ address, password, tokens, username, verifyTls }) => {
+
+    return classifyProbeResponse(await withDeadline({ promise: homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }),
+      seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null));
+  };
+
   /* Resolve a MAC address for each controller whose per-controller settings still need one. The probes run in parallel because each performs a full authentication
    * and topology fetch, and serializing them would multiply the open-time wait by the number of controllers configured.
    *
@@ -1423,13 +1430,17 @@ const wireAccessConfig = async () => {
    * wiring, and discard the ENTIRE pass, every other controller's resolved work included, on every open until that one controller sped up. Bounded, it costs nobody
    * but itself. A probe that throws, that reports a failure, that answers no devices, or that its own deadline overtakes contributes no entry at all, and the
    * controller it names simply keeps its settings for another day.
+   *
+   * Every answer this pass receives is kept by address, a failed one included, for the wider pass below, so this migration probes no controller twice.
    */
+  const answerByAddress = new Map();
   const macByAddress = new Map();
 
-  await Promise.all(controllersAwaitingMigration(session.platform).map(async ({ address, password, tokens, username, verifyTls }) => {
+  await Promise.all(controllersAwaitingMigration(session.platform).map(async (controller) => {
 
-    const response = await withDeadline({ promise: homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }),
-      seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null);
+    const answer = await probeController(controller);
+
+    answerByAddress.set(controller.address, answer);
 
     /* The controller reports itself as a record whose display model is "controller", so it is found by that key rather than by its position in the list.
      *
@@ -1437,11 +1448,11 @@ const wireAccessConfig = async () => {
      * controller-scoped option entry by - and never the raw MAC address the record also carries. An entry composed against the raw form would be written in a
      * spelling no read at runtime ever asks for, so the migration would appear to succeed while the setting it moved silently stopped answering.
      */
-    const scopingId = controllerSerial(classifyProbeResponse(response));
+    const scopingId = controllerSerial(answer);
 
     if(scopingId) {
 
-      macByAddress.set(address, scopingId);
+      macByAddress.set(controller.address, scopingId);
     }
   }));
 
@@ -1462,16 +1473,17 @@ const wireAccessConfig = async () => {
    * controllers that were awaiting a MAC address and asks every configured controller for its devices. This is the only path that pays for the wider probe, and a
    * configuration with nothing left to place never reaches it.
    *
-   * Each probe is bounded exactly as the pass above bounds its own, and a controller that does not answer simply contributes no topology: the families whose scopes it
-   * would have placed keep their entries for a later open, and the runtime overlay keeps honoring them meanwhile. A controller reached with an API token alone answers
-   * under the address identity its row carries, so its devices place exactly as a credentialed controller's do.
+   * A controller the pass above already asked is read from the answer that pass kept, its failure included, so a controller that hangs costs this migration one
+   * probe deadline rather than two, and only the controllers that pass never asked are probed here. Each probe is bounded exactly as the pass above bounds its own, and a
+   * controller that does not answer simply contributes no topology: the families whose scopes it would have placed keep their entries for a later open, and the
+   * runtime overlay keeps honoring them meanwhile. A controller reached with an API token alone answers under the address identity its row carries, so its devices
+   * place exactly as a credentialed controller's do.
    */
   if(composed?.remaining && !wiringSignal.aborted) {
 
-    const topology = (await Promise.all(controllers(session.platform).map(async ({ address, password, tokens, username, verifyTls }) => {
+    const topology = (await Promise.all(controllers(session.platform).map(async (controller) => {
 
-      const answer = classifyProbeResponse(await withDeadline({ promise: homebridge.request("/getDevices", { address, password, tokens, username, verifyTls }),
-        seconds: PROBE_DEADLINE, signal: wiringSignal }).catch(() => null));
+      const answer = answerByAddress.get(controller.address) ?? await probeController(controller);
       const id = controllerSerial(answer);
 
       return id ? { devices: answer.devices.filter((device) => !isController(device) && device.serialNumber).map((device) => device.serialNumber), id } : null;
