@@ -7,8 +7,8 @@
  * its import cycle has not yet initialized in the entry's order fails only when the entry loads first. Node runs each test file in its own process, so this one loads
  * the plugin as Homebridge does: its static imports are Node's own, and the entry is the first plugin module it imports.
  */
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import test from "node:test";
 
 const { default: registerPlugin } = await import("./index.ts");
 
@@ -16,15 +16,18 @@ const { default: registerPlugin } = await import("./index.ts");
 const { PLATFORM_NAME, PLUGIN_NAME } = await import("./settings.ts");
 const { AccessPlatform } = await import("./platform.ts");
 
-// The entry reads registerPlatform alone from the API Homebridge hands it, so a recorder carrying that one call stands in for the whole API.
-test("the plugin's entry point registers the platform once, under the plugin's name and the platform's", () => {
+describe("the plugin's entry point", () => {
 
-  const registrations: unknown[][] = [];
+  // The entry reads registerPlatform alone from the API Homebridge hands it, so a recorder carrying that one call stands in for the whole API.
+  test("registers the platform once, under the plugin's name and the platform's", () => {
 
-  registerPlugin({ registerPlatform: (...registration: unknown[]): void => {
+    const registrations: unknown[][] = [];
 
-    registrations.push(registration);
-  } } as unknown as Parameters<typeof registerPlugin>[0]);
+    registerPlugin({ registerPlatform: (...registration: unknown[]): void => {
 
-  assert.deepEqual(registrations, [[ PLUGIN_NAME, PLATFORM_NAME, AccessPlatform ]], "one registration, of AccessPlatform under PLUGIN_NAME and PLATFORM_NAME");
+      registrations.push(registration);
+    } } as unknown as Parameters<typeof registerPlugin>[0]);
+
+    assert.deepEqual(registrations, [[ PLUGIN_NAME, PLATFORM_NAME, AccessPlatform ]], "one registration, of AccessPlatform under PLUGIN_NAME and PLATFORM_NAME");
+  });
 });

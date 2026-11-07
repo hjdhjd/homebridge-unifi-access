@@ -617,15 +617,24 @@ export abstract class AccessDevice extends AccessBase {
    * `Enable.Hub.Sensors.<device>` means - the user turned the list on for that hub and named nothing - and reading it as an empty selection would silently
    * withhold every member. A selection the user emptied on purpose is a different reading and still answers empty.
    *
-   * A retired family's overlay answers ahead of the engine, at this device's own device and controller, while the configuration still carries entries the boot view
-   * could only approximate, and it answers nothing once the configuration has converged, which costs one map lookup. Every family's selection is expressed in a
-   * domain, so a read with no domain names no family and goes to the engine alone.
+   * A retired family's overlay answers ahead of the engine while the configuration still carries entries the boot view could only approximate. Every family's
+   * selection is expressed in a domain, so a read with no domain names no family and goes to the engine alone.
    */
   public getFeatureValueList(option: string, domain?: readonly string[]): readonly string[] {
 
-    const overlay = (domain === undefined) ? undefined : this.platform.retiredTranslation.selection({ controller: this.controller.id, device: this.id, domain, option });
+    return ((domain === undefined) ? undefined : this.retiredSelection(option, domain)) ??
+      this.platform.featureOptions.valueList({ controller: this.controller.id, defaultWhenUnset: true, device: this.id, domain, option });
+  }
 
-    return overlay ?? this.platform.featureOptions.valueList({ controller: this.controller.id, defaultWhenUnset: true, device: this.id, domain, option });
+  /* The overlay's answer for a feature option at this device while the retired grammar still owns it, read at this device's own device and controller, or undefined
+   * once the configuration has converged - which is also the answer for any option that supersedes nothing.
+   *
+   * This is the one expression of whether the retired grammar still owns an answer at this device, so every selection read asks it before deciding where to resolve,
+   * and no reader can ask the overlay at a scope other than the one this device resolves at. On a converged configuration the question costs one map lookup.
+   */
+  protected retiredSelection(option: string, domain: readonly string[]): readonly string[] | undefined {
+
+    return this.platform.retiredTranslation.selection({ controller: this.controller.id, device: this.id, domain, option });
   }
 
   // Utility for checking whether a feature option is enabled on a device.
