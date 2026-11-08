@@ -425,7 +425,12 @@ export class AccessController {
             return;
           }
 
-          log[severity]("Unable to connect to the UniFi Access controller, and will keep trying: %s.", reason);
+          // A certificate nothing trusts closes on the remedies that fix it, because unifi-access's reason names the listener and the verifier's refusal but nothing
+          // the user can change.
+          const remedy = (type === "certificate") ? " Turn off certificate verification for this controller in the plugin settings, or install a trusted certificate " +
+            "on your console and on the Access developer API." : "";
+
+          log[severity]("Unable to connect to the UniFi Access controller, and will keep trying: %s.%s", reason, remedy);
         }, (): ConnectFailureType => type);
       }
     });

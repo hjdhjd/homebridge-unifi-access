@@ -8,7 +8,7 @@
 "use strict";
 
 import { ACCESS_STATUS_CONTEXT_ROUTE, AccessStatusFeed, narrowStatusContextRequest } from "../dist/webui-status.js";
-import { AccessClient, noopLog } from "unifi-access";
+import { AccessCertificateError, AccessClient, noopLog } from "unifi-access";
 import { STATUS_EVENT, STATUS_VIEW_ROUTE, consoleLog, narrowStatusViewRequest } from "homebridge-plugin-utils";
 import { accessMethodChoices, composeConnectIdentity, controllerIdentity, deviceDisplayName, deviceSerial, doorGuardChoices, hubSensorChoices, logEventChoices,
   membershipRecords, officialDeviceModel, serialForm } from "../dist/policy.js";
@@ -159,8 +159,9 @@ class PluginUiServer extends HomebridgePluginUiServer {
      * The answer is a KIND-TAGGED union rather than a bare list, because the two successful outcomes differ in what the user can do with them rather than in what
      * they look like. A credentialed connect reads the topology document and answers the controller itself followed by its devices. A token-only connect reads the
      * official API's adopted inventory and answers those devices with no console identity to lead with, since the topology and the controller document both live
-     * behind the Access application's own endpoints, which a token never reaches. A failure answers its reason. Tagging the outcome is what lets the browser explain
-     * that door-level accessories still need credentials without ever presenting a working controller as broken.
+     * behind the Access application's own endpoints, which a token never reaches. A failure answers its reason, under a tag of its own when the controller's TLS
+     * certificate did not verify, so the page can name what to change rather than only repeating unifi-access's sentence. Tagging the outcome is what lets the
+     * browser explain that door-level accessories still need credentials without ever presenting a working controller as broken.
      *
      * Every success also says whether the controller refused an API token supplied beside the credentials, read from the capability map the library established at
      * connect: a client holding both identities connects on the credentials alone when the controller will not honor the token, and the settings panel is where the
@@ -307,7 +308,8 @@ class PluginUiServer extends HomebridgePluginUiServer {
           console.error(errorInfo);
         }
 
-        return { kind: "error", message: errorInfo };
+        // The class is read off the thrown error, which the transport raises as it is and the connect does not wrap, rather than off errorInfo, which is text.
+        return { kind: (error instanceof AccessCertificateError) ? "certificate" : "error", message: errorInfo };
       }
     });
   }

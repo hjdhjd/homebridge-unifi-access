@@ -312,6 +312,11 @@ export const hasValidIdentity = (controller?: AccessIdentity): boolean => {
 /** The headline a controller the plugin could not reach is rendered under: the connection card's result line and the framework's error-view headline. */
 export const CONNECTION_FAILURE_HEADLINE = "Unable to connect to the UniFi Access controller.";
 
+// What to do about a controller whose TLS certificate did not verify, rendered beneath the connection failure's headline in place of each surface's standing line,
+// which names no remedy for a certificate. The console and the developer API each present a certificate of their own, so the remedy names both.
+const CERTIFICATE_FAILURE_GUIDANCE = "This controller's TLS certificate could not be verified. Turn off certificate verification for this controller, or install a " +
+  "trusted certificate on your console and on the Access developer API.";
+
 /** The headline a UI server answering in a shape it never writes is rendered under: the card's result line and the framework's error-view headline. */
 export const SERVER_FAILURE_HEADLINE = "The plugin's UI server did not answer as expected.";
 
@@ -362,10 +367,13 @@ export const classifyProbeResponse = (response?: unknown): AccessProbeVerdict =>
         { devices: [], guidance: SERVER_FAILURE_GUIDANCE, headline: SERVER_FAILURE_HEADLINE, kind: "error",
           message: "The plugin's UI server answered a connection without a device list." };
 
+    // A certificate that did not verify is a connection failure like any other, and carries guidance of its own because the standing line names no remedy for it.
+    case "certificate":
     case "error":
 
       return { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error",
-        message: (typeof (response as ProbeAnswer).message === "string") ? (response as ProbeAnswer).message as string : "" };
+        message: (typeof (response as ProbeAnswer).message === "string") ? (response as ProbeAnswer).message as string : "",
+        ...(((response as ProbeAnswer).kind === "certificate") ? { guidance: CERTIFICATE_FAILURE_GUIDANCE } : {}) };
 
     default:
 

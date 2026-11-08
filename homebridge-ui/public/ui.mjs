@@ -1112,7 +1112,7 @@ const featureOptionsParams = {
       "faulted": { label: "Controller error", message: "The controller answered with an error, or with a response that could not be understood. Check that " +
         "the controller and the Access application are running normally, and that the plugin is up to date." },
       "misconfigured": { label: "Certificate rejected", message: "This controller presented a TLS certificate that could not be verified. Turn off " +
-        "certificate verification for this controller in the card below, or install a trusted certificate on the console and on the Access developer API." },
+        "certificate verification for this controller in the card below, or install a trusted certificate on your console and on the Access developer API." },
       "not-found": { message: "This device was not listed by a configured controller in this session. Refresh the controller list to relist it." },
       "unsupported": { label: "No developer API", message: "This controller has no developer API for an API token to reach. Add a local user's username and " +
         "password in the card below." }

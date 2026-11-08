@@ -400,7 +400,7 @@ test("the browser identity predicate agrees with the plugin's own composition on
   }
 });
 
-test("the probe verdict reads all three response kinds and refuses a shape the server never writes", () => {
+test("the probe verdict reads every response kind the server writes and refuses a shape it never writes", () => {
 
   const devices = [{ name: "Front Door" }];
 
@@ -423,6 +423,14 @@ test("the probe verdict reads all three response kinds and refuses a shape the s
   assert.equal(reported.kind, "error", "a controller that refused the sign-in is a failure");
   assert.deepEqual(reported, { devices: [], headline: CONNECTION_FAILURE_HEADLINE, kind: "error", message: "Invalid credentials." },
     "a failure carries the controller's own reason under the headline that names which failure this was, and no guidance, so each surface keeps its standing line");
+
+  const untrusted = "The UniFi console at access.local presented a certificate that could not be verified: self-signed certificate (DEPTH_ZERO_SELF_SIGNED_CERT).";
+  const remedies = "This controller's TLS certificate could not be verified. Turn off certificate verification for this controller, or install a trusted " +
+    "certificate on your console and on the Access developer API.";
+
+  assert.deepEqual(classifyProbeResponse({ kind: "certificate", message: untrusted }),
+    { devices: [], guidance: remedies, headline: CONNECTION_FAILURE_HEADLINE, kind: "error", message: untrusted },
+    "a certificate that did not verify is a connection failure carrying unifi-access's reason, with guidance naming the remedies the standing line does not");
 
   for(const malformed of [ undefined, {}, { kind: "connected" }, { kind: "token-only" }, { kind: "nonsense" }, "a string" ]) {
 

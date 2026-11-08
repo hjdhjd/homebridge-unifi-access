@@ -6,7 +6,8 @@
 import { ACCESSORY_SAVE_WINDOW_MS, APIEvent, HAPStatus, HbpuAbortError, membershipDelta, retry } from "homebridge-plugin-utils";
 import { ACCESS_MQTT_TOPIC, ACCESS_REMOVAL_STABILITY_WINDOW, ACCESS_WEBHOOK_EVENTS, ACCESS_WEBHOOK_EVENT_LIST, ACCESS_WEBHOOK_FRESHNESS_WINDOW_MS, PLATFORM_NAME,
   PLUGIN_NAME } from "../settings.ts";
-import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessClient, AccessConfigurationError,
+import { ACCESS_RECOVERY_REFUSAL_SCHEDULE_MS, AccessApiError, AccessAuthError, AccessAuthorizationError, AccessBootstrapError, AccessCertificateError, AccessClient,
+  AccessConfigurationError,
   AccessNetworkError, AccessRequestError, AccessTimeoutError, createStateStore, selectAccessPoints } from "unifi-access";
 import type { API, Logging } from "homebridge";
 import type { AccessAccessory, AccessAccessoryContext } from "../types.ts";
@@ -1988,6 +1989,19 @@ test("a refused sign-in is said once at error with its reason, and a controller 
 
   assert.deepEqual(unreachable.warnings, [retrying("No route to the controller")], "an unreachable controller should fix itself");
   assert.deepEqual(unreachable.errors, [], "and nothing is said at error");
+});
+
+test("a certificate nothing trusts is said once at error with its reason and the remedies that fix it", async () => {
+
+  const untrusted = new AccessCertificateError({ cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+    host: "1.2.3.4", identity: "credentials" });
+
+  const { errors, warnings } = await loginFailing([untrusted]);
+
+  assert.deepEqual(errors, ["1.2.3.4: Unable to connect to the UniFi Access controller, and will keep trying: The UniFi console at 1.2.3.4 presented a certificate " +
+    "that could not be verified: self-signed certificate (DEPTH_ZERO_SELF_SIGNED_CERT). Turn off certificate verification for this controller in the plugin " +
+    "settings, or install a trusted certificate on your console and on the Access developer API."], "a person must act on a certificate, and the line says how");
+  assert.deepEqual(warnings, [], "and nothing is said at warn");
 });
 
 test("reasons of one type are one report, and a turn between types is said in full, a return to an earlier type included", async () => {
