@@ -5414,23 +5414,54 @@ test("a read or a delivery while the opener's command is out answers the travel 
   await writing;
 });
 
-test("a close on a door already reading closed shows closing while its command is out, and settles once that command comes back", async () => {
+test("a close on a gate already reading closed shows closing while its command is out, and settles once that command comes back", async () => {
 
-  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
-  const service = openerService(opener);
-  const writing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+  const gate = makeGate({ defer: "close", doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  const service = openerService(gate);
+  const writing = writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
 
   await settle();
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
 
-  opener.release();
+  gate.release();
   await writing;
-  opener.clock.advance(REVERT_DELAY_MS);
+  gate.clock.advance(REVERT_DELAY_MS);
 
-  // The door read closed before the command went out and reads closed still, so the closing is over the moment the command is accepted.
+  // The gate read closed before the command went out and reads closed still, so the closing is over the moment the command is accepted.
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
   assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED);
+});
+
+test("a door hub's opener at rest sends no pulse for the position its sensor already reads, and still pulses for the other one or to halt a travel", async () => {
+
+  // Closing a door that reads closed would start a single-button operator opening it, so nothing is sent and the tile stays where it was.
+  const closed = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+
+  await writeTarget(closed, Characteristic.TargetDoorState.CLOSED);
+
+  assert.deepEqual(closed.commands, []);
+  assert.equal(openerService(closed).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+
+  // Opening a door that reads open, fully or partway, would as likely close it, so nothing is sent for that either.
+  const open = makeTravellingOpener({ doorState: STANDING_OPEN });
+
+  await writeTarget(open, Characteristic.TargetDoorState.OPEN);
+
+  assert.deepEqual(open.commands, []);
+  assert.equal(openerService(open).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN);
+
+  // Opening a door that reads closed pulses as always, and a close written while that opening runs is a halt, which pulses too.
+  const opening = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+
+  await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
+
+  assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
+
+  await writeTarget(opening, Characteristic.TargetDoorState.CLOSED);
+
+  assert.deepEqual(opening.commands.map(command => command.verb), [ "unlock", "unlock" ]);
+  assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 });
 
 test("a door that reads closed while its close command is out settles once that command comes back, rather than on its timer", async () => {

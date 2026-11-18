@@ -1509,6 +1509,17 @@ export class AccessHub extends AccessDevice {
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
       const duration = this.doorTransitionDuration;
       const running = this.#doorRunning;
+
+      /* A door hub's opener answers every write with the same pulse, and a single-button operator turns that pulse into whatever its next move is, so a write for
+       * the position the door's sensor already reads would move the door away from it: closing a closed door opens it. A door at rest whose position is reported
+       * therefore takes no command for the position it already holds. A door stopped partway reads open as well, so an open written to it is not sent either,
+       * because the pulse would as likely close it. A gate is left out: its open and close are separate commands, and a gate stopped partway needs its open.
+       */
+      if(!isUaGate && this.#positionReported && (this.#doorTransition.phase === "idle") && (this.#doorStateFromEvidence().target === value)) {
+
+        return;
+      }
+
       /* A door already travelling is halted by a write whichever direction that write named, because operating a door mid-travel is what stops it, and a halt of an
        * opening keeps that opening's mark. A door standing still - never moved, or halted and waiting - takes the direction the machine derives for it. The halt and
        * the direction read the machine's own transition, so a write made while an earlier write's command is still out decides from the transition the controller
