@@ -124,11 +124,23 @@ function lowerFirst(text: string): string {
 
 /* A garage door's travel while it is running: the direction it is moving in, or the halt that interrupted one. A halt remembers the travel it interrupted, because
  * a single-trigger operator resumes the opposite direction on its next operation whichever direction HomeKit asked for.
+ *
+ * An opening also remembers whether the door's position sensor has read it anywhere but closed since the opening began, because only a closed reading after that
+ * ends an opening ahead of its expiry. A halt that interrupted an opening carries that opening's mark, because a door halted on its way open has not come back
+ * closed until it has been seen open...a gate's position sensor lags its motion, so a halt made early in an opening still reads closed while the gate stands
+ * partly open. The mark is set on the running travel in place, so the expiry that travel armed stays the one in force.
  */
-type DoorTravel = { phase: "opening" | "closing" } | { lastDirection: "opening" | "closing"; phase: "stopped" };
+type DoorTravel = { phase: "closing" } | { phase: "opening"; seenOpen: boolean } | { lastDirection: "closing"; phase: "stopped" } |
+  { lastDirection: "opening"; phase: "stopped"; seenOpen: boolean };
 
-// Where a garage door stands: still, or running one of the travels above.
-type DoorTransition = { phase: "idle" } | DoorTravel;
+// Where the machine has the door: still, or running one of the travels above.
+type DoorRunning = { phase: "idle" } | DoorTravel;
+
+/* Where a garage door stands: the machine's own transition, or a commanded travel. A commanded travel is the one a HomeKit write has shown while the command behind
+ * it is still out, carried together with the transition the machine runs beneath it, so the travel HomeKit was shown and the one the machine runs live in one
+ * value and the shown travel cannot outlive the command that carries it.
+ */
+type DoorTransition = DoorRunning | { phase: "commanded"; running: DoorRunning; shown: DoorTravel };
 
 /* What a door command needs before it can dispatch: the verb its lines name, the door as the user hears it, and the control surface the command goes through.
  * Carrying the surface here is what makes it non-optional where the command dispatches, so a command body cannot express a state the preamble already refused.
@@ -148,8 +160,9 @@ interface DrivenDoor { isSideDoor: boolean; locationId: string }
 // a UA Gate the way it does for other hub types, so this borrows the gate's own default travel duration as the closest available estimate of when the gate
 // has swung shut again.
 const AUTO_LOCK_DELAY_MS = 5000;
-// How long we wait before putting a characteristic back after the command behind it was refused. The pause lets HomeKit's own write settle first, so the HomeKit
-// client sees the correction as a fresh value rather than as a race against the write it just made.
+// How long we wait after a HomeKit write before writing what it touched again: putting a characteristic back after the command behind it was refused, or checking
+// a garage door's accepted command against the evidence. The pause lets HomeKit's own write settle first, so the HomeKit client sees the correction as a fresh
+// value rather than as a race against the write it just made, and HAP's store of the written value lands ahead of the correction rather than over it.
 const CHARACTERISTIC_REVERT_DELAY_MS = 50;
 // How long a dispatched doorbell ring or cancel waits before settling the trigger switch back onto the mirrored ring state: long enough for the controller's own
 // ring notification to arrive and win, short enough that a ring the notification stream never confirms is corrected while the user is still looking at the switch.
@@ -1449,19 +1462,36 @@ export class AccessHub extends AccessDevice {
   // Configure a GarageDoorOpener service.
   private configureGarageDoorService(service: Service): void {
 
-    /* A service re-acquire registers the handlers below afresh, so any travel the machine was rendering belonged to a presentation of the door that no longer
-     * exists. The door starts standing here, which also drains whatever timer that travel had armed.
+    /* A service re-acquire registers the handlers below afresh, so any travel the machine was rendering, and any travel a write was showing while its command was
+     * out, belonged to a presentation of the door that no longer exists. The door starts standing here, which also drains whatever timer the machine's travel had
+     * armed, so the fresh opener renders the evidence from its first read and a command still out finds no commanded travel of its own when it comes back.
      */
     this.#enterDoorTransition({ phase: "idle" });
 
     /* What the opener answers when HomeKit asks. A door mid-travel answers with the travel rather than with the evidence: the evidence lags the door, so answering
-     * it here would put a HomeKit read straight over the transitional state the write in front of it displayed.
+     * it here would put a HomeKit read straight over the transitional state the write in front of it displayed. A commanded travel answers with the travel HomeKit
+     * was shown, because the machine has not taken it yet and HomeKit is already showing it.
      */
     const getDoorState = (): CharacteristicValue => {
 
-      const travelling = this.#doorTransition;
+      const transition = this.#doorTransition;
 
-      return (travelling.phase === "idle") ? this.#doorStateFromEvidence().current : this.#renderedTransition(travelling);
+      switch(transition.phase) {
+
+        case "commanded":
+
+          return this.#renderedTransition(transition.shown);
+
+        case "idle":
+
+          return this.#doorStateFromEvidence().current;
+
+        case "closing":
+        case "opening":
+        case "stopped":
+
+          return this.#renderedTransition(transition);
+      }
     };
 
     service.getCharacteristic(this.hap.Characteristic.CurrentDoorState).onGet(this.answering(getDoorState));
@@ -1478,18 +1508,25 @@ export class AccessHub extends AccessDevice {
       const isUaGate = this.uda.device_type === "UGT";
       const shouldClose = value === this.hap.Characteristic.TargetDoorState.CLOSED;
       const duration = this.doorTransitionDuration;
-      const standing = this.#doorTransition;
-      /* A door already travelling is halted by a write whichever direction that write named, because operating a door mid-travel is what stops it. A door standing
-       * still - never moved, or halted and waiting - takes the direction the machine derives for it.
+      const running = this.#doorRunning;
+      /* A door already travelling is halted by a write whichever direction that write named, because operating a door mid-travel is what stops it, and a halt of an
+       * opening keeps that opening's mark. A door standing still - never moved, or halted and waiting - takes the direction the machine derives for it. The halt and
+       * the direction read the machine's own transition, so a write made while an earlier write's command is still out decides from the transition the controller
+       * has confirmed rather than from what HomeKit was shown.
        */
-      const halting = (standing.phase === "opening") || (standing.phase === "closing");
-      const next: DoorTravel = halting ? { lastDirection: standing.phase, phase: "stopped" } : { phase: this.#resumedDoorDirection(shouldClose) };
+      const halting = (running.phase === "opening") || (running.phase === "closing");
+      const next: DoorTravel = halting ?
+        ((running.phase === "opening") ? { lastDirection: "opening", phase: "stopped", seenOpen: running.seenOpen } : { lastDirection: "closing", phase: "stopped" }) :
+        ((this.#resumedDoorDirection(running, shouldClose) === "opening") ? { phase: "opening", seenOpen: false } : { phase: "closing" });
 
       /* What HomeKit shows goes up as soon as the write lands, ahead of the command behind it, which is the responsiveness a door tile is expected to have. The
-       * phase behind it takes only once that command comes back, so a command the controller refuses leaves the machine exactly where it stood.
+       * write commands its travel over whatever the machine is running, and the machine takes it only once that command comes back, so a command the controller
+       * refuses leaves the machine and its expiry exactly where they stood. Until then the opener shows the commanded travel, so a read or a delivery inside that
+       * gap answers what HomeKit was shown rather than the evidence the door has not yet moved from.
        */
       if(duration > 0) {
 
+        this.#enterDoorTransition({ phase: "commanded", running, shown: next });
         service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.#renderedTransition(next));
       }
 
@@ -1520,14 +1557,24 @@ export class AccessHub extends AccessDevice {
           }
         }
 
-        this.#enterDoorTransition(next);
+        // The gate stands where its travel left it whether or not the stop reached it, so the halt comes back as an accepted command.
+        this.#doorCommandReturned(next, true);
 
         return;
       }
 
       // The command this write maps to on this hardware: a gate opens on its trigger and closes on the close command, both of which the shared lock command routes,
       // and a door hub's opener pulses its relay whichever direction was asked for.
-      if(!(await (isUaGate ? this.hubLockCommand(shouldClose) : this.hubDoorPulseCommand()))) {
+      const accepted = await (isUaGate ? this.hubLockCommand(shouldClose) : this.hubDoorPulseCommand());
+
+      // The command has come back, accepted or refused, which settles the travel this write commanded. A door with no travel time to model commanded no travel: it
+      // runs no machine at all and renders from the evidence instead.
+      if(duration > 0) {
+
+        this.#doorCommandReturned(next, accepted);
+      }
+
+      if(!accepted) {
 
         // Revert target state on failure.
         this.timers.schedule(() => {
@@ -1536,14 +1583,6 @@ export class AccessHub extends AccessDevice {
             shouldClose ? this.hap.Characteristic.TargetDoorState.OPEN : this.hap.Characteristic.TargetDoorState.CLOSED);
           service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, getDoorState());
         }, CHARACTERISTIC_REVERT_DELAY_MS);
-
-        return;
-      }
-
-      // The door is moving, so the machine moves with it. A door with no travel time to model runs no machine at all and renders from the evidence instead.
-      if(duration > 0) {
-
-        this.#enterDoorTransition(next);
       }
     }));
 
@@ -2278,6 +2317,15 @@ export class AccessHub extends AccessDevice {
     return (this.uda.device_type === "UGT") || this.dpsEvidence;
   }
 
+  /* Whether the main door's position reading puts it anywhere but closed. A door whose position is not reported answers no, because the lock relay it renders from
+   * otherwise says nothing about where the door is: a relock is the relay settling, not the door coming back. This is what marks an opening, and a halt that
+   * interrupted one, as having seen the door open.
+   */
+  get #positionOpen(): boolean {
+
+    return this.#positionReported && !this.isClosed(this.hkDpsState);
+  }
+
   /* Project this hub's live door state into HomeKit. The controller's door-state loop calls this once from what it finds on arrival, and again on every change the
    * client's model records.
    *
@@ -2854,6 +2902,17 @@ export class AccessHub extends AccessDevice {
     }
   }
 
+  /* The transition the machine itself runs, beneath any travel a write has shown while its command is out. Every decision about halting, direction and settling
+   * reads this rather than the field, because only the machine's own transition says how the door is moving, and typing it without the commanded kind means a
+   * reader that takes the running transition by type cannot be handed the commanded travel.
+   */
+  get #doorRunning(): DoorRunning {
+
+    const transition = this.#doorTransition;
+
+    return (transition.phase === "commanded") ? transition.running : transition;
+  }
+
   /* Which way a write moves the door, from where the machine stands, for both hardware families in one place so the direction shown can never disagree with the
    * verb dispatched.
    *
@@ -2861,33 +2920,46 @@ export class AccessHub extends AccessDevice {
    * from a standstill. A momentary operator answers to one input that carries no direction at all, so a pulse against a halted door reverses whatever travel the
    * halt interrupted, whichever direction HomeKit asked for.
    *
+   * @param running     - The transition the machine runs.
    * @param shouldClose - Whether the write asked for the closed position.
    *
    * @returns The travel the door now runs.
    */
-  #resumedDoorDirection(shouldClose: boolean): "opening" | "closing" {
+  #resumedDoorDirection(running: DoorRunning, shouldClose: boolean): "opening" | "closing" {
 
-    if((this.#doorTransition.phase === "stopped") && (this.uda.device_type !== "UGT")) {
+    if((running.phase === "stopped") && (this.uda.device_type !== "UGT")) {
 
-      return (this.#doorTransition.lastDirection === "closing") ? "opening" : "closing";
+      return (running.lastDirection === "closing") ? "opening" : "closing";
     }
 
     return shouldClose ? "closing" : "opening";
   }
 
-  /* The one place the transition phase changes: the phase and the timer that ends it move together here, so a phase can never outlive its own expiry nor an expiry
-   * outlive the phase that armed it. Registering under the key replaces whatever was armed there, which is what makes the newest travel's expiry the only live one
-   * when writes overlap.
+  /* The one place the transition changes. The expiry belongs to the transition the machine runs and follows it by identity: it is armed or cleared exactly when the
+   * running transition becomes a different object, so commanding a travel over the machine, or ending that command, never touches the expiry, while a new travel
+   * re-arms it even when it runs the same phase as the travel it replaces. Registering under the key replaces whatever was armed there, which is what makes the
+   * newest travel's expiry the only live one when writes overlap.
    *
-   * The expiry is the guaranteed way out of every travel. A reading that agrees settles one sooner, and a door nobody hears from again still comes to rest.
+   * The expiry is the guaranteed way out of every travel. A reading that shows the travel over settles one sooner, and a door nobody hears from again still comes
+   * to rest. An expiry that lands while a command is out brings the machine to rest beneath the commanded travel and renders nothing, because HomeKit is showing
+   * that travel until its command comes back.
    *
-   * @param next - The phase to enter.
+   * @param next - The transition to enter.
    */
   #enterDoorTransition(next: DoorTransition): void {
 
+    const before = this.#doorRunning;
+
     this.#doorTransition = next;
 
-    if(next.phase === "idle") {
+    const running = this.#doorRunning;
+
+    if(running === before) {
+
+      return;
+    }
+
+    if(running.phase === "idle") {
 
       this.timers.clear(DOOR_TRANSITION_TIMER_KEY);
 
@@ -2896,26 +2968,97 @@ export class AccessHub extends AccessDevice {
 
     this.timers.setTimeout(DOOR_TRANSITION_TIMER_KEY, () => {
 
-      this.#enterDoorTransition({ phase: "idle" });
+      const transition = this.#doorTransition;
+
+      this.#enterDoorTransition((transition.phase === "commanded") ? { phase: "commanded", running: { phase: "idle" }, shown: transition.shown } : { phase: "idle" });
       this.#updateGarageDoorState();
     }, this.doorTransitionDuration);
   }
 
-  /* Put the door's own state on the opener, which is the one place that service is written outside a HomeKit write of its own.
+  /* Settle the travel a write commanded, once the command behind that write has come back. Only a commanded travel still showing this write's travel is this
+   * write's to end, and the gate's halt comes back here as an accepted command.
    *
-   * A door standing still shows the evidence. A door mid-travel meets each reading against the travel it is running: a closed reading settles every travel, because
-   * a door reporting itself closed has arrived wherever it was going; an open reading settles only an opening, because a gate's position sensor reads open while
-   * the gate is still closing and a door halted mid-travel reads open until it moves again. A reading that settles nothing leaves the phase and the characteristic
-   * exactly as they were, and the travel's own expiry remains its way out.
+   * Accepted, the machine takes the travel, and the evidence is checked once against it, because a reading that already ends the travel - a close on a door
+   * already reading closed, or a closed reading delivered while the command was out - would otherwise go unanswered until the next delivery or the expiry. The
+   * check waits out the same pause a refusal's revert does: HAP stores the written target only once this write's handler has returned, and a settle made inside
+   * the handler would have its target written over. Refused, the commanded travel ends onto the transition the machine was already running, which leaves that
+   * transition and its expiry exactly where they stood.
+   *
+   * A later write's commanded travel stays shown: an accepted return beneath it hands the machine this travel, and a refused one leaves it be. A return that
+   * finds no commanded travel at all, because a re-acquire or a later write's refusal ended it, changes nothing.
+   *
+   * @param travel   - The travel the returning write showed.
+   * @param accepted - Whether the command was accepted.
    */
-  #updateGarageDoorState(): void {
+  #doorCommandReturned(travel: DoorTravel, accepted: boolean): void {
 
-    // Held while a delivery applies its readings, so the opener renders once from the finished pair rather than once per reading.
-    if(this.#doorStateApplying) {
+    const transition = this.#doorTransition;
+
+    if(transition.phase !== "commanded") {
 
       return;
     }
 
+    const shown = transition.shown === travel;
+
+    if(!accepted) {
+
+      if(shown) {
+
+        this.#enterDoorTransition(transition.running);
+      }
+
+      return;
+    }
+
+    // The machine takes the travel with the mark the position reading gives it at this return, whether the door stood open before the write or left closed while
+    // the command was out.
+    this.#markOpening(travel);
+
+    if(!shown) {
+
+      this.#enterDoorTransition({ phase: "commanded", running: travel, shown: transition.shown });
+
+      return;
+    }
+
+    this.#enterDoorTransition(travel);
+    this.timers.schedule(() => this.#updateGarageDoorState(), CHARACTERISTIC_REVERT_DELAY_MS);
+  }
+
+  /* Mark a travel that answers to an opening's mark - an opening, or a halt that interrupted one - as having seen the door open, once the position reading puts the
+   * door anywhere but closed. The mark is only ever set, because a door that has been seen open stays seen.
+   *
+   * @param travel - The travel to mark.
+   */
+  #markOpening(travel: DoorTravel): void {
+
+    if("seenOpen" in travel) {
+
+      travel.seenOpen ||= this.#positionOpen;
+    }
+  }
+
+  /* Put the door's own state on the opener, which is the one place that service is written outside a HomeKit write of its own.
+   *
+   * A door standing still shows the evidence. A door mid-travel meets each position reading against the travel it is running. A closing, or a halt that
+   * interrupted one, settles on a closed reading, because a door reporting itself closed has arrived, and waits out an open one, because a gate's position sensor
+   * reads open while the gate is still closing and a door halted mid-travel reads open until it moves again. An opening, or a halt that interrupted one, never
+   * settles on an open reading, because a position sensor reads open the moment the door leaves closed, long before it has finished opening...it settles on a
+   * closed reading once it has seen the door open, which is the door coming back. A door whose position is not reported settles no travel at all, because the
+   * relay it renders from moves with the command rather than with the door. A reading that settles nothing leaves the transition and the characteristic exactly
+   * as they were, and the travel's own expiry remains its way out.
+   */
+  #updateGarageDoorState(): void {
+
+    // Held while a delivery applies its readings, so the opener renders once from the finished pair rather than once per reading, and held while a write's command
+    // is out, so nothing inside that gap renders over the travel HomeKit was shown.
+    if(this.#doorStateApplying || (this.#doorTransition.phase === "commanded")) {
+
+      return;
+    }
+
+    const travelling: DoorRunning = this.#doorTransition;
     const service = findService({ accessory: this.accessory, serviceType: this.hap.Service.GarageDoorOpener });
 
     if(!service) {
@@ -2924,11 +3067,20 @@ export class AccessHub extends AccessDevice {
     }
 
     const evidence = this.#doorStateFromEvidence();
-    const travelling = this.#doorTransition;
 
     if(travelling.phase !== "idle") {
 
-      if((evidence.current !== this.hap.Characteristic.CurrentDoorState.CLOSED) && (travelling.phase !== "opening")) {
+      if(!this.#positionReported) {
+
+        return;
+      }
+
+      // The first position reading that puts the door anywhere but closed marks an opening, and a halt that interrupted one.
+      this.#markOpening(travelling);
+
+      const settles = (evidence.current === this.hap.Characteristic.CurrentDoorState.CLOSED) && (!("seenOpen" in travelling) || travelling.seenOpen);
+
+      if(!settles) {
 
         return;
       }
@@ -3151,7 +3303,7 @@ export class AccessHub extends AccessDevice {
     }
 
     /* One opener update per delivery, made now that both readings have landed. The opener belongs to the main door alone, and a delivery that told us nothing new
-     * has nothing to tell it either: a travel settles on a reading that moved, or on its own expiry.
+     * has nothing to tell it either: a travel settles on a reading that moved, on the one check its accepted command makes, or on its own expiry.
      */
     if(changed && !isSideDoor) {
 

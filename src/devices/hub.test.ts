@@ -79,6 +79,11 @@ const TRAVEL_SECONDS = 12;
 const TRAVEL_MS = 12000;
 const GATE_TRAVEL_MS = 5000;
 
+/* A main door whose position sensor reads open, with the relay locked. An arm about a travel and the halt of one stands its door here, so the travel it commands runs
+ * until a halt or its expiry ends it: a closing commanded on a door already reading closed is over once its command comes back.
+ */
+const STANDING_OPEN = { dps: "open", location_id: MAIN_DOOR, lock: "lock" };
+
 /* A managed hub record, with whatever the individual arm cares about layered over it.
  *
  * The configs default is an EMPTY ARRAY, which is a seeded-empty census - a record whose configuration was listed and mentioned no methods - not a rowless record.
@@ -4148,7 +4153,7 @@ test("a gate with no main door refuses an opener write and puts the characterist
   assert.equal(openerService(gate).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
-/* Close a gate, take its main door away mid-travel and write again, which halts a travel with no door for a stop to name.
+/* Close a gate standing open, take its main door away mid-travel and write again, which halts a travel with no door for a stop to name.
  *
  * @param options - The feature options the gate runs under.
  *
@@ -4156,7 +4161,7 @@ test("a gate with no main door refuses an opener write and puts the characterist
  */
 async function haltWithNoMainDoor(options: string[]): Promise<HubHarness> {
 
-  const gate = makeGate({ keepAdoptionLines: true, options });
+  const gate = makeGate({ doorState: STANDING_OPEN, keepAdoptionLines: true, options });
 
   await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
 
@@ -4189,7 +4194,7 @@ test("a gate whose main door goes mid-travel sends no stop, says why at debug le
   gate.clock.advance(GATE_TRAVEL_MS);
   await settle();
 
-  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED, "and the travel's expiry still ends it");
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN, "and the travel's expiry still ends it");
 });
 
 test("a gate whose main door goes mid-travel says nothing about the halt without debug logging", async () => {
@@ -4740,8 +4745,8 @@ test("a travel nobody confirms ends on its own timer, showing whatever the door 
 
   assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
-  // And a door halted mid-travel comes to rest the same way, on the timer the halt re-armed.
-  const halted = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  // And a door halted mid-travel comes to rest the same way, on the timer the halt re-armed, with only its relay to report from.
+  const halted = makeTravellingOpener();
 
   await writeTarget(halted, Characteristic.TargetDoorState.OPEN);
   await writeTarget(halted, Characteristic.TargetDoorState.CLOSED);
@@ -4761,7 +4766,7 @@ test("a travel nobody confirms ends on its own timer, showing whatever the door 
 test("a gate operated mid-travel is halted through the library's own stop, from either direction", async () => {
 
   // Closing, then asked to open before it arrives.
-  const closing = makeGate();
+  const closing = makeGate({ doorState: STANDING_OPEN });
 
   await writeTarget(closing, Characteristic.TargetDoorState.CLOSED);
   await writeTarget(closing, Characteristic.TargetDoorState.OPEN);
@@ -4770,7 +4775,7 @@ test("a gate operated mid-travel is halted through the library's own stop, from 
   assert.equal(openerService(closing).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
 
   // Opening, then asked to close before it arrives. The halt is the whole command: the gate is not also asked to close.
-  const opening = makeGate();
+  const opening = makeGate({ doorState: STANDING_OPEN });
 
   await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
   await writeTarget(opening, Characteristic.TargetDoorState.CLOSED);
@@ -4782,7 +4787,7 @@ test("a gate operated mid-travel is halted through the library's own stop, from 
 
 test("a gate whose client cannot carry a stop is halted all the same, and says why once", async () => {
 
-  const gate = makeGate({ options: ["Enable.Log.Debug"], reject: ["stop"] });
+  const gate = makeGate({ doorState: STANDING_OPEN, options: ["Enable.Log.Debug"], reject: ["stop"] });
 
   await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
   await writeTarget(gate, Characteristic.TargetDoorState.OPEN);
@@ -4821,6 +4826,30 @@ test("a door hub's opener halts on its own pulse, and only once that pulse comes
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
+test("a write refused part of the way into a travel leaves that travel's expiry on the schedule its own command armed", async () => {
+
+  const opener = makeTravellingOpener({ doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" }, reject: ["unlock"], rejectFrom: 2 });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+
+  await writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  // Half the travel later, a write whose pulse the controller refuses. Showing that write's travel and then ending it leave the machine's own travel running.
+  opener.clock.advance(TRAVEL_MS / 2);
+  await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+  opener.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSING, "the refusal puts the closing back on the opener");
+
+  opener.clock.advance((TRAVEL_MS / 2) - REVERT_DELAY_MS - 1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSING);
+
+  // An expiry re-armed at the refused write would still be half a travel away here.
+  opener.clock.advance(1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN, "the closing ends exactly one travel time after its own command came back");
+});
+
 test("a halted door resumes the direction its own hardware answers to: a gate the target written, a momentary operator the reverse of the interrupted travel",
   async () => {
 
@@ -4839,10 +4868,14 @@ test("a halted door resumes the direction its own hardware answers to: a gate th
     /* A gate answers to two distinct verbs, so it travels the way the write names and the render follows the verb sent. Each write below is the target that
      * disagrees with what the interrupted travel would resume, so an implementation reversing the way a momentary operator does renders the opposite.
      */
-    const opening = makeGate();
+    const opening = makeGate({ doorState: STANDING_OPEN });
 
     await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
     await writeTarget(opening, Characteristic.TargetDoorState.CLOSED);
+
+    assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED,
+      "the opening is halted before it resumes");
+
     await writeTarget(opening, Characteristic.TargetDoorState.OPEN);
 
     assert.equal(openerService(opening).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING,
@@ -4854,7 +4887,7 @@ test("a halted door resumes the direction its own hardware answers to: a gate th
     assert.equal(opening.requests.length, 0, "every one of the three goes through the library's own rail");
 
     // And the mirror: halted while closing, asked to close again.
-    const closing = makeGate();
+    const closing = makeGate({ doorState: STANDING_OPEN });
 
     await writeTarget(closing, Characteristic.TargetDoorState.CLOSED);
     await writeTarget(closing, Characteristic.TargetDoorState.OPEN);
@@ -4867,12 +4900,49 @@ test("a halted door resumes the direction its own hardware answers to: a gate th
       { options: { doorId: MAIN_DOOR }, verb: "close" } ]);
   });
 
-test("a closed reading settles every travel, and an open reading settles only an opening one", async () => {
+test("a write made while a resume's pulse is still out takes its direction from the halt the door stands in, not from the travel HomeKit was shown", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock" });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+
+  // A closing, and then the halt of it, each pulse coming back before the next write.
+  const closing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+  opener.release();
+  await closing;
+
+  const halting = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+  opener.release();
+  await halting;
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED);
+
+  // The resume's pulse goes out and stays out, and a second write lands inside its gap. The door still stands in the halt of a closing, so the pulse reverses it.
+  const resuming = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+
+  const following = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "the halt interrupted a closing, so this pulse opens the door whichever way it was asked");
+
+  opener.release();
+  await Promise.all([ resuming, following ]);
+
+  assert.deepEqual(opener.commands.map(command => command.verb), [ "unlock", "unlock", "unlock", "unlock" ]);
+});
+
+test("a closed reading settles a closing and an opening that has seen the door open, and an open reading settles neither", async () => {
 
   const open = { dps: "open", location_id: MAIN_DOOR, lock: "unlock" };
   const closed = { dps: "close", location_id: MAIN_DOOR, lock: "unlock" };
 
-  // Opening, told the door is closed: a closed reading is the reliable one, so it settles whatever was running.
+  // Opening a door the sensor already reads open, told the door is closed: the opening has seen the door open from its start, so the reading is the door coming back.
   const openingClosed = makeTravellingOpener({ doorState: open });
 
   await writeTarget(openingClosed, Characteristic.TargetDoorState.OPEN);
@@ -4888,16 +4958,45 @@ test("a closed reading settles every travel, and an open reading settles only an
 
   assert.equal(openerService(closingClosed).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
-  // Opening, told the door is open: the reading confirms the travel it belongs to.
+  // Opening, told the door is open: a door on its way open reads open long before it has finished opening, so the reading settles nothing.
   const openingOpen = makeTravellingOpener({ doorState: closed });
 
   await writeTarget(openingOpen, Characteristic.TargetDoorState.OPEN);
   deliverDoorState(openingOpen, open);
 
-  assert.equal(openerService(openingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN);
+  assert.equal(openerService(openingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
+
+  openingOpen.clock.advance(TRAVEL_MS);
+
+  assert.equal(openerService(openingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN,
+    "the opening ends on its own timer, on the evidence it finds there");
+
+  // Opening, told the door is open and then closed: the door left closed and came back, so the closed reading ends the opening ahead of its timer.
+  const reversed = makeTravellingOpener({ doorState: closed });
+
+  await writeTarget(reversed, Characteristic.TargetDoorState.OPEN);
+  deliverDoorState(reversed, open);
+
+  assert.equal(openerService(reversed).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
+
+  deliverDoorState(reversed, closed);
+
+  assert.equal(openerService(reversed).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+
+  // Opening, told only that the relay unlocked and then relocked while the sensor still reads closed: the door has not left closed yet, so neither reading ends it.
+  const leaving = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+
+  await writeTarget(leaving, Characteristic.TargetDoorState.OPEN);
+  deliverDoorState(leaving, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(openerService(leaving).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
+
+  deliverDoorState(leaving, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(openerService(leaving).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 
   // Closing, told the door is open: a door on its way closed reads open right up until it arrives, so the reading settles nothing.
-  const closingOpen = makeTravellingOpener({ doorState: closed });
+  const closingOpen = makeTravellingOpener({ doorState: STANDING_OPEN });
 
   await writeTarget(closingOpen, Characteristic.TargetDoorState.CLOSED);
   deliverDoorState(closingOpen, open);
@@ -4908,6 +5007,106 @@ test("a closed reading settles every travel, and an open reading settles only an
 
   assert.equal(openerService(closingOpen).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN,
     "and the travel still ends on its own timer, on the evidence it finds there");
+});
+
+test("a gate opening shows opening through its unlock, its open reading and its relock, and ends on the timer its command's return armed", async () => {
+
+  const gate = makeGate({ defer: "unlock" });
+  const current = openerService(gate).getCharacteristic(Characteristic.CurrentDoorState);
+  const writing = writeTarget(gate, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+
+  // The rail reports the gate unlocked while the command behind the write is still out, with the gate still reading closed.
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "an unlock delivered inside the gap leaves the travel HomeKit was shown");
+
+  gate.release();
+  await writing;
+
+  // Part of the way into the travel, the sensor reads the gate open, which a gate does from the moment it leaves closed.
+  gate.clock.advance(GATE_TRAVEL_MS / 2);
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "the open reading ends nothing");
+
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "and neither does the relock while the gate reads open");
+
+  // The open reading marked the opening without re-arming its timer, so the travel ends exactly the gate's travel time after its command came back.
+  gate.clock.advance((GATE_TRAVEL_MS / 2) - 1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING);
+
+  gate.clock.advance(1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN);
+});
+
+test("an opener with no position sensor runs every travel to its timer, because the relay says nothing about where the door is: an opening through its unlock " +
+  "and relock", async () => {
+
+  const opener = makeTravellingOpener({ doorState: { location_id: MAIN_DOOR, lock: "lock" } });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+
+  await writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+  deliverDoorState(opener, { location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "the relay's unlock ends nothing");
+
+  deliverDoorState(opener, { location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "and neither does its relock");
+
+  opener.clock.advance(TRAVEL_MS - 1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING);
+
+  opener.clock.advance(1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED, "the expiry shows what the relay reports by then");
+});
+
+test("an opener with no position sensor runs a closing and a halt to their timer through a relock of its relay", async () => {
+
+  // The relay reads unlocked when the close is written, so its relock is the reading a door with no position sensor would otherwise take for the door arriving.
+  const closing = makeTravellingOpener({ doorState: { location_id: MAIN_DOOR, lock: "unlock" } });
+  const closingState = openerService(closing).getCharacteristic(Characteristic.CurrentDoorState);
+
+  await writeTarget(closing, Characteristic.TargetDoorState.CLOSED);
+  closing.clock.advance(REVERT_DELAY_MS);
+  deliverDoorState(closing, { location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(closingState.value, Characteristic.CurrentDoorState.CLOSING, "the relay's relock ends nothing");
+
+  closing.clock.advance(TRAVEL_MS - REVERT_DELAY_MS - 1);
+
+  assert.equal(closingState.value, Characteristic.CurrentDoorState.CLOSING);
+
+  closing.clock.advance(1);
+
+  assert.equal(closingState.value, Characteristic.CurrentDoorState.CLOSED, "the expiry shows what the relay reports by then");
+
+  // The same door halted on its way closed waits out the relock the same way.
+  const halted = makeTravellingOpener({ doorState: { location_id: MAIN_DOOR, lock: "unlock" } });
+  const haltedState = openerService(halted).getCharacteristic(Characteristic.CurrentDoorState);
+
+  await writeTarget(halted, Characteristic.TargetDoorState.CLOSED);
+  await writeTarget(halted, Characteristic.TargetDoorState.OPEN);
+  halted.clock.advance(REVERT_DELAY_MS);
+  deliverDoorState(halted, { location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(haltedState.value, Characteristic.CurrentDoorState.STOPPED, "and neither does it end a halt");
+
+  halted.clock.advance(TRAVEL_MS - REVERT_DELAY_MS - 1);
+
+  assert.equal(haltedState.value, Characteristic.CurrentDoorState.STOPPED);
+
+  halted.clock.advance(1);
+
+  assert.equal(haltedState.value, Characteristic.CurrentDoorState.CLOSED);
 });
 
 test("a halted door settles on a closed reading and waits out an open one", async () => {
@@ -4925,14 +5124,41 @@ test("a halted door settles on a closed reading and waits out an open one", asyn
   assert.equal(openerService(settling).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 
   // Halted, then told the door is open: a door standing part-way reads open, which says nothing about whether it is still halted.
-  const waiting = makeTravellingOpener({ doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  const waiting = makeTravellingOpener({ doorState: STANDING_OPEN });
 
-  await writeTarget(waiting, Characteristic.TargetDoorState.OPEN);
   await writeTarget(waiting, Characteristic.TargetDoorState.CLOSED);
+  await writeTarget(waiting, Characteristic.TargetDoorState.OPEN);
 
-  deliverDoorState(waiting, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+  deliverDoorState(waiting, { dps: "open", location_id: MAIN_DOOR, lock: "unlock" });
 
   assert.equal(openerService(waiting).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.STOPPED);
+});
+
+test("a gate halted on its way open waits out a closed reading until it has been seen open, and only then settles on one", async () => {
+
+  // The gate's position still reads closed when the halt lands, which is how a gate halted early in its opening stands while its position sensor lags the motion.
+  const gate = makeGate();
+  const current = openerService(gate).getCharacteristic(Characteristic.CurrentDoorState);
+
+  await writeTarget(gate, Characteristic.TargetDoorState.OPEN);
+  await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
+  gate.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED, "the check the halt's return makes finds the gate still reading closed, and ends nothing");
+
+  // The rail reports the gate relocked with its position still closed, which is a reading that moved and still says nothing about where the gate stands.
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED, "a closed reading ends nothing before the gate has been seen open");
+
+  // Once the gate has been seen open, a closed reading is the gate coming back.
+  deliverDoorState(gate, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED);
+
+  deliverDoorState(gate, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED);
 });
 
 test("a halted door whose sensor says nothing new still comes to rest on its own timer", async () => {
@@ -4971,13 +5197,13 @@ test("a door with no travel time to model renders instantly, and a UA Gate falls
   const gate = makeGate();
   const gateService = openerService(gate);
 
-  await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
+  await writeTarget(gate, Characteristic.TargetDoorState.OPEN);
 
-  assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
+  assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING);
 
   gate.clock.advance(GATE_TRAVEL_MS - 1);
 
-  assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING,
+  assert.equal(gateService.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPENING,
     "an unconfigured gate travels for the window that hardware is given");
 
   gate.clock.advance(1);
@@ -5086,6 +5312,59 @@ test("the travel time is read at the write rather than captured when the hub is 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
 });
 
+test("a write made while a halt's pulse is still out halts again, because it decides from the travel the controller has confirmed", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: STANDING_OPEN });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+  const closing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+  opener.release();
+  await closing;
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSING);
+
+  // The halt's pulse goes out, and a second write lands before it comes back. The machine is still running the confirmed closing, so that write halts it too.
+  const halting = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+
+  const following = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED, "a write inside the halt's gap halts the confirmed closing rather than resuming it");
+
+  opener.release();
+  await Promise.all([ halting, following ]);
+});
+
+test("a halt carries its opening's mark, so a halted opening already seen open settles on a closed reading that arrives while the halt is out", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+  const opening = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+  opener.release();
+  await opening;
+
+  // The sensor reads the door open, which marks the opening.
+  deliverDoorState(opener, { dps: "open", location_id: MAIN_DOOR, lock: "lock" });
+
+  const halting = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+
+  // The door comes back closed while the halt's pulse is out, and the halt that inherited the mark settles on it once its command returns.
+  deliverDoorState(opener, { dps: "close", location_id: MAIN_DOOR, lock: "lock" });
+  opener.release();
+  await halting;
+  opener.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED);
+});
+
 test("the opener shows the travel before the command behind it settles, and the machine takes only once it has", async () => {
 
   const opener = makeTravellingOpener({ defer: "unlock" });
@@ -5113,6 +5392,117 @@ test("the opener shows the travel before the command behind it settles, and the 
   opener.clock.advance(1);
 
   assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+});
+
+test("a read or a delivery while the opener's command is out answers the travel HomeKit was shown rather than the evidence", async () => {
+
+  // The sensor reads the door closed, which is what the evidence answers until the door moves.
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+  const writing = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+
+  assert.equal(await triggerGet(current), Characteristic.CurrentDoorState.OPENING, "a HomeKit read inside the gap answers the travel it was shown");
+
+  // The relay's unlock arrives while the command is still out, with the position unchanged.
+  deliverDoorState(opener, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING, "and a delivery inside the gap leaves it there");
+
+  opener.release();
+  await writing;
+});
+
+test("a close on a door already reading closed shows closing while its command is out, and settles once that command comes back", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "close", location_id: MAIN_DOOR, lock: "lock" } });
+  const service = openerService(opener);
+  const writing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+
+  assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSING);
+
+  opener.release();
+  await writing;
+  opener.clock.advance(REVERT_DELAY_MS);
+
+  // The door read closed before the command went out and reads closed still, so the closing is over the moment the command is accepted.
+  assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+  assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED);
+});
+
+test("a door that reads closed while its close command is out settles once that command comes back, rather than on its timer", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
+  const current = openerService(opener).getCharacteristic(Characteristic.CurrentDoorState);
+  const writing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+
+  // The closed reading lands inside the gap, which leaves the closing HomeKit was shown.
+  deliverDoorState(opener, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSING);
+
+  opener.release();
+  await writing;
+  opener.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED, "the accepted command checks the reading it found waiting");
+});
+
+test("an expiry inside a halt's gap leaves the halt shown, and the halt runs its own timer from the moment its stop comes back", async () => {
+
+  const gate = makeGate({ defer: "stop", doorState: STANDING_OPEN });
+  const current = openerService(gate).getCharacteristic(Characteristic.CurrentDoorState);
+
+  // The closing's command comes back at once, and the halt is written a second before the closing would expire, its stop staying out past that expiry.
+  await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
+  gate.clock.advance(GATE_TRAVEL_MS - 1000);
+
+  const halting = writeTarget(gate, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+  gate.clock.advance(1000);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED, "the closing's expiry renders nothing over the halt HomeKit was shown");
+
+  gate.release();
+  await halting;
+  gate.clock.advance(GATE_TRAVEL_MS - 1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.STOPPED);
+
+  gate.clock.advance(1);
+
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN);
+});
+
+test("a halt written as open that settles on a closed reading at its return leaves the target closed beside the closed door", async () => {
+
+  const opener = makeTravellingOpener({ defer: "unlock", doorState: { dps: "open", location_id: MAIN_DOOR, lock: "unlock" } });
+  const service = openerService(opener);
+  const closing = writeTarget(opener, Characteristic.TargetDoorState.CLOSED);
+
+  await settle();
+  opener.release();
+  await closing;
+
+  // The halt is written as open, which is the target HAP stores once the write's handler has returned, and the door reports itself closed while the halt's pulse
+  // is still out.
+  const halting = writeTarget(opener, Characteristic.TargetDoorState.OPEN);
+
+  await settle();
+  deliverDoorState(opener, { dps: "close", location_id: MAIN_DOOR, lock: "unlock" });
+  opener.release();
+  await halting;
+  opener.clock.advance(REVERT_DELAY_MS);
+
+  assert.equal(service.getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.CLOSED);
+  assert.equal(service.getCharacteristic(Characteristic.TargetDoorState).value, Characteristic.TargetDoorState.CLOSED,
+    "the target the check settles on lands after HAP's own store of the written one");
 });
 
 // A doorbell ring on this hub's reader, naming the door guards the controller called, in the shape the wire sends it.
