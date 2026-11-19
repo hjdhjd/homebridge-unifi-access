@@ -161,7 +161,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
      * official API's adopted inventory and answers those devices with no console identity to lead with, since the topology and the controller document both live
      * behind the Access application's own endpoints, which a token never reaches. A failure answers its reason, under a tag of its own when the controller's TLS
      * certificate did not verify, so the page can name what to change rather than only repeating unifi-access's sentence. Tagging the outcome is what lets the
-     * browser explain that door-level accessories still need credentials without ever presenting a working controller as broken.
+     * browser explain what credentials add to a token-only controller without ever presenting a working controller as broken.
      *
      * Every success also says whether the controller refused an API token supplied beside the credentials, read from the capability map the library established at
      * connect: a client holding both identities connects on the credentials alone when the controller will not honor the token, and the settings panel is where the
@@ -221,8 +221,7 @@ class PluginUiServer extends HomebridgePluginUiServer {
 
           /* No controller information document means a token-only client: that document and the device topology both live behind the Access application's own
            * endpoints, which a token never reaches. The official API answers the adopted inventory regardless, so this arm lists the REAL devices rather than an
-           * empty set - which is what lets a token-only user configure per-device options in the very keyspace the runtime resolves, ready the moment credentials
-           * are added.
+           * empty set - which is what lets a token-only user configure per-device options in the very keyspace the runtime resolves.
            *
            * The controller leads the list here exactly as it does below, keyed by the same function the runtime keys its controller-scope reads by, so an option
            * the user sets on this page's controller entry is read back at runtime under the name it was written under. The official surface answers no console

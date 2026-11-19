@@ -942,8 +942,7 @@ const mountControllerEditor = ({ collapsible = false, container, heading, helper
 /* The card the framework's connection-error view hosts, paired with the mount it belongs to, or null before the first error render.
  *
  * This is the one path that reaches a controller the page has no device list for, and those are exactly the controllers a user most needs to fix or remove: a wrong
- * password, a changed address, a console that is off, and the healthy token-only controller whose doors need a local user's credentials before they can be
- * configured.
+ * password, a changed address, or a console that is off.
  */
 let errorPanel = null;
 

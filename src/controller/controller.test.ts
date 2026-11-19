@@ -2512,8 +2512,8 @@ test("with webhooks on but no published API to register through, a controller sa
 
   await harness.run();
 
-  assert.ok(harness.lines.some(line => line.startsWith("warn: ") && line.includes("Webhooks require an API token with webhook permissions for this controller.")),
-    "the reason must be named, and warned rather than mentioned in passing");
+  assert.ok(harness.lines.some(line => line.startsWith("warn: ") && line.includes("Webhooks require an API token that this controller accepts, with permission to view " +
+    "doors and to view and edit webhooks.")), "the reason must be named, and warned rather than mentioned in passing");
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.listenerRequests, 0);
 });
@@ -2815,7 +2815,7 @@ test("a token that cannot manage endpoints is told what to grant, whichever way 
 
 // The permissions warn exactly as the controller composes it, so an arm about the rendered failure reads the whole sentence rather than a fragment of it.
 const permissionsWarn = (name: string, rendered: string): string => "warn: " + name + ": The API token cannot manage webhook endpoints (" + rendered +
-  "). Grant it webhook permissions, or register " + WEBHOOK_URL + " with the ufa command line tool and the plugin will use it.";
+  "). Grant it permission to view and edit webhooks, or register " + WEBHOOK_URL + " with the ufa command line tool and the plugin will use it.";
 
 test("a webhook refusal carries the controller's own diagnostic, says nothing twice, and reads as one sentence without one", async (t) => {
 

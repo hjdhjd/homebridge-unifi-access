@@ -73,8 +73,8 @@
   <div class="mx-auto text-start" style="width: 90%;">
     <p class="mb-2">Welcome to <strong>homebridge-unifi-access</strong>. To get started:</p>
     <ol>
-      <li>Decide how this plugin should sign in to your UniFi Access console. A <strong>local user</strong> account unlocks your doors and devices as HomeKit accessories; an <strong>API token</strong> on its own reaches the published Access API and is enough to validate a connection, but no door-level accessories are created without a local user's credentials. You can configure both.</li>
-      <li>Create a <strong>local user</strong> for this plugin from the <i>Admins &amp; Users</i> section of your UniFi console webUI, if you don't already have one. Ubiquiti.com/UI.com cloud accounts are not supported.</li>
+      <li>Decide how HBUA should sign in to your UniFi Access console. A <strong>local user</strong> account or an <strong>API token</strong> on its own brings your doors and devices into HomeKit. A token adds webhooks and unlock attribution, and a local user adds the console's own details, such as its name and uptime. You can configure both.</li>
+      <li>If you're signing in with a <strong>local user</strong>, create one for HBUA from the <i>Admins &amp; Users</i> section of your UniFi console webUI, if you don't already have one. Ubiquiti.com/UI.com cloud accounts are not supported.</li>
       <li>Enter your UniFi Access controller's address and that sign-in below.</li>
     </ol>
     <!-- Where the controller login card mounts. The address and a sign-in are the plugin's whole requirement, so the card leads the page and carries a validation

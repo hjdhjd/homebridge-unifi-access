@@ -565,7 +565,7 @@ export class AccessController {
       // Enabled, but this controller has no published API to register through, so there is nothing to arrange and one line says why.
       if(!official) {
 
-        this.log.warn("Webhooks require an API token with webhook permissions for this controller.");
+        this.log.warn("Webhooks require an API token that this controller accepts, with permission to view doors and to view and edit webhooks.");
 
         return;
       }
@@ -699,8 +699,8 @@ export class AccessController {
 
       if(isPrivilegeRefusal(error)) {
 
-        this.log.warn("The API token cannot manage webhook endpoints (%s). Grant it webhook permissions, or register %s with the ufa command line tool and the " +
-          "plugin will use it.", renderWebhookFailure(error), url);
+        this.log.warn("The API token cannot manage webhook endpoints (%s). Grant it permission to view and edit webhooks, or register %s with the ufa command line " +
+          "tool and the plugin will use it.", renderWebhookFailure(error), url);
       } else if((error instanceof TypeError) || isHbpuAbortError(error)) {
 
         /* The listener refused, and its own message names the cause. A TypeError is the listener refusing a path already routed, or an option it was

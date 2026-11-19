@@ -40,7 +40,7 @@ For the more technically inclined - this plugin has continued to pioneer the Hom
 
 - **Doors presented the way you expect.** Any door can be a lock or a garage door opener in HomeKit, and a garage door opener shows real opening, closing, and stopped states backed by the door position sensor. Accessories tell the truth about availability: while a controller or a device cannot be reached, HomeKit shows it as Not Responding rather than a stale reading.
 
-- **API token support.** Configure a controller with an API token and this plugin works with the official Access API. A token on its own is enough to bring your doors into HomeKit, and it unlocks webhooks, so you can see who unlocked a door and how in the Homebridge log and over MQTT, and unlock attribution, so doors unlocked through HomeKit show as *Homebridge* in the Access activity history.
+- **API token support.** Configure a controller with an API token and this plugin works with the official Access API. A token on its own is enough to bring your doors into HomeKit, and it unlocks webhooks, so you can see who unlocked a door and how in HBUA's log and over MQTT, and unlock attribution, so doors unlocked through HomeKit show as *Homebridge* in the Access activity history.
 
 - **Support for multiple controllers.** This plugin can support multiple UniFi Access controllers. If you have more than one controller, it's easy to add them to this plugin, and integrate them seamlessly into HomeKit.
 
@@ -78,8 +78,15 @@ For the more technically inclined - this plugin has continued to pioneer the Hom
 >       * Under the admin's role, make sure the new user has access to the ***UniFi Access*** application.
 >     * An ***API token*** for the official Access API. A token is what enables webhooks and unlock attribution. To create one:
 >       * Open the ***UniFi Access*** application on your console.
->       * Go to ***Settings > General*** and select ***API Token***.
->       * Click ***Create New***, give the token a name and validity period, and select its permission scopes. Grant the scopes for the features you want; if the token lacks a permission this plugin needs, the Homebridge log will tell you.
+>       * Go to ***Settings > General > Advanced*** and select ***API Token***.
+>       * Click ***Create New***, give the token a name and validity period, and select its permission scopes. Every token needs permission to view doors (`view:space`). Then add the permissions for the features you want:
+>         * Webhooks, which report who unlocked a door and how: view and edit webhooks (`view:webhook`, `edit:webhook`).
+>         * Controlling doors through the token, so unlocks show as *Homebridge* in the Access activity history, and stopping a UA Gate mid-travel: edit doors (`edit:space`). A controller configured with a token alone needs this to unlock, lock or close anything.
+>         * The access method switches: view and edit devices (`view:device`, `edit:device`).
+>         * The doorbell trigger: edit devices (`edit:device`).
+>         * A controller configured with a token alone: view devices (`view:device`).
+>         * Door guard names in the plugin's settings: view users (`view:user`).
+>       * If the token lacks a permission a feature needs, HBUA's log will tell you, except for door guard names, which show as identifiers instead.
 >       * Copy the token when it is shown. It is displayed only once, so store it somewhere safe before closing the dialog.
 >
 > ### Getting Started
