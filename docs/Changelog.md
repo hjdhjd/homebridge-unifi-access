@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.1.1 (2026-11-19)
+  * Improvement: when a controller's TLS certificate fails verification, the settings webUI and the log now tell you what to change.
+  * Fix: opening a UA Gate from HomeKit now shows Opening for the full transition duration you've set, with no brief Closed or closed notification along the way. Hubs you present as a garage door opener get the same fix. Thanks to @tdabasinskas for the detailed report.
+  * Fix: hubs presented as a garage door opener with a door position sensor no longer act on a command for the position the door is already in...so an automation that closes your garage can't open it when it's already closed.
+  * Housekeeping.
+
 ## 2.1.0 (2026-11-06)
   * **Note for UA Gate owners: I'd love your help finishing UA Gate support.** I don't have a UA Gate to test with, so please share what you see on the #unifi-access channel on the Homebridge Discord, or open an issue if you prefer: whether the main and side doors HBUA names at startup match your gate, whether HomeKit shows your gate's lock state and its opening and closing correctly (including when you use a remote), roughly how long your gate takes to fully open, and, on a double driveway gate, whether opening it from HomeKit moves both sides.
   * **Behavior change: HBUA now tells a UA Gate's main and side doors apart by the port each one is connected to: port 1 is the main door and port 2 is the side door.** On some gates the two doors trade places after you upgrade. Your accessories keep their names and places in the Home app, but each one controls the other door, and the same goes for the `lock` and `sidedoor` MQTT topics. HBUA names each door in the log at startup and warns you if it has to guess...if you have a UA Gate, please check its controls, scenes, and automations after upgrading.
