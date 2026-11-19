@@ -910,7 +910,7 @@ export class AccessStatusFeed {
 
       try {
 
-        for await (const _value of loop) {
+        for await(const _value of loop) {
 
           refreshRows();
         }
@@ -945,7 +945,7 @@ export class AccessStatusFeed {
 
         try {
 
-          for await (const record of client.state.observe((state) => deviceRecord(deviceId, state), { signal })) {
+          for await(const record of client.state.observe((state) => deviceRecord(deviceId, state), { signal })) {
 
             const online = recordAvailable(record);
 

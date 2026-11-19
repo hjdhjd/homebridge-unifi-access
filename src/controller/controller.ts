@@ -918,7 +918,7 @@ export class AccessController {
 
       this.#reconcileMembership(state);
 
-      for await (const ids of this.client.state.observe(this.#membershipSelector, { signal: this.signal })) {
+      for await(const ids of this.client.state.observe(this.#membershipSelector, { signal: this.signal })) {
 
         this.#reconcileMembership(this.client.state.snapshot(), ids);
       }
@@ -941,7 +941,7 @@ export class AccessController {
 
       this.#deliverDoorStates();
 
-      for await (const _doorStates of this.client.state.observe(selectDoorStates, { signal: this.signal })) {
+      for await(const _doorStates of this.client.state.observe(selectDoorStates, { signal: this.signal })) {
 
         this.#deliverDoorStates();
       }
@@ -988,7 +988,7 @@ export class AccessController {
 
     this.spawnLoop("the controller connection", async () => {
 
-      for await (const transition of this.client.connection.observe({ signal: this.signal })) {
+      for await(const transition of this.client.connection.observe({ signal: this.signal })) {
 
         this.log.debug("Controller connection: %s -> %s.", transition.from, transition.to);
 

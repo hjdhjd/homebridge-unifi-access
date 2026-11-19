@@ -373,7 +373,7 @@ function makeHub(options: HubOptions = {}): HubHarness {
 
       if(store) {
 
-        for await (const _entry of store.observe((state) => state.devices.get(record.unique_id), opts)) {
+        for await(const _entry of store.observe((state) => state.devices.get(record.unique_id), opts)) {
 
           yield projection;
         }

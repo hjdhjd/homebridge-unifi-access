@@ -240,7 +240,7 @@ export abstract class AccessDevice extends AccessBase {
      */
     this.controller.spawnLoop(this.name + " updates", async () => {
 
-      for await (const projection of this.projection.observe({ signal: this.signal })) {
+      for await(const projection of this.projection.observe({ signal: this.signal })) {
 
         // State availability on this device's own topic, the one statement of it wherever it is triggered from.
         this.publishAvailability();

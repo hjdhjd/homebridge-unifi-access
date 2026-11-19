@@ -340,7 +340,7 @@ function connectionDouble(): { connection: { isHealthy: boolean; isLost: boolean
 
         try {
 
-          for await (const [transition] of on(bus, "transition", { signal: opts.signal })) {
+          for await(const [transition] of on(bus, "transition", { signal: opts.signal })) {
 
             yield transition as { from: string; to: string };
           }
