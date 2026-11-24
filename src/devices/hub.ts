@@ -4,7 +4,7 @@
  */
 import { ACCESS_DEVICE_UPDATE_EVENT, ACCESS_REMOTE_UNLOCK_EVENT } from "../controller/events.ts";
 import { ACCESS_UNLOCK_ACTOR, ACCESS_WEBHOOK_EVENTS } from "../settings.ts";
-import { AccessAbortedError, AccessCapabilityError, AccessClient, AccessDeclinedError, accessMethodStates, deviceAccessMethodStates, isHub, isReader,
+import { AccessAbortedError, AccessCapabilityError, AccessClient, AccessDeclinedError, accessMethodStates, deviceAccessMethodStates, isHub, isPlainObject, isReader,
   isTamperCapable, portBindings, tamperState, terminalInput } from "unifi-access";
 import type { AccessDevice as AccessDeviceProjection, AccessDoorStateEntry, AccessEventPacket, AccessHub as AccessHubProjection, AccessMethod, AccessStateDevice,
   AccessStateDoor, AccessTerminalInput, AccessTerminalInputFacts } from "unifi-access";
@@ -200,6 +200,7 @@ export class AccessHub extends AccessDevice {
   #doorStateApplying: boolean;
   // Where the main door's travel stands. Only the main door has an opener, so only the main door runs a machine.
   #doorTransition: DoorTransition;
+  #lastGateAction?: { closing: boolean; published: number };
   // The access method values the last applied configuration-row fold produced, or undefined until one has applied. Holding it is what lets a record restating
   // rows we have already folded be told from one carrying news.
   #foldedConfigValues: Map<AccessMethod, boolean> | undefined;
@@ -703,6 +704,11 @@ export class AccessHub extends AccessDevice {
      * packet handler leaves this event alone, which is what keeps the rail's second emission under this hub's own identity from being a second delivery.
      */
     this.registerListener(ACCESS_REMOTE_UNLOCK_EVENT, (packet) => this.handleRemoteUnlock(packet));
+
+    if(this.uda.device_type === "UGT") {
+
+      this.registerListener("access.logs.insights.add", (packet) => this.handleGateAction(packet));
+    }
 
     /* State this device's availability once adoption is complete. Neither trigger that restates it reaches a device at adoption: the record loop yields on the first
      * change after it starts rather than on the record it starts from, and the controller's connection observer walks on a transition alone, so a device adopted
@@ -3320,6 +3326,58 @@ export class AccessHub extends AccessDevice {
 
       this.#updateGarageDoorState();
     }
+  }
+
+  // Access 4.3 reports both gate directions as remote_unlock. Its activity record identifies the action and the door it actually targeted.
+  private handleGateAction({ data }: AccessEventPacket): void {
+
+    const { event_type: eventType, metadata, published, result } = data ?? {};
+
+    if((eventType !== "access.door.unlock") || (result !== "ACCESS") || (typeof published !== "number") || !isPlainObject(metadata)) {
+
+      return;
+    }
+
+    const { authentication, door } = metadata;
+
+    if(!isPlainObject(door) || (typeof door["id"] !== "string") || (this.#ownedDoor(door["id"]) !== "main") || !isPlainObject(authentication)) {
+
+      return;
+    }
+
+    const provider = authentication["credential_provider"];
+    const closing = provider === "remote_through_uah_close";
+
+    if(!closing && (provider !== "remote_through_uah")) {
+
+      return;
+    }
+
+    const last = this.#lastGateAction;
+
+    if(last && ((published < last.published) || ((published === last.published) && (last.closing === closing)))) {
+
+      return;
+    }
+
+    this.#lastGateAction = { closing, published };
+
+    const service = findService({ accessory: this.accessory, serviceType: this.hap.Service.GarageDoorOpener });
+    const phase = closing ? "closing" : "opening";
+
+    // A HomeKit command may already be showing this travel. Its echo must neither send a command nor restart the timer.
+    if(!service || (this.#doorTransition.phase === "commanded") || (this.#doorTransition.phase === phase) ||
+      ((this.#doorTransition.phase === "idle") && (closing !== this.#positionOpen))) {
+
+      return;
+    }
+
+    const travel: DoorTravel = closing ? { phase: "closing" } : { phase: "opening", seenOpen: this.#positionOpen };
+
+    this.#enterDoorTransition(travel);
+    service.updateCharacteristic(this.hap.Characteristic.TargetDoorState, closing ? this.hap.Characteristic.TargetDoorState.CLOSED :
+      this.hap.Characteristic.TargetDoorState.OPEN);
+    service.updateCharacteristic(this.hap.Characteristic.CurrentDoorState, this.#renderedTransition(travel));
   }
 
   // A remote unlock the controller reported, applied to the door the packet names.
