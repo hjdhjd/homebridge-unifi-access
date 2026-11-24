@@ -3323,6 +3323,57 @@ test("a remote unlock opens the same window a command of ours does, on either of
   assert.equal(lineCount(gate, "Side door locked."), 1);
 });
 
+// Only the fields used from an Access 4.3.24 activity record. The generic remote_unlock notification accompanies both directions.
+function gateActivity(gate: HubHarness, provider: string, published: number, doorId = MAIN_DOOR, result = "ACCESS"): void {
+
+  gate.emit("access.logs.insights.add", { data: { event_type: "access.door.unlock",
+    metadata: { authentication: { credential_provider: provider }, door: { id: doorId } }, published, result } });
+}
+
+test("a controller-operated gate shows travel on its main opener without issuing a motor command", () => {
+
+  const closed = { dps: "close", location_id: MAIN_DOOR, lock: "lock" };
+  const gate = makeGate({ doorState: closed });
+  const current = openerService(gate).getCharacteristic(Characteristic.CurrentDoorState);
+  const target = openerService(gate).getCharacteristic(Characteristic.TargetDoorState);
+
+  gateActivity(gate, "remote_through_uah", 1, SIDE_DOOR);
+  gateActivity(gate, "remote_through_uah", 2, MAIN_DOOR, "DENIED");
+  gateActivity(gate, "unknown", 3);
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED);
+
+  gateActivity(gate, "remote_through_uah", 4);
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPENING);
+  assert.equal(target.value, Characteristic.TargetDoorState.OPEN);
+  deliverDoorState(gate, STANDING_OPEN);
+  gate.clock.advance(GATE_TRAVEL_MS);
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN);
+
+  gateActivity(gate, "remote_through_uah_close", 5);
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSING);
+  assert.equal(target.value, Characteristic.TargetDoorState.CLOSED);
+  gate.clock.advance(GATE_TRAVEL_MS);
+  gateActivity(gate, "remote_through_uah_close", 5);
+  assert.equal(current.value, Characteristic.CurrentDoorState.OPEN, "a reversed close expires onto the sensor, even if its activity is redelivered");
+
+  gateActivity(gate, "remote_through_uah_close", 6);
+  deliverDoorState(gate, closed);
+  assert.equal(current.value, Characteristic.CurrentDoorState.CLOSED);
+  assert.deepEqual(gate.commands, []);
+});
+
+test("an activity echo of a HomeKit close leaves its original travel timer running", async () => {
+
+  const gate = makeGate({ doorState: STANDING_OPEN });
+
+  await writeTarget(gate, Characteristic.TargetDoorState.CLOSED);
+  gate.clock.advance(GATE_TRAVEL_MS - 1);
+  gateActivity(gate, "remote_through_uah_close", 1);
+  gate.clock.advance(1);
+  assert.equal(openerService(gate).getCharacteristic(Characteristic.CurrentDoorState).value, Characteristic.CurrentDoorState.OPEN);
+  assert.equal(gate.commands.length, 1);
+});
+
 test("a gate ignores a remote unlock naming a door it does not drive", () => {
 
   const gate = makeGate();
